@@ -154,3 +154,7 @@ export function syncBotCommands() {
 export function sendReply(payload) {
   return api.post('/admin/api/reply', payload).then((r) => r.data);
 }
+
+export function fetchHistory(params = {}) {
+  return api.get('/admin/api/history', { params }).then((r) => r.data);
+}

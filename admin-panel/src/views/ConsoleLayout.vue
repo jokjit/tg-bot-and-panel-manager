@@ -159,6 +159,7 @@ import {
   SearchOutline,
   CheckmarkCircleOutline,
   SettingsOutline,
+  TimeOutline,
 } from '@vicons/ionicons5';
 import { adminStore, clearAuthState, setLoginState, setStatusData } from '../stores/admin';
 import { fetchStatus, logout } from '../services/api';
@@ -184,6 +185,7 @@ const menuOptions = computed(() => [
   { label: t('app.admins'), key: '/admins', icon: renderIcon(PersonCircleOutline) },
   { label: t('app.keywords'), key: '/keywords', icon: renderIcon(SearchOutline) },
   { label: t('app.messages'), key: '/messages', icon: renderIcon(MailOutline) },
+  { label: t('app.history'), key: '/history', icon: renderIcon(TimeOutline) },
   { label: t('app.password'), key: '/password', icon: renderIcon(KeyOutline) },
   { label: t('app.settings'), key: '/settings', icon: renderIcon(SettingsOutline) },
 ]);

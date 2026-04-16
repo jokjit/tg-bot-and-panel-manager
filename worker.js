@@ -94,6 +94,25 @@ export default {
         );
       }
 
+      if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/history`) {
+        await requireHttpAdmin(request, runtimeEnv);
+        const userIdRaw = url.searchParams.get('userId');
+        const limit = parseLimit(url.searchParams.get('limit'), 50);
+        const userId = userIdRaw ? toChatId(userIdRaw) : null;
+        return json(
+          {
+            ok: true,
+            items: await listMessageHistory(runtimeEnv, {
+              userId,
+              limit,
+            }),
+          },
+          200,
+          {},
+          request,
+        );
+      }
+
       if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/avatar`) {
         await requireHttpAdmin(request, runtimeEnv);
         return await handleTelegramAvatarProxy(request, runtimeEnv);
@@ -466,6 +485,19 @@ async function handleUserMessage(message, env, adminChatId) {
       text: env.WELCOME_TEXT || DEFAULT_WELCOME,
     });
   }
+
+  await saveMessageHistory(env, {
+    userId: Number(message.chat.id),
+    chatType: message.chat?.type || 'private',
+    topicId: messageThreadId || null,
+    telegramMessageId: Number(message.message_id) || null,
+    direction: 'user_to_admin',
+    senderRole: 'user',
+    messageType: detectMessageType(message),
+    textContent: extractMessageText(message),
+    mediaFileId: extractPrimaryMediaFileId(message),
+    rawPayload: message,
+  });
 }
 
 async function handleAdminMessage(message, env, adminChatId, preAuthorized = false) {
@@ -532,6 +564,19 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = fal
       chat_id: targetUserId,
       text,
     });
+
+    await saveMessageHistory(env, {
+      userId: Number(targetUserId),
+      chatType: 'private',
+      topicId: message.message_thread_id || null,
+      telegramMessageId: Number(message.message_id) || null,
+      direction: 'admin_to_user',
+      senderRole: 'admin',
+      messageType: 'text',
+      textContent: text,
+      mediaFileId: null,
+      rawPayload: message,
+    });
     return;
   }
 
@@ -540,6 +585,19 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = fal
   }
 
   await relayAdminMessageToUser(message, env, defaultTargetUserId);
+
+  await saveMessageHistory(env, {
+    userId: Number(defaultTargetUserId),
+    chatType: 'private',
+    topicId: message.message_thread_id || null,
+    telegramMessageId: Number(message.message_id) || null,
+    direction: 'admin_to_user',
+    senderRole: 'admin',
+    messageType: detectMessageType(message),
+    textContent: extractMessageText(message),
+    mediaFileId: extractPrimaryMediaFileId(message),
+    rawPayload: message,
+  });
 }
 
 async function handleAdminCommand(message, env, defaultTargetUserId) {
@@ -1553,6 +1611,7 @@ async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
     userVerificationReady: userVerificationEnabled ? Boolean(env.BOT_KV) : true,
     hasToken: Boolean(env.BOT_TOKEN),
     hasKv: Boolean(env.BOT_KV),
+    hasD1: Boolean(env.DB),
     hasAdminApiKey: Boolean(env.ADMIN_API_KEY),
     adminChatId: env.ADMIN_CHAT_ID || null,
     rootAdminIds: getRootAdminIds(env),
@@ -2283,6 +2342,126 @@ async function getRuntimeEnv(env) {
   }
 
   return runtime;
+}
+
+async function saveMessageHistory(env, entry) {
+  if (!env.DB) return;
+
+  try {
+    const userId = Number(entry.userId);
+    if (!Number.isFinite(userId)) return;
+
+    const nowIso = new Date().toISOString();
+    await env.DB.prepare(
+      `INSERT INTO conversations (user_id, chat_type, topic_id, last_message_at, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?4, ?4)
+       ON CONFLICT(user_id) DO UPDATE SET
+         chat_type = excluded.chat_type,
+         topic_id = COALESCE(excluded.topic_id, conversations.topic_id),
+         last_message_at = excluded.last_message_at,
+         updated_at = excluded.updated_at`
+    )
+      .bind(userId, entry.chatType || null, entry.topicId || null, nowIso)
+      .run();
+
+    const conversation = await env.DB.prepare('SELECT id FROM conversations WHERE user_id = ?1 LIMIT 1')
+      .bind(userId)
+      .first();
+    if (!conversation?.id) return;
+
+    await env.DB.prepare(
+      `INSERT INTO messages (
+        conversation_id, user_id, telegram_message_id, direction, sender_role, message_type,
+        text_content, media_file_id, raw_payload, created_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
+    )
+      .bind(
+        Number(conversation.id),
+        userId,
+        entry.telegramMessageId || null,
+        entry.direction,
+        entry.senderRole,
+        entry.messageType,
+        entry.textContent || null,
+        entry.mediaFileId || null,
+        safeJsonStringify(entry.rawPayload),
+        nowIso,
+      )
+      .run();
+  } catch (error) {
+    // ignore D1 write failures to avoid blocking message flow
+  }
+}
+
+async function listMessageHistory(env, options = {}) {
+  if (!env.DB) return [];
+
+  const limit = clamp(Number(options.limit) || 50, 1, MAX_LIST_LIMIT);
+  const userId = options.userId ? Number(options.userId) : null;
+  const baseSql = `SELECT
+      m.id,
+      m.user_id,
+      m.telegram_message_id,
+      m.direction,
+      m.sender_role,
+      m.message_type,
+      m.text_content,
+      m.media_file_id,
+      m.created_at,
+      c.topic_id,
+      c.chat_type
+    FROM messages m
+    INNER JOIN conversations c ON c.id = m.conversation_id`;
+
+  const statement = userId
+    ? env.DB.prepare(`${baseSql} WHERE m.user_id = ?1 ORDER BY m.created_at DESC LIMIT ?2`).bind(userId, limit)
+    : env.DB.prepare(`${baseSql} ORDER BY m.created_at DESC LIMIT ?1`).bind(limit);
+
+  const result = await statement.all();
+  return Array.isArray(result?.results) ? result.results : [];
+}
+
+function detectMessageType(message) {
+  if (typeof message?.text === 'string') return 'text';
+  if (message?.photo?.length) return 'photo';
+  if (message?.document) return 'document';
+  if (message?.video) return 'video';
+  if (message?.animation) return 'animation';
+  if (message?.audio) return 'audio';
+  if (message?.voice) return 'voice';
+  if (message?.video_note) return 'video_note';
+  if (message?.sticker) return 'sticker';
+  if (message?.contact) return 'contact';
+  if (message?.location) return 'location';
+  return 'unknown';
+}
+
+function extractMessageText(message) {
+  if (typeof message?.text === 'string') return message.text;
+  if (typeof message?.caption === 'string') return message.caption;
+  return '';
+}
+
+function extractPrimaryMediaFileId(message) {
+  if (message?.photo?.length) return message.photo[message.photo.length - 1]?.file_id || null;
+  return (
+    message?.document?.file_id ||
+    message?.video?.file_id ||
+    message?.animation?.file_id ||
+    message?.audio?.file_id ||
+    message?.voice?.file_id ||
+    message?.video_note?.file_id ||
+    message?.sticker?.file_id ||
+    null
+  );
+}
+
+function safeJsonStringify(value) {
+  try {
+    return JSON.stringify(value ?? null);
+  } catch (error) {
+    return null;
+  }
 }
 
 async function getEffectiveSystemConfig(env) {

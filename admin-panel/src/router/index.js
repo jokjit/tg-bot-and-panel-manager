@@ -8,6 +8,7 @@ import TrustView from '../views/TrustView.vue';
 import SettingsView from '../views/SettingsView.vue';
 import KeywordsView from '../views/KeywordsView.vue';
 import MessagesView from '../views/MessagesView.vue';
+import HistoryView from '../views/HistoryView.vue';
 import PasswordManageView from '../views/PasswordManageView.vue';
 import LoginView from '../views/LoginView.vue';
 import PasswordResetView from '../views/PasswordResetView.vue';
@@ -39,6 +40,7 @@ const routes = [
       { path: 'admins', name: 'admins', component: AdminsView, meta: { titleKey: 'app.admins' } },
       { path: 'keywords', name: 'keywords', component: KeywordsView, meta: { titleKey: 'app.keywords' } },
       { path: 'messages', name: 'messages', component: MessagesView, meta: { titleKey: 'app.messages' } },
+      { path: 'history', name: 'history', component: HistoryView, meta: { titleKey: 'app.history' } },
       { path: 'password', name: 'password', component: PasswordManageView, meta: { titleKey: 'app.password' } },
       { path: 'settings', name: 'settings', component: SettingsView, meta: { titleKey: 'app.settings' } },
     ],
