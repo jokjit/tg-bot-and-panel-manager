@@ -32,7 +32,7 @@
 - 这是 Cloudflare Workers 官方部署按钮。
 - Cloudflare 官方文档说明该按钮支持自动创建 KV 等资源。
 - 你的仓库仍需要保留正确的 `wrangler.toml` 配置。
-- 私密配置如 `BOT_TOKEN`、`ADMIN_API_KEY`、`ADMIN_PANEL_PASSWORD` 仍建议通过 Secret 手动填写。
+- 私密配置如 `BOT_TOKEN`、`ADMIN_CHAT_ID` 等仍建议通过 Secret 手动填写。
 
 ## 官方文档
 

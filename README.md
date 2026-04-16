@@ -196,6 +196,8 @@ npx wrangler secret put ADMIN_CHAT_ID
 
 ## 第六步：部署 Worker
 
+建议使用 `wrangler 4.45+`，以便和当前仓库的自动资源创建流程保持一致。
+
 ```bash
 npm install
 npm run deploy
