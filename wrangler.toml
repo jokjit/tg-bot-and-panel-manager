@@ -1,0 +1,32 @@
+name = "telegram-private-chatbot"
+main = "worker.js"
+compatibility_date = "2026-04-16"
+workers_dev = true
+
+# 可选：完成基础部署后，再按需绑定自定义域名。
+# routes = [
+#   { pattern = "tg.example.com/*", zone_name = "example.com" }
+# ]
+
+# 推荐：启用话题模式、首次验证、用户资料、黑白名单等能力前，先创建 KV。
+# Cloudflare 官方文档说明 Deploy to Cloudflare 按钮支持自动创建 KV，
+# 但命令行 / 手动部署时你仍需要先创建命名空间并填入 ID。
+#
+# 创建命令：
+#   wrangler kv namespace create BOT_KV
+#   wrangler kv namespace create BOT_KV --preview
+#
+# 然后取消注释并填入返回的命名空间 ID：
+# [[kv_namespaces]]
+# binding = "BOT_KV"
+# id = "<YOUR_KV_NAMESPACE_ID>"
+# preview_id = "<YOUR_KV_PREVIEW_NAMESPACE_ID>"
+
+[vars]
+WEBHOOK_PATH = "/webhook"
+PUBLIC_BASE_URL = "https://your-worker.your-subdomain.workers.dev"
+ADMIN_PANEL_URL = "https://tg-admin.example.com"
+TOPIC_MODE = "false"
+USER_VERIFICATION = "false"
+WELCOME_TEXT = "你好，欢迎使用私聊中转机器人。"
+BLOCKED_TEXT = "你已被管理员限制联系，如有需要请稍后再试。"

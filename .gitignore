@@ -1,0 +1,26 @@
+.DS_Store
+Thumbs.db
+
+# Node / frontend
+node_modules/
+admin-panel/node_modules/
+admin-panel/dist/
+npm-debug.log*
+
+# Wrangler / Cloudflare
+.wrangler/
+admin-panel/.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# OS / temp
+*.log
+*.tmp
+*.temp
+
