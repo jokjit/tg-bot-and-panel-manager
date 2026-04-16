@@ -1,0 +1,140 @@
+name: Deploy to Cloudflare
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+      ADMIN_PANEL_PASSWORD: ${{ secrets.ADMIN_PANEL_PASSWORD }}
+      WORKER_NAME: telegram-private-chatbot
+      PAGES_PROJECT_NAME: ${{ vars.PAGES_PROJECT_NAME }}
+      PUBLIC_BASE_URL: ${{ vars.PUBLIC_BASE_URL }}
+      ADMIN_PANEL_CANONICAL_HOST: ${{ vars.ADMIN_PANEL_CANONICAL_HOST }}
+      CF_PAGES_BRANCH: ${{ vars.CF_PAGES_BRANCH }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: admin-panel/package-lock.json
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for key in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID BOT_TOKEN ADMIN_CHAT_ID ADMIN_PANEL_PASSWORD; do
+            if [ -z "${!key:-}" ]; then
+              missing+=("$key")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required GitHub Secrets: ${missing[*]}"
+            exit 1
+          fi
+
+          echo "PAGES_PROJECT_NAME=${PAGES_PROJECT_NAME:-tg-admin-panel}" >> "$GITHUB_ENV"
+          echo "CF_PAGES_BRANCH=${CF_PAGES_BRANCH:-main}" >> "$GITHUB_ENV"
+
+      - name: Install root dependencies
+        run: npm install
+
+      - name: First Worker deploy
+        run: npx wrangler deploy
+
+      - name: Sync required Worker secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$BOT_TOKEN" | npx wrangler secret put BOT_TOKEN
+          printf '%s' "$ADMIN_CHAT_ID" | npx wrangler secret put ADMIN_CHAT_ID
+          printf '%s' "$ADMIN_PANEL_PASSWORD" | npx wrangler secret put ADMIN_PANEL_PASSWORD
+
+      - name: Second Worker deploy
+        run: npx wrangler deploy
+
+      - name: Resolve Worker public URL
+        id: worker-url
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "${PUBLIC_BASE_URL:-}" ]; then
+            worker_url="$PUBLIC_BASE_URL"
+          else
+            response=$(curl -fsSL \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain")
+
+            subdomain=$(printf '%s' "$response" | jq -r '.result.subdomain // empty')
+            if [ -z "$subdomain" ]; then
+              echo "::error::Unable to resolve workers.dev subdomain for this Cloudflare account."
+              echo "$response"
+              exit 1
+            fi
+
+            worker_url="https://${WORKER_NAME}.${subdomain}.workers.dev"
+          fi
+
+          echo "WORKER_BASE_URL=$worker_url" >> "$GITHUB_ENV"
+          echo "worker_url=$worker_url" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure Pages project exists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          create_output=""
+          if ! create_output=$(npx wrangler pages project create "$PAGES_PROJECT_NAME" --production-branch "$CF_PAGES_BRANCH" 2>&1); then
+            echo "$create_output"
+            if echo "$create_output" | grep -qi "already exists"; then
+              echo "Pages project already exists: $PAGES_PROJECT_NAME"
+            else
+              list_output=$(npx wrangler pages project list 2>&1 || true)
+              echo "$list_output"
+              if ! echo "$list_output" | grep -q "$PAGES_PROJECT_NAME"; then
+                echo "::error::Failed to create or detect Pages project: $PAGES_PROJECT_NAME"
+                exit 1
+              fi
+            fi
+          else
+            echo "$create_output"
+          fi
+
+      - name: Deploy admin panel
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(run deploy:panel -- --project-name "$PAGES_PROJECT_NAME" --worker-base-url "$WORKER_BASE_URL" --account-id "$CLOUDFLARE_ACCOUNT_ID" --branch "$CF_PAGES_BRANCH")
+          if [ -n "${ADMIN_PANEL_CANONICAL_HOST:-}" ]; then
+            args+=(--canonical-host "$ADMIN_PANEL_CANONICAL_HOST")
+          fi
+          npm "${args[@]}"
+
+      - name: Deployment summary
+        shell: bash
+        run: |
+          echo "Worker URL: $WORKER_BASE_URL"
+          echo "Pages project: $PAGES_PROJECT_NAME"

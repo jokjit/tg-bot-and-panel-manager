@@ -8,24 +8,13 @@ workers_dev = true
 #   { pattern = "tg.example.com/*", zone_name = "example.com" }
 # ]
 
-# 推荐：启用话题模式、首次验证、用户资料、黑白名单等能力前，先创建 KV。
-# Cloudflare 官方文档说明 Deploy to Cloudflare 按钮支持自动创建 KV，
-# 但命令行 / 手动部署时你仍需要先创建命名空间并填入 ID。
-#
-# 创建命令：
-#   wrangler kv namespace create BOT_KV
-#   wrangler kv namespace create BOT_KV --preview
-#
-# 然后取消注释并填入返回的命名空间 ID：
-# [[kv_namespaces]]
-# binding = "BOT_KV"
-# id = "<YOUR_KV_NAMESPACE_ID>"
-# preview_id = "<YOUR_KV_PREVIEW_NAMESPACE_ID>"
+# BOT_KV 用于面板密码、用户资料、话题映射、黑白名单和验证状态。
+# 在新版 Wrangler / GitHub Actions 流程中，如果未填写 ID，Cloudflare 可在部署时自动创建资源。
+[[kv_namespaces]]
+binding = "BOT_KV"
 
 [vars]
 WEBHOOK_PATH = "/webhook"
-PUBLIC_BASE_URL = "https://your-worker.your-subdomain.workers.dev"
-ADMIN_PANEL_URL = "https://tg-admin.example.com"
 TOPIC_MODE = "false"
 USER_VERIFICATION = "false"
 WELCOME_TEXT = "你好，欢迎使用私聊中转机器人。"
