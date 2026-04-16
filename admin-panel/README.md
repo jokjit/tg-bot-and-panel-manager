@@ -42,6 +42,27 @@ npm run build
 
 ## 部署到 Cloudflare Pages
 
+### 根目录一键部署脚本
+
+在仓库根目录运行：
+
+```bash
+npm run deploy:panel -- --project-name tg-admin-panel --worker-base-url https://your-worker.your-subdomain.workers.dev --canonical-host tg-admin.example.com
+```
+
+查看帮助：
+
+```bash
+npm run deploy:panel -- --help
+```
+
+这个脚本会自动：
+
+- 写入临时构建变量
+- 安装依赖
+- 构建 `admin-panel`
+- 调用 `wrangler pages deploy` 发布
+
 ### 推荐控制台配置
 
 - Framework preset：`Vue`

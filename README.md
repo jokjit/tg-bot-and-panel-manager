@@ -263,6 +263,30 @@ npm run dev
 npm run build
 ```
 
+### 一键脚本部署面板
+
+你也可以在仓库根目录直接运行下面这条命令，一次完成依赖安装、构建和 Pages 发布：
+
+```bash
+npm run deploy:panel -- --project-name tg-admin-panel --worker-base-url https://your-worker.your-subdomain.workers.dev --canonical-host tg-admin.example.com
+```
+
+常用参数：
+
+- `--project-name`：Pages 项目名，默认 `tg-admin-panel`
+- `--worker-base-url`：必填，前端请求的 Worker 地址
+- `--canonical-host`：可选，正式后台域名
+- `--branch`：可选，部署到指定分支环境
+- `--account-id`：可选，显式指定 Cloudflare 账户 ID
+
+查看脚本帮助：
+
+```bash
+npm run deploy:panel -- --help
+```
+
+> 注意：如果这个 Pages 项目还不存在，首次脚本部署通常会创建一个 Direct Upload 类型的 Pages 项目。若你计划长期使用 Git 自动部署，建议先在 Cloudflare Pages 控制台创建项目，再用这个脚本做后续发布。
+
 ### Pages 控制台推荐配置
 
 - Framework preset：`Vue`
