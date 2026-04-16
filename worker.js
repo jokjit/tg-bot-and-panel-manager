@@ -13,7 +13,7 @@ const VERIFY_FAIL_BLOCK_MS = 60 * 1000;
 const SYSTEM_CONFIG_KEY = 'sys:config';
 const ADMIN_SESSION_PREFIX = 'admin:session:';
 const ADMIN_SESSION_TTL_SECONDS = 12 * 60 * 60;
-const ADMIN_BOOTSTRAP_TTL_MS = 6 * 60 * 60 * 1000;
+const ADMIN_BOOTSTRAP_TTL_MS = 1 * 60 * 60 * 1000;
 const PROFILE_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_ADMIN_PANEL_EXTERNAL_URL = '';
 
@@ -74,14 +74,14 @@ export default {
 
       if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/system-config`) {
         await requireHttpAdmin(request, runtimeEnv);
-        return json({ ok: true, config: buildSystemConfigView(await getSystemConfig(runtimeEnv)) }, 200, {}, request);
+        return json({ ok: true, config: buildSystemConfigView(await getEffectiveSystemConfig(runtimeEnv)) }, 200, {}, request);
       }
 
       if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/system-config`) {
         await requireHttpAdmin(request, runtimeEnv);
         const body = await readJsonBody(request);
-        const config = await updateSystemConfig(runtimeEnv, body);
-        return json({ ok: true, config: buildSystemConfigView(config) }, 200, {}, request);
+        await updateSystemConfig(runtimeEnv, body);
+        return json({ ok: true, config: buildSystemConfigView(await getEffectiveSystemConfig(runtimeEnv)) }, 200, {}, request);
       }
 
       if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/users`) {
@@ -1529,6 +1529,7 @@ async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
     webhookPath,
     webhookUrl: `${publicBaseUrl}${webhookPath}`,
     adminPanel: buildAdminPanelUrl(env, publicBaseUrl),
+    botConfigReady: Boolean(env.BOT_TOKEN && env.ADMIN_CHAT_ID),
     adminMode: topicModeEnabled ? 'forum-topic' : 'reply-chain',
     topicModeEnabled,
     topicModeReady: topicModeEnabled ? Boolean(env.BOT_KV) : true,
@@ -2269,6 +2270,46 @@ async function getRuntimeEnv(env) {
   return runtime;
 }
 
+async function getEffectiveSystemConfig(env) {
+  const config = await getSystemConfig(env);
+  const effective = { ...config };
+  const runtimeKeys = [
+    'BOT_TOKEN',
+    'ADMIN_CHAT_ID',
+    'ADMIN_IDS',
+    'ADMIN_ID',
+    'WEBHOOK_SECRET',
+    'PUBLIC_BASE_URL',
+    'WEBHOOK_PATH',
+    'TOPIC_MODE',
+    'USER_VERIFICATION',
+    'WELCOME_TEXT',
+    'BLOCKED_TEXT',
+    'ADMIN_API_KEY',
+    'ADMIN_PANEL_URL',
+    'ADMIN_PANEL_USER',
+    'ADMIN_PANEL_PASSWORD',
+    'KEYWORD_FILTERS',
+  ];
+
+  for (const key of runtimeKeys) {
+    const value = typeof env?.[key] === 'string' ? env[key].trim() : '';
+    if (value) {
+      effective[key] = value;
+    }
+  }
+
+  for (const key of runtimeKeys) {
+    const value = typeof config?.[key] === 'string' ? config[key].trim() : '';
+    if (value) {
+      effective[key] = value;
+    }
+  }
+
+  effective.updatedAt = config.updatedAt || null;
+  return effective;
+}
+
 async function getSystemConfig(env) {
   if (!env.BOT_KV) {
     return {};
@@ -2313,7 +2354,7 @@ async function ensureAdminPasswordState(env) {
     };
   }
 
-  const seedPassword = String(env.ADMIN_PANEL_PASSWORD || config.ADMIN_API_KEY || env.ADMIN_API_KEY || '').trim();
+  const seedPassword = String(env.ADMIN_PANEL_PASSWORD || '').trim();
   if (!seedPassword) {
     return {
       username,
@@ -2435,7 +2476,7 @@ function getAdminPanelUser(env) {
 }
 
 function getAdminPanelPassword(env) {
-  return String(env.ADMIN_PANEL_PASSWORD || '').trim() || String(env.ADMIN_API_KEY || '').trim();
+  return String(env.ADMIN_PANEL_PASSWORD || '').trim();
 }
 
 function createSessionToken() {
@@ -2498,7 +2539,7 @@ async function handleAdminLogin(request, env) {
   const passwordState = await ensureAdminPasswordState(env);
 
   if (!passwordState.passwordReady) {
-    throw new AppError(500, '请先在 Worker 环境变量或系统配置中准备初始密码');
+    throw new AppError(500, '请先在 Worker 环境变量中设置 ADMIN_PANEL_PASSWORD，用于生成首次登录临时密码');
   }
 
   if (username !== expectedUser || password !== passwordState.password) {

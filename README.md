@@ -194,7 +194,13 @@ npx wrangler secret put ADMIN_PANEL_PASSWORD
 - `ADMIN_IDS`：可选，多管理员用户 ID 列表
 - `WEBHOOK_SECRET`：建议配置
 - `ADMIN_API_KEY`：后台 API Key，建议配置
-- `ADMIN_PANEL_PASSWORD`：后台初始密码
+- `ADMIN_PANEL_PASSWORD`：后台首次登录临时密码种子，Worker 会写入 KV 生成 1 小时有效的临时密码
+
+其中：
+
+- `BOT_TOKEN` 和 `ADMIN_CHAT_ID` 是机器人正常工作的必要项
+- 这两个值可以在 Worker Secrets/Vars 中配置，也可以在首次登录后台后写入 KV 覆盖
+- 如果后台里清空某个字段，系统会回退使用 Worker 当前环境变量中的值
 
 ## 第六步：部署 Worker
 
@@ -203,7 +209,7 @@ npm install
 npm run deploy
 ```
 
-如果你还没有根域名，默认会拿到一个 `workers.dev` 地址。
+如果你还没有自定义域名，系统会默认使用 Cloudflare 分配的 `workers.dev` 地址。
 
 部署完成后，访问根路径确认状态：
 
@@ -221,7 +227,7 @@ https://your-worker.your-subdomain.workers.dev/
 https://your-worker.your-subdomain.workers.dev/setWebhook
 ```
 
-或者进入后台面板点击 “Set Webhook”。
+或者进入后台面板点击 “Set Webhook”。如果没有配置 `PUBLIC_BASE_URL`，Webhook 会自动使用当前 Worker 的默认访问域名。
 
 也可以检查当前 Webhook：
 

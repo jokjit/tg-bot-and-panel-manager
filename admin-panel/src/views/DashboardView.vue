@@ -84,6 +84,11 @@ const statusData = computed(() => adminStore.statusData || null);
 const prettyStatus = computed(() => JSON.stringify(statusData.value || {}, null, 2));
 const statusCards = computed(() => [
   {
+    key: 'bot-ready',
+    label: t('dashboard.botReady'),
+    value: statusData.value?.botConfigReady ? t('app.enabled') : t('app.disabled'),
+  },
+  {
     key: 'mode',
     label: t('dashboard.webhookMode'),
     value: statusData.value?.adminMode || '-',
