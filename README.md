@@ -172,6 +172,28 @@ binding = "BOT_KV"
 
 在新版 Wrangler、Deploy Button 或 GitHub Actions 流程下，Cloudflare 可以在部署时自动创建这个 KV 资源。
 
+## 可选：一键初始化 D1（历史消息）
+
+如果你想给项目增加聊天历史能力，可以使用 D1。仓库已提供一键初始化脚本：
+
+```bash
+npm run setup:d1 -- --database-name tg-bot-history --binding DB --remote
+```
+
+这个脚本会自动：
+
+- 创建 D1 数据库
+- 把 `database_name` 和 `database_id` 写回 `wrangler.toml`
+- 执行 `migrations/0001_message_history.sql`
+
+查看帮助：
+
+```bash
+npm run setup:d1 -- --help
+```
+
+> 说明：这一步只是先把 D1 和历史消息表结构准备好，后续我再帮你把 Worker 实际的消息写入和后台查询界面接上。
+
 ## 第五步：配置 Secret
 
 如果你是手动部署，建议至少配置以下 Secret：

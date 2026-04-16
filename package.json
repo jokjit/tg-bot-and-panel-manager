@@ -5,7 +5,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "build:panel": "npm --prefix admin-panel run build",
-    "deploy:panel": "node scripts/deploy-admin-panel.mjs"
+    "deploy:panel": "node scripts/deploy-admin-panel.mjs",
+    "setup:d1": "node scripts/setup-d1.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.45.0"
@@ -14,6 +15,9 @@
     "bindings": {
       "BOT_KV": {
         "description": "用于保存用户档案、话题映射、黑名单、信任名单、管理员授权和首次验证状态。若不绑定，请将 `TOPIC_MODE` 与 `USER_VERIFICATION` 设为 `false`。"
+      },
+      "DB": {
+        "description": "可选。Cloudflare D1 数据库，用于保存聊天历史、会话索引和后续检索能力。建议使用 `npm run setup:d1` 初始化。"
       },
       "BOT_TOKEN": {
         "description": "Telegram 机器人 Token，可从 `@BotFather` 获取。属于机器人运行必要项，建议使用 `wrangler secret put BOT_TOKEN` 配置。"

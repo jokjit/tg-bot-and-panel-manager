@@ -13,6 +13,12 @@ workers_dev = true
 [[kv_namespaces]]
 binding = "BOT_KV"
 
+# 可选：用于保存聊天历史。建议通过 `npm run setup:d1` 初始化并自动回填。
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "tg-bot-history"
+# database_id = "<YOUR_D1_DATABASE_ID>"
+
 [vars]
 WEBHOOK_PATH = "/webhook"
 TOPIC_MODE = "false"
