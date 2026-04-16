@@ -567,6 +567,8 @@ async function handleAdminCommand(message, env, defaultTargetUserId) {
         '8. 管理员授权：/adminadd 用户ID、/admindel 用户ID、/admins',
         '9. 关键词过滤：在系统配置里填写 KEYWORD_FILTERS，命中后会自动上报并封禁。',
         '10. 打开浏览器管理面板：/panel',
+        '11. 重发当前临时密码：/panelpass',
+        '12. 强制生成新的临时密码：/panelreset',
       ].join('\n'),
     );
     return true;
@@ -583,6 +585,18 @@ async function handleAdminCommand(message, env, defaultTargetUserId) {
         '请在浏览器中打开以上地址，并使用管理员密码登录。',
       ].join('\n'),
     );
+    return true;
+  }
+
+  if (/^\/(?:panelpass|panelpassword|adminpass)\s*$/i.test(trimmed)) {
+    const result = await resendBootstrapPassword(env);
+    await sendAdminNotice(env, message, result.message);
+    return true;
+  }
+
+  if (/^\/(?:panelreset|resetpanelpass|resetadminpass)\s*$/i.test(trimmed)) {
+    const result = await resetBootstrapPassword(env);
+    await sendAdminNotice(env, message, result.message);
     return true;
   }
 
@@ -1046,6 +1060,8 @@ async function syncTelegramCommands(env) {
     { command: 'admins', description: '查看管理员列表' },
     { command: 'adminadd', description: '授权管理员：/adminadd 用户ID 备注' },
     { command: 'admindel', description: '移除管理员：/admindel 用户ID' },
+    { command: 'panelpass', description: '重发当前面板临时密码' },
+    { command: 'panelreset', description: '生成新的面板临时密码' },
   ];
 
   const applied = [];
@@ -2384,6 +2400,62 @@ async function ensureAdminPasswordState(env) {
     password: bootstrapGeneratedPassword,
     mustChangePassword: true,
     bootstrapExpiresAt: next.ADMIN_BOOTSTRAP_EXPIRES_AT,
+  };
+}
+
+async function resendBootstrapPassword(env) {
+  ensureKv(env);
+  const state = await ensureAdminPasswordState(env);
+
+  if (!state.passwordReady) {
+    return {
+      ok: false,
+      message: '当前还无法生成面板密码，请先确保 BOT_TOKEN 与 ADMIN_CHAT_ID 已正确配置。',
+    };
+  }
+
+  if (state.passwordMode === 'permanent') {
+    return {
+      ok: false,
+      message: '当前面板已使用永久密码。若你忘记了密码，请执行 /panelreset 重新生成新的临时密码。',
+    };
+  }
+
+  await notifyBootstrapPassword(env, state.username, state.password, state.bootstrapExpiresAt);
+  return {
+    ok: true,
+    message: `当前有效的临时密码已重新发送到管理员会话。有效期至：${state.bootstrapExpiresAt}`,
+  };
+}
+
+async function resetBootstrapPassword(env) {
+  ensureKv(env);
+  if (!env.BOT_TOKEN || !env.ADMIN_CHAT_ID) {
+    return {
+      ok: false,
+      message: '当前还无法重置面板密码，请先确保 BOT_TOKEN 与 ADMIN_CHAT_ID 已正确配置。',
+    };
+  }
+
+  const config = await getSystemConfig(env);
+  const username = getAdminPanelUser(env);
+  const bootstrapGeneratedPassword = createBootstrapPassword();
+  const expiresAt = new Date(Date.now() + ADMIN_BOOTSTRAP_TTL_MS).toISOString();
+  const next = {
+    ...config,
+    ADMIN_BOOTSTRAP_PASSWORD: bootstrapGeneratedPassword,
+    ADMIN_BOOTSTRAP_EXPIRES_AT: expiresAt,
+    ADMIN_FORCE_PASSWORD_CHANGE: 'true',
+    updatedAt: new Date().toISOString(),
+  };
+
+  delete next.ADMIN_PANEL_PASSWORD;
+  await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
+  await notifyBootstrapPassword(env, username, bootstrapGeneratedPassword, expiresAt);
+
+  return {
+    ok: true,
+    message: `新的临时密码已生成并发送到管理员会话。有效期至：${expiresAt}`,
   };
 }
 

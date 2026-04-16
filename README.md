@@ -256,6 +256,11 @@ https://your-worker.your-subdomain.workers.dev/setWebhook
 6. 自动创建或复用 Pages 项目
 7. 自动构建并发布 `admin-panel`
 
+如果管理员没有收到首次临时密码，可以在 Telegram 管理会话里使用：
+
+- `/panelpass`：重发当前仍有效的临时密码
+- `/panelreset`：强制生成一个新的临时密码并发送
+
 > `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID` 只用于 GitHub Actions 调用 Cloudflare API 和 Wrangler 发版，不参与机器人业务运行。
 
 也可以检查当前 Webhook：
