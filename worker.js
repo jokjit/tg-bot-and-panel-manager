@@ -2256,7 +2256,6 @@ async function getRuntimeEnv(env) {
     'ADMIN_API_KEY',
     'ADMIN_PANEL_URL',
     'ADMIN_PANEL_USER',
-    'ADMIN_PANEL_PASSWORD',
     'KEYWORD_FILTERS',
   ];
 
@@ -2288,7 +2287,6 @@ async function getEffectiveSystemConfig(env) {
     'ADMIN_API_KEY',
     'ADMIN_PANEL_URL',
     'ADMIN_PANEL_USER',
-    'ADMIN_PANEL_PASSWORD',
     'KEYWORD_FILTERS',
   ];
 
@@ -2354,8 +2352,7 @@ async function ensureAdminPasswordState(env) {
     };
   }
 
-  const seedPassword = String(env.ADMIN_PANEL_PASSWORD || '').trim();
-  if (!seedPassword) {
+  if (!env.BOT_TOKEN || !env.ADMIN_CHAT_ID) {
     return {
       username,
       passwordReady: false,
@@ -2366,9 +2363,11 @@ async function ensureAdminPasswordState(env) {
     };
   }
 
+  const bootstrapGeneratedPassword = createBootstrapPassword();
+
   const next = {
     ...config,
-    ADMIN_BOOTSTRAP_PASSWORD: seedPassword,
+    ADMIN_BOOTSTRAP_PASSWORD: bootstrapGeneratedPassword,
     ADMIN_BOOTSTRAP_EXPIRES_AT: new Date(Date.now() + ADMIN_BOOTSTRAP_TTL_MS).toISOString(),
     ADMIN_FORCE_PASSWORD_CHANGE: 'true',
     updatedAt: new Date().toISOString(),
@@ -2376,12 +2375,13 @@ async function ensureAdminPasswordState(env) {
 
   delete next.ADMIN_PANEL_PASSWORD;
   await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
+  await notifyBootstrapPassword(env, username, bootstrapGeneratedPassword, next.ADMIN_BOOTSTRAP_EXPIRES_AT);
 
   return {
     username,
     passwordReady: true,
     passwordMode: 'bootstrap',
-    password: seedPassword,
+    password: bootstrapGeneratedPassword,
     mustChangePassword: true,
     bootstrapExpiresAt: next.ADMIN_BOOTSTRAP_EXPIRES_AT,
   };
@@ -2418,7 +2418,6 @@ async function updateSystemConfig(env, payload) {
     'ADMIN_API_KEY',
     'ADMIN_PANEL_URL',
     'ADMIN_PANEL_USER',
-    'ADMIN_PANEL_PASSWORD',
     'KEYWORD_FILTERS',
   ];
 
@@ -2430,12 +2429,6 @@ async function updateSystemConfig(env, payload) {
       continue;
     }
     next[key] = value;
-  }
-
-  if ('ADMIN_PANEL_PASSWORD' in payload && String(payload.ADMIN_PANEL_PASSWORD ?? '').trim()) {
-    delete next.ADMIN_BOOTSTRAP_PASSWORD;
-    delete next.ADMIN_BOOTSTRAP_EXPIRES_AT;
-    next.ADMIN_FORCE_PASSWORD_CHANGE = 'false';
   }
 
   next.updatedAt = new Date().toISOString();
@@ -2458,7 +2451,6 @@ function buildSystemConfigView(config) {
     ADMIN_API_KEY: maskSecret(config.ADMIN_API_KEY),
     ADMIN_PANEL_URL: config.ADMIN_PANEL_URL || '',
     ADMIN_PANEL_USER: config.ADMIN_PANEL_USER || '',
-    ADMIN_PANEL_PASSWORD: config.ADMIN_PANEL_PASSWORD ? '********' : '',
     KEYWORD_FILTERS: config.KEYWORD_FILTERS || '',
     updatedAt: config.updatedAt || null,
   };
@@ -2475,14 +2467,48 @@ function getAdminPanelUser(env) {
   return String(env.ADMIN_PANEL_USER || 'admin').trim() || 'admin';
 }
 
-function getAdminPanelPassword(env) {
-  return String(env.ADMIN_PANEL_PASSWORD || '').trim();
-}
-
 function createSessionToken() {
   const bytes = new Uint8Array(24);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function createBootstrapPassword(length = 12) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('');
+}
+
+async function notifyBootstrapPassword(env, username, password, expiresAt) {
+  try {
+    const adminChatId = toChatId(env.ADMIN_CHAT_ID);
+    const configuredPanelUrl = String(env.ADMIN_PANEL_URL || '').trim();
+    const configuredPublicBaseUrl = String(env.PUBLIC_BASE_URL || '').trim();
+    const panelUrl = configuredPanelUrl
+      ? buildAdminPanelUrl(env, configuredPublicBaseUrl)
+      : configuredPublicBaseUrl
+        ? buildAdminPanelUrl(env, configuredPublicBaseUrl)
+        : '';
+    const lines = [
+      '你的管理面板首次临时密码已生成。',
+      `账号：${username || 'admin'}`,
+      `临时密码：${password}`,
+      `有效期至：${expiresAt}`,
+      '请尽快登录并修改为永久密码。',
+    ];
+
+    if (panelUrl) {
+      lines.splice(1, 0, `面板地址：${panelUrl}`);
+    }
+
+    await telegram(env, 'sendMessage', {
+      chat_id: adminChatId,
+      text: lines.join('\n'),
+    });
+  } catch (error) {
+    // ignore
+  }
 }
 
 function parseCookies(cookieHeader) {
@@ -2539,7 +2565,7 @@ async function handleAdminLogin(request, env) {
   const passwordState = await ensureAdminPasswordState(env);
 
   if (!passwordState.passwordReady) {
-    throw new AppError(500, '请先在 Worker 环境变量中设置 ADMIN_PANEL_PASSWORD，用于生成首次登录临时密码');
+    throw new AppError(500, '请先配置 BOT_TOKEN 与 ADMIN_CHAT_ID，系统会自动生成首次临时密码并发送到管理员会话');
   }
 
   if (username !== expectedUser || password !== passwordState.password) {
@@ -3163,13 +3189,13 @@ function renderAdminPage(url, env, webhookPath, publicBaseUrl) {
         </div>
         <div class="col">
           <label>密码</label>
-          <input id="loginPass" type="password" placeholder="ADMIN_PANEL_PASSWORD">
+          <input id="loginPass" type="password" placeholder="请输入临时或永久密码">
         </div>
       </div>
       <div class="row" style="margin-top:10px">
         <div class="col"><button id="btnLogin" class="btn">登录控制台</button></div>
       </div>
-      <p class="hint">建议首次登录后立即在“系统配置”修改面板密码，并在 BotFather 关闭隐私模式以便群内回复可见。</p>
+      <p class="hint">首次临时密码会自动发送到管理员会话；登录后请立即修改为永久密码，并在 BotFather 关闭隐私模式以便群内回复可见。</p>
     </div>
 
     <div id="appCard" class="hidden">
@@ -3187,7 +3213,7 @@ function renderAdminPage(url, env, webhookPath, publicBaseUrl) {
 
       <div class="card">
         <h3>系统配置（写入 KV）</h3>
-        <p class="muted">支持面板化维护 BOT_TOKEN、ADMIN_CHAT_ID、ADMIN_IDS、面板账密等。敏感项留空表示“不修改”。</p>
+        <p class="muted">支持面板化维护 BOT_TOKEN、ADMIN_CHAT_ID、ADMIN_IDS 等运行参数。敏感项留空表示“不修改”。</p>
         <div class="row">
           <div class="col"><label>BOT_TOKEN（敏感）</label><input id="BOT_TOKEN" type="password" placeholder="留空不修改"></div>
           <div class="col"><label>ADMIN_CHAT_ID</label><input id="ADMIN_CHAT_ID" placeholder="例如 -1001234567890"></div>
@@ -3213,10 +3239,6 @@ function renderAdminPage(url, env, webhookPath, publicBaseUrl) {
           <div class="col"><label>ADMIN_PANEL_USER</label><input id="ADMIN_PANEL_USER" placeholder="默认 admin"></div>
         </div>
         <div class="row">
-          <div class="col"><label>ADMIN_PANEL_PASSWORD（敏感）</label><input id="ADMIN_PANEL_PASSWORD" type="password" placeholder="留空不修改"></div>
-          <div class="col"></div>
-        </div>
-        <div class="row">
           <div class="col"><label>WELCOME_TEXT</label><textarea id="WELCOME_TEXT"></textarea></div>
           <div class="col"><label>BLOCKED_TEXT</label><textarea id="BLOCKED_TEXT"></textarea></div>
         </div>
@@ -3237,7 +3259,7 @@ function renderAdminPage(url, env, webhookPath, publicBaseUrl) {
       el.className = ok ? 'ok' : 'err';
     };
 
-    const sensitiveKeys = ['BOT_TOKEN', 'WEBHOOK_SECRET', 'ADMIN_API_KEY', 'ADMIN_PANEL_PASSWORD'];
+    const sensitiveKeys = ['BOT_TOKEN', 'WEBHOOK_SECRET', 'ADMIN_API_KEY'];
 
     function setBusy(buttonId, busy, textBusy = '处理中...') {
       const el = $(buttonId);

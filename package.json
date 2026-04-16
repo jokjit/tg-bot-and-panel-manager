@@ -30,9 +30,6 @@
       "ADMIN_API_KEY": {
         "description": "可选但强烈建议配置。后台 API 访问密钥，可配合浏览器后台或自动化脚本调用。"
       },
-      "ADMIN_PANEL_PASSWORD": {
-        "description": "后台首次登录的临时密码种子。Worker 会把它写入 KV 作为 1 小时有效的临时密码；首次登录后必须修改为永久密码。"
-      },
       "PUBLIC_BASE_URL": {
         "description": "Worker 对外访问地址，例如 `https://your-worker.your-subdomain.workers.dev` 或自定义域名。"
       },

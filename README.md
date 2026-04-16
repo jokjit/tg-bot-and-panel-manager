@@ -179,19 +179,18 @@ binding = "BOT_KV"
 ```bash
 npx wrangler secret put BOT_TOKEN
 npx wrangler secret put ADMIN_CHAT_ID
-npx wrangler secret put ADMIN_PANEL_PASSWORD
 ```
 
 说明：
 
 - `BOT_TOKEN`：机器人 Token，必要项
 - `ADMIN_CHAT_ID`：管理员群或管理员私聊 ID，必要项
-- `ADMIN_PANEL_PASSWORD`：后台首次登录临时密码种子，Worker 会写入 KV 生成 1 小时有效的临时密码
 
 其中：
 
 - `BOT_TOKEN` 和 `ADMIN_CHAT_ID` 是机器人正常工作的必要项
 - 这两个值可以在 Worker Secrets/Vars 中配置，也可以在首次登录后台后写入 KV 覆盖
+- 当这两个值可用后，系统会自动生成一个 1 小时有效的首次临时密码，并发送到 `ADMIN_CHAT_ID`
 - 如果后台里清空某个字段，系统会回退使用 Worker 当前环境变量中的值
 - 其他像 `ADMIN_IDS`、`WEBHOOK_SECRET`、`ADMIN_API_KEY`、`PUBLIC_BASE_URL`、`ADMIN_PANEL_URL` 等配置，后续都可以在面板中维护，不必在首次部署时一次性填满
 
@@ -237,7 +236,6 @@ https://your-worker.your-subdomain.workers.dev/setWebhook
 - `CLOUDFLARE_ACCOUNT_ID`
 - `BOT_TOKEN`
 - `ADMIN_CHAT_ID`
-- `ADMIN_PANEL_PASSWORD`
 
 ### 可选的 GitHub Variables
 
@@ -249,11 +247,12 @@ https://your-worker.your-subdomain.workers.dev/setWebhook
 ### 自动部署流程
 
 1. 自动部署 Worker
-2. 自动写入 `BOT_TOKEN`、`ADMIN_CHAT_ID`、`ADMIN_PANEL_PASSWORD`
+2. 自动写入 `BOT_TOKEN`、`ADMIN_CHAT_ID`
 3. 自动创建或复用 `BOT_KV`
-4. 自动解析 Worker 访问地址
-5. 自动创建或复用 Pages 项目
-6. 自动构建并发布 `admin-panel`
+4. 自动生成首次临时密码并发送到 `ADMIN_CHAT_ID`
+5. 自动解析 Worker 访问地址
+6. 自动创建或复用 Pages 项目
+7. 自动构建并发布 `admin-panel`
 
 > `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID` 只用于 GitHub Actions 调用 Cloudflare API 和 Wrangler 发版，不参与机器人业务运行。
 
@@ -386,13 +385,13 @@ https://deploy.workers.cloudflare.com/?url=<YOUR_GITHUB_REPO_URL>
 
 - `BOT_TOKEN`
 - `ADMIN_CHAT_ID`
-- `ADMIN_PANEL_PASSWORD`
 
 ### 后续可在面板维护
 
 - `ADMIN_IDS`
 - `PUBLIC_BASE_URL`
 - `ADMIN_PANEL_URL`
+- 面板登录永久密码
 - `TOPIC_MODE`
 - `USER_VERIFICATION`
 - `WELCOME_TEXT`
@@ -442,7 +441,7 @@ https://deploy.workers.cloudflare.com/?url=<YOUR_GITHUB_REPO_URL>
 
 请检查：
 
-- 是否配置了 `ADMIN_PANEL_PASSWORD`
+- `BOT_TOKEN` 与 `ADMIN_CHAT_ID` 是否已正确配置
 - Worker 与前端的域名是否一致
 - `VITE_WORKER_BASE_URL` 是否指向正确 Worker
 
