@@ -1,11 +1,13 @@
 # 本地私有部署配置示例
 # 复制为 `wrangler.local.toml` 后按你自己的 Cloudflare 实例填写。
 # 该文件不会提交到 Git。
+# 建议只放实例相关信息，如：D1、Worker 地址、Pages 面板地址。
 
-[[d1_databases]]
-binding = "DB"
-database_name = "tg-bot-history"
-database_id = "<YOUR_PRIVATE_D1_DATABASE_ID>"
+# 可选：启用历史消息时再填写
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "tg-bot-history"
+# database_id = "<YOUR_PRIVATE_D1_DATABASE_ID>"
 
 [vars]
 PUBLIC_BASE_URL = "https://your-worker.example.com"

@@ -139,7 +139,7 @@
 建议流程：
 
 1. 复制 `wrangler.local.example.toml` 为 `wrangler.local.toml`
-2. 填入你自己的 D1 `database_id`、`PUBLIC_BASE_URL`、`ADMIN_PANEL_URL`
+2. 填入你自己的 `PUBLIC_BASE_URL`、`ADMIN_PANEL_URL`（D1 可后续由脚本自动创建并写入本地私有配置）
 3. 本地部署时运行：
 
 ```bash
@@ -524,8 +524,31 @@ https://deploy.workers.cloudflare.com/?url=<YOUR_GITHUB_REPO_URL>
 - 或运行 `npm run deploy:menu:win`
 - 脚本会优先使用图形选择窗口；如果系统没有 `Out-GridView`，会自动回退到文本菜单
 
-目前支持这些操作：
+### 推荐：首次部署向导
 
+首次使用时，建议直接选择：
+
+- `首次部署向导`
+
+向导会依次帮你完成：
+
+- 检查 `Wrangler` 是否已登录
+- 自动创建或补全 `wrangler.local.toml`
+- 引导填写 `PUBLIC_BASE_URL` 与 `ADMIN_PANEL_URL`
+- 引导填写 `BOT_TOKEN` 与 `ADMIN_CHAT_ID`
+- 可选自动创建并迁移 D1 历史消息数据库
+- 可选自动把 `BOT_TOKEN`、`ADMIN_CHAT_ID` 写入 Worker Secret
+- 可选一键部署 Worker 与 Pages 面板
+
+其中：
+
+- `BOT_TOKEN`、`ADMIN_CHAT_ID` 会临时保存到本地 `.deploy-wizard.secrets.json`
+- 这个文件只用于本机向导复用，不会提交到 GitHub
+- 真实 D1 `database_id` 默认只会写入 `wrangler.local.toml`
+
+### 当前菜单支持
+
+- 首次部署向导
 - 查看当前本地私有配置摘要
 - 生成 `.wrangler.private.toml`
 - 初始化或升级 D1 数据库
@@ -544,4 +567,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy-menu.ps1 -DryRun -Text
 - 脚本会从 `wrangler.local.toml` 读取私有部署参数
 - `PUBLIC_BASE_URL` 会用于面板构建时注入 Worker API 地址
 - `ADMIN_PANEL_URL` 会自动解析出域名，并传给 Pages 前端作为正式后台地址
-- `wrangler.local.toml` 和 `.wrangler.private.toml` 都不会提交到 GitHub
+- `wrangler.local.toml`、`.wrangler.private.toml`、`.deploy-wizard.secrets.json` 都不会提交到 GitHub

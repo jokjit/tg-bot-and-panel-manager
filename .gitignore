@@ -25,3 +25,4 @@ wrangler.local.toml
 *.log
 *.tmp
 *.temp
+.deploy-wizard.secrets.json
