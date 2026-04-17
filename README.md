@@ -127,6 +127,30 @@
 ```
 
 ## 第三步：配置 Worker
+### 公开模板与本地私有配置分离
+
+为了避免把真实实例 ID（如 D1 `database_id`）提交到公开仓库，项目现在采用：
+
+- `wrangler.toml`：公开模板，提交到 GitHub
+- `wrangler.local.example.toml`：本地私有配置示例，提交到 GitHub
+- `wrangler.local.toml`：你自己的私有配置，不提交到 GitHub
+- `npm run deploy:private`：将公开模板与本地私有配置合并后再部署到 Cloudflare
+
+建议流程：
+
+1. 复制 `wrangler.local.example.toml` 为 `wrangler.local.toml`
+2. 填入你自己的 D1 `database_id`、`PUBLIC_BASE_URL`、`ADMIN_PANEL_URL`
+3. 本地部署时运行：
+
+```bash
+npm run deploy:private
+```
+
+这样可以保证：
+
+- GitHub 保持可公开 fork 的通用模板
+- Cloudflare 仍然使用你自己的真实实例配置
+- 敏感实例信息不会再次误提交
 
 编辑 `wrangler.toml`：
 

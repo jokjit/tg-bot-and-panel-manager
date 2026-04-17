@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "deploy:private": "node scripts/merge-wrangler-config.mjs && wrangler deploy --config .wrangler.private.toml",
     "build:panel": "npm --prefix admin-panel run build",
     "deploy:panel": "node scripts/deploy-admin-panel.mjs",
     "setup:d1": "node scripts/setup-d1.mjs"

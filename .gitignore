@@ -15,6 +15,7 @@ admin-panel/.wrangler/
 .env.*
 !.env.example
 wrangler.local.toml
+.wrangler.private.toml
 
 # Editor / IDE
 .vscode/
