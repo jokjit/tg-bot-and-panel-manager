@@ -322,7 +322,7 @@ export default {
         }
 
         const update = await request.json();
-        await handleUpdate(update, runtimeEnv);
+        await handleUpdate(update, runtimeEnv, publicBaseUrl);
         return new Response('ok', { headers: corsHeaders(request) });
       }
 
@@ -349,7 +349,7 @@ class AppError extends Error {
   }
 }
 
-async function handleUpdate(update, env) {
+async function handleUpdate(update, env, publicBaseUrl = '') {
   if (update.callback_query) {
     await handleCallbackQuery(update.callback_query, env);
     return;
@@ -364,7 +364,7 @@ async function handleUpdate(update, env) {
   const isAdminChat = Number(message.chat.id) === adminChatId;
 
   if (authorizedAdmin || isAdminChat) {
-    await handleAdminMessage(message, env, adminChatId, authorizedAdmin);
+    await handleAdminMessage(message, env, adminChatId, authorizedAdmin, publicBaseUrl);
     return;
   }
 
@@ -500,7 +500,7 @@ async function handleUserMessage(message, env, adminChatId) {
   });
 }
 
-async function handleAdminMessage(message, env, adminChatId, preAuthorized = false) {
+async function handleAdminMessage(message, env, adminChatId, preAuthorized = false, publicBaseUrl = '') {
   const senderId = message.from?.id ? Number(message.from.id) : null;
   const chatId = Number(message.chat.id);
   let authorized = preAuthorized || (senderId ? await isAuthorizedAdmin(env, senderId) : false);
@@ -536,7 +536,7 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = fal
   }
 
   const defaultTargetUserId = await resolveAdminTargetUserId(message, env, adminChatId);
-  const handled = await handleAdminCommand(message, env, defaultTargetUserId);
+  const handled = await handleAdminCommand(message, env, defaultTargetUserId, publicBaseUrl);
   if (handled) {
     return;
   }
@@ -600,7 +600,7 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = fal
   });
 }
 
-async function handleAdminCommand(message, env, defaultTargetUserId) {
+async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseUrl = '') {
   if (typeof message.text !== 'string') return false;
 
   const trimmed = message.text.trim();
@@ -633,7 +633,7 @@ async function handleAdminCommand(message, env, defaultTargetUserId) {
   }
 
   if (/^\/(?:panel|openpanel|adminpanel|admin)\s*$/i.test(trimmed)) {
-    const panelUrl = buildAdminPanelUrl(env);
+    const panelUrl = await resolveAdminPanelUrl(env, publicBaseUrl);
     await sendAdminNotice(
       env,
       message,
@@ -2734,13 +2734,7 @@ function createBootstrapPassword(length = 12) {
 async function notifyBootstrapPassword(env, username, password, expiresAt) {
   try {
     const adminChatId = toChatId(env.ADMIN_CHAT_ID);
-    const configuredPanelUrl = String(env.ADMIN_PANEL_URL || '').trim();
-    const configuredPublicBaseUrl = String(env.PUBLIC_BASE_URL || '').trim();
-    const panelUrl = configuredPanelUrl
-      ? buildAdminPanelUrl(env, configuredPublicBaseUrl)
-      : configuredPublicBaseUrl
-        ? buildAdminPanelUrl(env, configuredPublicBaseUrl)
-        : '';
+    const panelUrl = await resolveAdminPanelUrl(env);
     const lines = [
       '你的管理面板首次临时密码已生成。',
       `账号：${username || 'admin'}`,
@@ -3098,6 +3092,40 @@ function buildAdminPanelUrl(env, publicBaseUrl = '') {
     return `${origin}${ADMIN_PANEL_PATH}`;
   } catch (error) {
     return DEFAULT_ADMIN_PANEL_EXTERNAL_URL || ADMIN_PANEL_PATH;
+  }
+}
+
+async function resolveAdminPanelUrl(env, publicBaseUrl = '') {
+  const directUrl = buildAdminPanelUrl(env, publicBaseUrl);
+  if (isAbsoluteHttpUrl(directUrl)) {
+    return directUrl;
+  }
+
+  if (env.BOT_TOKEN) {
+    try {
+      const webhookInfo = await telegram(env, 'getWebhookInfo', {});
+      const webhookUrl = String(webhookInfo?.url || '').trim();
+      if (webhookUrl) {
+        const webhookOrigin = new URL(webhookUrl).origin;
+        const webhookResolvedUrl = buildAdminPanelUrl(env, webhookOrigin);
+        if (isAbsoluteHttpUrl(webhookResolvedUrl)) {
+          return webhookResolvedUrl;
+        }
+      }
+    } catch (error) {
+      // ignore webhook lookup failures and keep local fallback
+    }
+  }
+
+  return directUrl;
+}
+
+function isAbsoluteHttpUrl(value) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch (error) {
+    return false;
   }
 }
 
