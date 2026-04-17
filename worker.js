@@ -42,8 +42,7 @@ export default {
 
       if (request.method === 'GET' && url.pathname === ADMIN_PANEL_PATH) {
         const panelUrl = buildAdminPanelUrl(runtimeEnv, publicBaseUrl);
-        const currentAdminUrl = `${publicBaseUrl}${ADMIN_PANEL_PATH}`;
-        if (panelUrl && panelUrl !== currentAdminUrl) {
+        if (isAbsoluteHttpUrl(panelUrl)) {
           return Response.redirect(panelUrl, 302);
         }
         return html(renderAdminPage(url, runtimeEnv, webhookPath, publicBaseUrl), 200, request);
@@ -3332,6 +3331,7 @@ function renderAdminPage(url, env, webhookPath, publicBaseUrl) {
     adminMode: isTopicModeEnabled(env) ? 'forum-topic' : 'reply-chain',
     userVerificationEnabled: isUserVerificationEnabled(env),
     rootAdmins: getRootAdminIds(env),
+    panelUrl: String(env.ADMIN_PANEL_URL || '').trim(),
   };
 
   return `<!doctype html>
@@ -3339,353 +3339,52 @@ function renderAdminPage(url, env, webhookPath, publicBaseUrl) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Telegram Bot 控制台</title>
+  <title>管理面板入口</title>
   <style>
-    :root{
-      --bg:#0b1020;
-      --bg-soft:#111a33;
-      --card:#121b36cc;
-      --text:#e6ecff;
-      --muted:#9fb0d8;
-      --line:#2b3d6d;
-      --pri:#5b8cff;
-      --pri-2:#7f6bff;
-      --ok:#3ddc97;
-      --err:#ff6b7a;
-      --warn:#ffd166;
-      --input:#0e1730;
-      --input-line:#3a4f87;
-      --shadow:0 10px 30px rgba(0,0,0,.35);
-    }
+    :root{--bg:#0b1020;--card:#121b36dd;--text:#e6ecff;--muted:#9fb0d8;--line:#2b3d6d;--pri:#5b8cff;--pri-2:#7f6bff;--shadow:0 10px 30px rgba(0,0,0,.35)}
     *{box-sizing:border-box}
-    body{
-      margin:0;
-      color:var(--text);
-      background:
-        radial-gradient(1200px 500px at -10% -20%, #2b5bff33 0%, transparent 60%),
-        radial-gradient(900px 500px at 110% -10%, #7f6bff2e 0%, transparent 60%),
-        linear-gradient(160deg,var(--bg),#0d1328 45%, #111936);
-      font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,'PingFang SC','Microsoft Yahei',sans-serif;
-      min-height:100vh;
-      padding:26px 12px 34px;
-    }
-    .container{max-width:1100px;margin:0 auto}
-    .hero{margin-bottom:14px}
-    .title{font-size:28px;font-weight:700;letter-spacing:.4px;margin:0}
-    .subtitle{color:var(--muted);font-size:13px;margin-top:8px;line-height:1.6}
-    .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-    .chip{
-      font-size:12px;
-      color:#d7e2ff;
-      border:1px solid #3d518b;
-      background:#162348;
-      border-radius:999px;
-      padding:4px 10px;
-    }
-    .card{
-      border:1px solid var(--line);
-      background:var(--card);
-      backdrop-filter: blur(6px);
-      border-radius:16px;
-      padding:16px;
-      margin-bottom:14px;
-      box-shadow:var(--shadow);
-    }
-    .card h3{margin:0 0 10px;font-size:17px}
-    .row{display:flex;gap:10px;flex-wrap:wrap}
-    .col{flex:1;min-width:220px}
-    label{display:block;font-size:12px;margin-bottom:6px;color:#adc0ea}
-    input,textarea,select{
-      width:100%;
-      border-radius:10px;
-      border:1px solid var(--input-line);
-      color:var(--text);
-      background:var(--input);
-      padding:10px 11px;
-      outline:none;
-    }
-    input:focus,textarea:focus,select:focus{border-color:#6f97ff;box-shadow:0 0 0 3px #6f97ff22}
-    textarea{min-height:86px;resize:vertical}
-    .btn{
-      width:100%;
-      border:0;
-      border-radius:10px;
-      padding:10px 12px;
-      color:white;
-      cursor:pointer;
-      background:linear-gradient(135deg,var(--pri),var(--pri-2));
-      font-weight:600;
-      letter-spacing:.2px;
-    }
-    .btn:hover{filter:brightness(1.08)}
+    body{margin:0;color:var(--text);background:radial-gradient(1200px 500px at -10% -20%, #2b5bff33 0%, transparent 60%),radial-gradient(900px 500px at 110% -10%, #7f6bff2e 0%, transparent 60%),linear-gradient(160deg,var(--bg),#0d1328 45%, #111936);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,'PingFang SC','Microsoft Yahei',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+    .card{width:min(760px,100%);border:1px solid var(--line);background:var(--card);backdrop-filter:blur(6px);border-radius:20px;padding:24px;box-shadow:var(--shadow)}
+    .title{font-size:30px;font-weight:800;margin:0 0 12px}
+    .desc{color:var(--muted);line-height:1.75;font-size:14px}
+    .meta{margin-top:14px;display:flex;flex-wrap:wrap;gap:10px}
+    .chip{font-size:12px;color:#d7e2ff;border:1px solid #3d518b;background:#162348;border-radius:999px;padding:6px 12px}
+    .actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:18px}
+    .btn{display:inline-flex;align-items:center;justify-content:center;min-width:180px;border:0;border-radius:12px;padding:12px 16px;color:white;text-decoration:none;cursor:pointer;background:linear-gradient(135deg,var(--pri),var(--pri-2));font-weight:700;letter-spacing:.2px}
     .btn.secondary{background:#273760}
-    .btn.warn{background:#624e12}
-    .btn.danger{background:#632438}
-    .muted{font-size:12px;color:var(--muted)}
-    .ok{color:var(--ok)}
-    .err{color:var(--err)}
-    .hidden{display:none}
-    .status{
-      background:#0d1732;
-      border:1px solid #304375;
-      border-radius:12px;
-      padding:12px;
-      max-height:360px;
-      overflow:auto;
-      white-space:pre-wrap;
-      word-break:break-word;
-      line-height:1.45;
-      font-size:12px;
-    }
-    .hint{margin-top:8px;color:#c3cff3;font-size:12px;line-height:1.6}
-    @media (max-width:760px){
-      .title{font-size:23px}
-      .card{padding:13px}
-    }
+    .hint{margin-top:16px;color:#c3cff3;font-size:12px;line-height:1.7}
+    code{background:#162348;border:1px solid #31467c;border-radius:8px;padding:2px 6px}
   </style>
 </head>
 <body>
-  <div class="container">
-    <section class="hero">
-      <h1 class="title">Telegram Bot 控制台</h1>
-      <div class="subtitle">
-        域名：${escapeHtml(info.host)}<br>
-        Webhook：${escapeHtml(info.webhookUrl)}
+  <div class="card">
+      <h1 class="title">管理面板入口</h1>
+      <div class="desc">
+        当前项目已切换为 <strong>Pages 面板接管</strong> 模式。<br>
+        Worker 的 <code>/admin</code> 不再提供完整后台界面，只保留 API 与入口兜底能力。
       </div>
-      <div class="chips">
+      <div class="meta">
+        <span class="chip">域名：${escapeHtml(info.host)}</span>
+        <span class="chip">Webhook：${escapeHtml(info.webhookUrl)}</span>
         <span class="chip">模式：${escapeHtml(info.adminMode)}</span>
         <span class="chip">首次验证：${info.userVerificationEnabled ? 'ON' : 'OFF'}</span>
         <span class="chip">根管理员：${escapeHtml((info.rootAdmins || []).join(', ') || '未配置')}</span>
       </div>
-    </section>
 
-    <div id="loginCard" class="card">
-      <h3>管理员登录</h3>
-      <div class="row">
-        <div class="col">
-          <label>用户名</label>
-          <input id="loginUser" placeholder="默认 admin">
-        </div>
-        <div class="col">
-          <label>密码</label>
-          <input id="loginPass" type="password" placeholder="请输入临时或永久密码">
-        </div>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <div class="col"><button id="btnLogin" class="btn">登录控制台</button></div>
-      </div>
-      <p class="hint">首次临时密码会自动发送到管理员会话；登录后请立即修改为永久密码，并在 BotFather 关闭隐私模式以便群内回复可见。</p>
-    </div>
-
-    <div id="appCard" class="hidden">
-      <div class="card">
-        <h3>运行状态与快捷操作</h3>
-        <div class="row">
-          <div class="col"><button id="btnRefresh" class="btn">刷新状态</button></div>
-          <div class="col"><button id="btnSetWebhook" class="btn secondary">设置 Webhook</button></div>
-          <div class="col"><button id="btnWebhookInfo" class="btn secondary">Webhook 信息</button></div>
-          <div class="col"><button id="btnDeleteWebhook" class="btn warn">删除 Webhook</button></div>
-          <div class="col"><button id="btnLogout" class="btn danger">退出登录</button></div>
-        </div>
-        <div id="statusBox" class="status">加载中...</div>
+      <div class="actions">
+        ${info.panelUrl ? `<a class="btn" href="${escapeHtml(info.panelUrl)}">打开 Pages 管理面板</a>` : ''}
+        <a class="btn secondary" href="/">查看 Worker 状态</a>
       </div>
 
-      <div class="card">
-        <h3>系统配置（写入 KV）</h3>
-        <p class="muted">支持面板化维护 BOT_TOKEN、ADMIN_CHAT_ID、ADMIN_IDS 等运行参数。敏感项留空表示“不修改”。</p>
-        <div class="row">
-          <div class="col"><label>BOT_TOKEN（敏感）</label><input id="BOT_TOKEN" type="password" placeholder="留空不修改"></div>
-          <div class="col"><label>ADMIN_CHAT_ID</label><input id="ADMIN_CHAT_ID" placeholder="例如 -1001234567890"></div>
-        </div>
-        <div class="row">
-          <div class="col"><label>ADMIN_IDS</label><input id="ADMIN_IDS" placeholder="多个逗号分隔"></div>
-          <div class="col"><label>PUBLIC_BASE_URL</label><input id="PUBLIC_BASE_URL" placeholder="https://bot.example.com"></div>
-        </div>
-        <div class="row">
-          <div class="col"><label>ADMIN_PANEL_URL</label><input id="ADMIN_PANEL_URL" placeholder="https://tg-admin.example.com/admin"></div>
-          <div class="col"></div>
-        </div>
-        <div class="row">
-          <div class="col"><label>WEBHOOK_PATH</label><input id="WEBHOOK_PATH" placeholder="/webhook"></div>
-          <div class="col"><label>WEBHOOK_SECRET（敏感）</label><input id="WEBHOOK_SECRET" type="password" placeholder="留空不修改"></div>
-        </div>
-        <div class="row">
-          <div class="col"><label>TOPIC_MODE</label><select id="TOPIC_MODE"><option value="true">true</option><option value="false">false</option></select></div>
-          <div class="col"><label>USER_VERIFICATION</label><select id="USER_VERIFICATION"><option value="true">true</option><option value="false">false</option></select></div>
-        </div>
-        <div class="row">
-          <div class="col"><label>ADMIN_API_KEY（敏感）</label><input id="ADMIN_API_KEY" type="password" placeholder="留空不修改"></div>
-          <div class="col"><label>ADMIN_PANEL_USER</label><input id="ADMIN_PANEL_USER" placeholder="默认 admin"></div>
-        </div>
-        <div class="row">
-          <div class="col"><label>WELCOME_TEXT</label><textarea id="WELCOME_TEXT"></textarea></div>
-          <div class="col"><label>BLOCKED_TEXT</label><textarea id="BLOCKED_TEXT"></textarea></div>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <div class="col"><button id="btnSave" class="btn">保存配置</button></div>
-        </div>
+      <div class="hint">
+        ${info.panelUrl
+          ? `当前实例的 Pages 面板地址：<code>${escapeHtml(info.panelUrl)}</code><br>你也可以继续通过 Telegram 命令 <code>/panel</code> 打开这个地址。`
+          : '当前尚未配置 <code>ADMIN_PANEL_URL</code>。请先部署 Pages 面板，并在系统配置或运行时变量中填入面板地址。'}
       </div>
-    </div>
-
-    <p id="msg" class="muted"></p>
   </div>
-
-  <script>
-    const $ = (id) => document.getElementById(id);
-    const msg = (t, ok = true) => {
-      const el = $('msg');
-      el.textContent = t;
-      el.className = ok ? 'ok' : 'err';
-    };
-
-    const sensitiveKeys = ['BOT_TOKEN', 'WEBHOOK_SECRET', 'ADMIN_API_KEY'];
-
-    function setBusy(buttonId, busy, textBusy = '处理中...') {
-      const el = $(buttonId);
-      if (!el) return;
-      if (busy) {
-        el.dataset.originText = el.textContent;
-        el.textContent = textBusy;
-        el.disabled = true;
-        el.style.opacity = '0.75';
-      } else {
-        el.textContent = el.dataset.originText || el.textContent;
-        el.disabled = false;
-        el.style.opacity = '1';
-      }
-    }
-
-    async function api(path, options = {}) {
-      const res = await fetch(path, {
-        ...options,
-        credentials: 'include',
-        headers: {
-          'content-type': 'application/json',
-          ...(options.headers || {}),
-        },
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) {
-        const error = data.error || '请求失败';
-        throw new Error(error);
-      }
-      return data;
-    }
-
-    async function loadStatus() {
-      const data = await api('/admin/api/status', { method: 'GET' });
-      $('statusBox').textContent = JSON.stringify(data, null, 2);
-    }
-
-    async function loadSystemConfig() {
-      const data = await api('/admin/api/system-config', { method: 'GET' });
-      const cfg = data.config || {};
-      ['ADMIN_CHAT_ID','ADMIN_IDS','PUBLIC_BASE_URL','ADMIN_PANEL_URL','WEBHOOK_PATH','TOPIC_MODE','USER_VERIFICATION','WELCOME_TEXT','BLOCKED_TEXT','ADMIN_PANEL_USER'].forEach((k)=>{
-        if ($(k)) $(k).value = cfg[k] || '';
-      });
-      sensitiveKeys.forEach((k)=>{ if ($(k)) $(k).value = ''; });
-    }
-
-    async function tryEnterApp() {
-      try {
-        await loadStatus();
-        await loadSystemConfig();
-        $('loginCard').classList.add('hidden');
-        $('appCard').classList.remove('hidden');
-        msg('登录成功，控制台已就绪。');
-      } catch (e) {
-        $('loginCard').classList.remove('hidden');
-        $('appCard').classList.add('hidden');
-      }
-    }
-
-    $('btnLogin').onclick = async () => {
-      setBusy('btnLogin', true, '登录中...');
-      try {
-        await api('/admin/login', {
-          method: 'POST',
-          body: JSON.stringify({
-            username: $('loginUser').value.trim() || 'admin',
-            password: $('loginPass').value,
-          }),
-        });
-        await tryEnterApp();
-      } catch (e) {
-        msg(e.message, false);
-      } finally {
-        setBusy('btnLogin', false);
-      }
-    };
-
-    $('btnLogout').onclick = async () => {
-      setBusy('btnLogout', true, '退出中...');
-      try {
-        await api('/admin/logout', { method: 'POST' });
-      } catch (e) {}
-      $('appCard').classList.add('hidden');
-      $('loginCard').classList.remove('hidden');
-      msg('已退出登录。');
-      setBusy('btnLogout', false);
-    };
-
-    $('btnRefresh').onclick = async () => {
-      setBusy('btnRefresh', true, '刷新中...');
-      try { await loadStatus(); await loadSystemConfig(); msg('状态已刷新'); } catch (e) { msg(e.message, false); }
-      setBusy('btnRefresh', false);
-    };
-
-    $('btnSave').onclick = async () => {
-      setBusy('btnSave', true, '保存中...');
-      try {
-        const payload = {
-          ADMIN_CHAT_ID: $('ADMIN_CHAT_ID').value.trim(),
-          ADMIN_IDS: $('ADMIN_IDS').value.trim(),
-          PUBLIC_BASE_URL: $('PUBLIC_BASE_URL').value.trim(),
-          ADMIN_PANEL_URL: $('ADMIN_PANEL_URL').value.trim(),
-          WEBHOOK_PATH: $('WEBHOOK_PATH').value.trim(),
-          TOPIC_MODE: $('TOPIC_MODE').value,
-          USER_VERIFICATION: $('USER_VERIFICATION').value,
-          WELCOME_TEXT: $('WELCOME_TEXT').value,
-          BLOCKED_TEXT: $('BLOCKED_TEXT').value,
-          ADMIN_PANEL_USER: $('ADMIN_PANEL_USER').value.trim(),
-        };
-        sensitiveKeys.forEach((k)=>{
-          const v = $(k).value.trim();
-          if (v) payload[k] = v;
-        });
-        await api('/admin/api/system-config', { method: 'POST', body: JSON.stringify(payload) });
-        await loadStatus();
-        await loadSystemConfig();
-        msg('配置已保存。');
-      } catch (e) {
-        msg(e.message, false);
-      } finally {
-        setBusy('btnSave', false);
-      }
-    };
-
-    $('btnSetWebhook').onclick = async () => {
-      setBusy('btnSetWebhook', true, '设置中...');
-      try { $('statusBox').textContent = JSON.stringify(await api('/setWebhook', { method: 'GET' }), null, 2); msg('Webhook 已设置'); } catch (e) { msg(e.message, false); }
-      setBusy('btnSetWebhook', false);
-    };
-    $('btnWebhookInfo').onclick = async () => {
-      setBusy('btnWebhookInfo', true, '查询中...');
-      try { $('statusBox').textContent = JSON.stringify(await api('/getWebhookInfo', { method: 'GET' }), null, 2); } catch (e) { msg(e.message, false); }
-      setBusy('btnWebhookInfo', false);
-    };
-    $('btnDeleteWebhook').onclick = async () => {
-      setBusy('btnDeleteWebhook', true, '删除中...');
-      try { $('statusBox').textContent = JSON.stringify(await api('/deleteWebhook', { method: 'GET' }), null, 2); msg('Webhook 已删除'); } catch (e) { msg(e.message, false); }
-      setBusy('btnDeleteWebhook', false);
-    };
-
-    tryEnterApp();
-  </script>
 </body>
 </html>`;
 }
-
 function escapeHtml(value) {
   return String(value)
     .replaceAll('&', '&amp;')
