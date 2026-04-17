@@ -10,6 +10,7 @@ const MAX_LIST_LIMIT = 100;
 const MAX_SCAN_KEYS = 500;
 const VERIFY_EXPIRE_MS = 15 * 60 * 1000;
 const VERIFY_FAIL_BLOCK_MS = 60 * 1000;
+const VERIFY_TIMEOUT_BLOCK_MS = 60 * 1000;
 const SYSTEM_CONFIG_KEY = 'sys:config';
 const ADMIN_SESSION_PREFIX = 'admin:session:';
 const ADMIN_SESSION_TTL_SECONDS = 12 * 60 * 60;
@@ -961,7 +962,7 @@ async function handleUserVerificationCallback(callbackQuery, env) {
   const senderId = callbackQuery.from?.id ? Number(callbackQuery.from.id) : null;
 
   if (!chatId || !senderId || senderId !== userId || chatId !== userId) {
-    await answerCallback(env, callbackQuery.id, '这个验证按钮不属于你。', true);
+    await answerCallback(env, callbackQuery.id, '???????????', true);
     return;
   }
 
@@ -969,26 +970,52 @@ async function handleUserVerificationCallback(callbackQuery, env) {
 
   const state = await getUserVerificationState(env, userId);
   if (state?.verified) {
-    await answerCallback(env, callbackQuery.id, '你已经完成验证了。');
+    await answerCallback(env, callbackQuery.id, '?????????');
     return;
   }
 
   const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
   if (blockedUntilMs && blockedUntilMs > Date.now()) {
     const leftSec = Math.max(1, Math.ceil((blockedUntilMs - Date.now()) / 1000));
-    await answerCallback(env, callbackQuery.id, `验证失败冷却中，请 ${leftSec} 秒后再试。`, true);
+    await answerCallback(env, callbackQuery.id, `????????? ${leftSec} ?????`, true);
     return;
   }
 
-  if (!state?.challenge || isVerificationExpired(state.challenge) || state.challenge.token !== token) {
+  if (!state?.challenge || state.challenge.token !== token) {
     const refreshed = await createOrRefreshUserVerification(env, userId, true);
     await updateVerificationPromptMessage(env, callbackQuery.message, refreshed);
-    await answerCallback(env, callbackQuery.id, '验证已刷新，请重新选择。', true);
+    await answerCallback(env, callbackQuery.id, '????????????', true);
+    return;
+  }
+
+  if (isVerificationExpired(state.challenge)) {
+    await markUserVerificationFailed(env, userId, {
+      selectedAnswer: '',
+      correctAnswer: String(state.challenge.correct || ''),
+      blockMs: VERIFY_TIMEOUT_BLOCK_MS,
+    });
+
+    try {
+      await telegram(env, 'editMessageCaption', {
+        chat_id: userId,
+        message_id: callbackQuery.message.message_id,
+        caption: [
+          '? ??????',
+          '?????????????',
+          '??? 1 ???????????????????',
+        ].join('\n'),
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch (error) {
+      // ignore
+    }
+
+    await answerCallback(env, callbackQuery.id, '???????? 1 ???', true);
     return;
   }
 
   if (state?.answeredAt) {
-    await answerCallback(env, callbackQuery.id, '本次验证你已作答，请等待冷却后重试。', true);
+    await answerCallback(env, callbackQuery.id, '??????????????????', true);
     return;
   }
 
@@ -1004,10 +1031,10 @@ async function handleUserVerificationCallback(callbackQuery, env) {
         chat_id: userId,
         message_id: callbackQuery.message.message_id,
         caption: [
-          '❌ 验证失败。',
-          `你选择了：${answer}，正确答案是：${state.challenge.correct}`,
-          `已禁止发言 1 分钟，请冷却后重新发送消息再获取新题。`,
-          `解禁时间：${failedState.blockedUntil}`,
+          '? ?????',
+          `?????${answer}???????${state.challenge.correct}` ,
+          '????? 1 ???????????????????',
+          `?????${failedState.blockedUntil}` ,
         ].join('\n'),
         reply_markup: { inline_keyboard: [] },
       });
@@ -1015,7 +1042,7 @@ async function handleUserVerificationCallback(callbackQuery, env) {
       // ignore
     }
 
-    await answerCallback(env, callbackQuery.id, '验证失败，已限制 1 分钟。', true);
+    await answerCallback(env, callbackQuery.id, '???????? 1 ???', true);
     return;
   }
 
@@ -1025,7 +1052,7 @@ async function handleUserVerificationCallback(callbackQuery, env) {
     await telegram(env, 'editMessageCaption', {
       chat_id: userId,
       message_id: callbackQuery.message.message_id,
-      caption: '✅ 验证成功，现在可以给管理员发送消息了。',
+      caption: '? ???????????????????',
       reply_markup: { inline_keyboard: [] },
     });
   } catch (error) {
@@ -1034,10 +1061,10 @@ async function handleUserVerificationCallback(callbackQuery, env) {
 
   await telegram(env, 'sendMessage', {
     chat_id: userId,
-    text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n请重新发送你刚才想咨询的内容。`,
+    text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n???????????????`,
   });
 
-  await answerCallback(env, callbackQuery.id, '验证成功');
+  await answerCallback(env, callbackQuery.id, '????');
 }
 
 function isUserPrivateCommand(message) {
@@ -1082,7 +1109,20 @@ async function ensureUserVerifiedOrPrompt(message, env) {
     const leftSec = Math.max(1, Math.ceil((blockedUntilMs - Date.now()) / 1000));
     await telegram(env, 'sendMessage', {
       chat_id: userId,
-      text: `你当前处于验证失败冷却中，请 ${leftSec} 秒后再试。`,
+      text: `?????????????? ${leftSec} ?????`,
+    });
+    return false;
+  }
+
+  if (state?.challenge && isVerificationExpired(state.challenge)) {
+    await markUserVerificationFailed(env, userId, {
+      selectedAnswer: '',
+      correctAnswer: String(state.challenge.correct || ''),
+      blockMs: VERIFY_TIMEOUT_BLOCK_MS,
+    });
+    await telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text: '?????????????? 1 ?????????????????',
     });
     return false;
   }
@@ -1090,7 +1130,7 @@ async function ensureUserVerifiedOrPrompt(message, env) {
   const nextState = await createOrRefreshUserVerification(
     env,
     userId,
-    !state?.challenge || isVerificationExpired(state.challenge) || Boolean(state?.answeredAt),
+    !state?.challenge || Boolean(state?.answeredAt),
   );
 
   await sendUserVerificationPrompt(env, userId, nextState);
@@ -1464,12 +1504,19 @@ function buildAdminActionKeyboard(userId) {
 }
 
 function buildUserVerificationText(challenge) {
+  const modeText = challenge.mode === 'math' ? '10 ?????????' : '?????';
+  const promptText = challenge.mode === 'math'
+    ? '???? 4 ???????????? 1 ?????'
+    : '??????????????? 4 ???????????? 1 ?????';
+
   return [
-    '🔐 首次私聊需要先完成验证。',
-    '请识别上方图片验证码，并从下方 4 个选项中选择正确答案（仅 1 次机会）。',
-    '答错将被限制 1 分钟。',
-    `验证码类型：图片验证码`,
-    `有效期：${Math.floor(VERIFY_EXPIRE_MS / 60000)} 分钟`,
+    '?? ????????????',
+    `?? ${Math.floor(VERIFY_EXPIRE_MS / 60000)} ????????`,
+    promptText,
+    '?????????? 1 ???',
+    `??????${modeText}`,
+    `???${challenge.question}`,
+    `????${Math.floor(VERIFY_EXPIRE_MS / 60000)} ??`,
   ].join('\n');
 }
 
@@ -1488,6 +1535,19 @@ function buildCaptchaImageUrl(challenge) {
   const text = encodeURIComponent(String(challenge.correct));
   const cacheBuster = encodeURIComponent(String(challenge.token || Date.now()));
   return `https://dummyimage.com/360x120/1f2937/ffffff.png&text=${text}%20${cacheBuster.slice(0, 2)}`;
+}
+
+function buildMathImageUrl(challenge) {
+  const text = encodeURIComponent(String(challenge.question || '1+1=?'));
+  const cacheBuster = encodeURIComponent(String(challenge.token || Date.now()));
+  return `https://dummyimage.com/720x200/1f2937/ffffff.png&text=${text}%20${cacheBuster.slice(0, 2)}`;
+}
+
+function buildVerificationImageUrl(challenge) {
+  if (challenge?.mode === 'math') {
+    return buildMathImageUrl(challenge);
+  }
+  return buildCaptchaImageUrl(challenge);
 }
 
 function generateCaptchaCode(length = 4) {
@@ -1511,7 +1571,46 @@ function mutateCaptchaCode(code) {
   return chars.join('');
 }
 
-function generateVerificationChallenge() {
+function createMathOperands(operator) {
+  if (operator === '+') {
+    return [randomInt(0, 10), randomInt(0, 10)];
+  }
+
+  if (operator === '-') {
+    const left = randomInt(0, 10);
+    const right = randomInt(0, left);
+    return [left, right];
+  }
+
+  const factors = [];
+  for (let left = 0; left <= 10; left += 1) {
+    for (let right = 0; right <= 10; right += 1) {
+      if (left * right <= 10) {
+        factors.push([left, right]);
+      }
+    }
+  }
+
+  return factors[randomInt(0, factors.length - 1)];
+}
+
+function calculateMathAnswer(left, right, operator) {
+  if (operator === '+') return left + right;
+  if (operator === '-') return left - right;
+  return left * right;
+}
+
+function generateMathOptions(correct) {
+  const options = new Set([Number(correct)]);
+  while (options.size < 4) {
+    const delta = randomInt(-3, 3);
+    const candidate = Math.max(0, Number(correct) + (delta === 0 ? 1 : delta));
+    options.add(candidate);
+  }
+  return shuffleArray(Array.from(options)).slice(0, 4);
+}
+
+function generateCaptchaChallenge() {
   const correct = generateCaptchaCode(4);
   const options = new Set([correct]);
   while (options.size < 4) {
@@ -1519,12 +1618,34 @@ function generateVerificationChallenge() {
   }
 
   return {
-    token: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
-    question: '请选择图片中的验证码内容',
+    mode: 'captcha',
+    token: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` ,
+    question: '????????????',
     correct,
     options: shuffleArray(Array.from(options)).slice(0, 4),
     createdAt: new Date().toISOString(),
   };
+}
+
+function generateMathChallenge() {
+  const operators = ['+', '-', '?'];
+  const displayOperator = operators[randomInt(0, operators.length - 1)];
+  const operator = displayOperator === '?' ? '*' : displayOperator;
+  const [left, right] = createMathOperands(operator);
+  const correct = calculateMathAnswer(left, right, operator);
+
+  return {
+    mode: 'math',
+    token: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` ,
+    question: `${left} ${displayOperator} ${right} = ????? 0~10 ??`,
+    correct,
+    options: generateMathOptions(correct),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function generateVerificationChallenge() {
+  return Math.random() < 0.5 ? generateCaptchaChallenge() : generateMathChallenge();
 }
 
 function isVerificationExpired(challenge) {
@@ -1539,7 +1660,7 @@ async function updateVerificationPromptMessage(env, message, state) {
       message_id: message.message_id,
       media: {
         type: 'photo',
-        media: buildCaptchaImageUrl(state.challenge),
+        media: buildVerificationImageUrl(state.challenge),
         caption: buildUserVerificationText(state.challenge),
       },
       reply_markup: buildUserVerificationKeyboard(Number(message.chat.id), state.challenge),
@@ -1548,7 +1669,7 @@ async function updateVerificationPromptMessage(env, message, state) {
   } catch (error) {
     const sent = await telegram(env, 'sendPhoto', {
       chat_id: message.chat.id,
-      photo: buildCaptchaImageUrl(state.challenge),
+      photo: buildVerificationImageUrl(state.challenge),
       caption: buildUserVerificationText(state.challenge),
       reply_markup: buildUserVerificationKeyboard(Number(message.chat.id), state.challenge),
     });
@@ -1559,7 +1680,7 @@ async function updateVerificationPromptMessage(env, message, state) {
 async function sendUserVerificationPrompt(env, userId, state) {
   const sent = await telegram(env, 'sendPhoto', {
     chat_id: userId,
-    photo: buildCaptchaImageUrl(state.challenge),
+    photo: buildVerificationImageUrl(state.challenge),
     caption: buildUserVerificationText(state.challenge),
     reply_markup: buildUserVerificationKeyboard(userId, state.challenge),
   });
@@ -2142,22 +2263,7 @@ async function restartUserVerification(env, userId, operator = 'unknown') {
   };
 
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
-  const nextState = await createOrRefreshUserVerification(env, userId, true);
-
-  try {
-    await sendUserVerificationPrompt(env, Number(userId), nextState);
-  } catch (error) {
-    try {
-      await telegram(env, 'sendMessage', {
-        chat_id: Number(userId),
-        text: '管理员已要求你重新验证，请重新完成验证后再继续发送消息。',
-      });
-    } catch (sendError) {
-      // ignore
-    }
-  }
-
-  return nextState;
+  return state;
 }
 
 async function collectKvKeys(kv, prefix, maxKeys) {
