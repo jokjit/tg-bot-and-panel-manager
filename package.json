@@ -4,7 +4,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "deploy:private": "node scripts/merge-wrangler-config.mjs && wrangler deploy --config .wrangler.private.toml",
+    "deploy:private": "node scripts/merge-wrangler-config.mjs && npx wrangler deploy --config .wrangler.private.toml",
+    "deploy:menu:win": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\deploy-menu.ps1",
     "build:panel": "npm --prefix admin-panel run build",
     "deploy:panel": "node scripts/deploy-admin-panel.mjs",
     "setup:d1": "node scripts/setup-d1.mjs"

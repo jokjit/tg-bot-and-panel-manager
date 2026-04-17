@@ -515,3 +515,33 @@ https://deploy.workers.cloudflare.com/?url=<YOUR_GITHUB_REPO_URL>
 ## 许可证
 
 如需对外开源，建议你补充 `MIT` 或你自己的许可证文件。
+
+## Windows 可视化部署
+
+如果你主要在 Windows 上维护这个项目，现在可以直接用可选择的部署脚本：
+
+- 双击仓库根目录的 `deploy-menu.bat`
+- 或运行 `npm run deploy:menu:win`
+- 脚本会优先使用图形选择窗口；如果系统没有 `Out-GridView`，会自动回退到文本菜单
+
+目前支持这些操作：
+
+- 查看当前本地私有配置摘要
+- 生成 `.wrangler.private.toml`
+- 初始化或升级 D1 数据库
+- 单独部署 Worker
+- 单独部署 Pages 面板
+- 一键连续部署 Worker + 面板
+
+如果你只想先预演命令，不真正发布，可以运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy-menu.ps1 -DryRun -TextMode
+```
+
+说明：
+
+- 脚本会从 `wrangler.local.toml` 读取私有部署参数
+- `PUBLIC_BASE_URL` 会用于面板构建时注入 Worker API 地址
+- `ADMIN_PANEL_URL` 会自动解析出域名，并传给 Pages 前端作为正式后台地址
+- `wrangler.local.toml` 和 `.wrangler.private.toml` 都不会提交到 GitHub

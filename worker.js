@@ -2221,15 +2221,17 @@ function verifyKey(userId) {
 }
 
 function detectMessageType(message) {
-  if (message.text) return 'text';
-  if (message.photo) return 'photo';
-  if (message.document) return 'document';
-  if (message.video) return 'video';
-  if (message.audio) return 'audio';
-  if (message.voice) return 'voice';
-  if (message.sticker) return 'sticker';
-  if (message.contact) return 'contact';
-  if (message.location) return 'location';
+  if (typeof message?.text === 'string') return 'text';
+  if (message?.photo?.length) return 'photo';
+  if (message?.document) return 'document';
+  if (message?.video) return 'video';
+  if (message?.animation) return 'animation';
+  if (message?.audio) return 'audio';
+  if (message?.voice) return 'voice';
+  if (message?.video_note) return 'video_note';
+  if (message?.sticker) return 'sticker';
+  if (message?.contact) return 'contact';
+  if (message?.location) return 'location';
   return 'unknown';
 }
 
@@ -2420,20 +2422,7 @@ async function listMessageHistory(env, options = {}) {
   return Array.isArray(result?.results) ? result.results : [];
 }
 
-function detectMessageType(message) {
-  if (typeof message?.text === 'string') return 'text';
-  if (message?.photo?.length) return 'photo';
-  if (message?.document) return 'document';
-  if (message?.video) return 'video';
-  if (message?.animation) return 'animation';
-  if (message?.audio) return 'audio';
-  if (message?.voice) return 'voice';
-  if (message?.video_note) return 'video_note';
-  if (message?.sticker) return 'sticker';
-  if (message?.contact) return 'contact';
-  if (message?.location) return 'location';
-  return 'unknown';
-}
+
 
 function extractMessageText(message) {
   if (typeof message?.text === 'string') return message.text;
