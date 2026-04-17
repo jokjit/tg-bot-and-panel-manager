@@ -6,7 +6,7 @@
 - 支持管理员群 **话题模式（forum topics）**
 - 黑名单、信任用户、管理员授权
 - 首次私聊验证、防刷与基础风控
-- 内置 `/admin` 后台页面与独立 `admin-panel` 前端
+- 主后台由 `admin-panel`（Cloudflare Pages）接管，Worker 仅保留 `/admin` 入口跳转与 `/admin/api/*` 接口
 - 支持 `Workers + KV + Pages` 的标准化部署
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jokjit/tg-bot-and-panel-manager)
@@ -46,7 +46,7 @@
 - 用户资料同步与头像代理
 - Webhook 设置 / 删除 / 查询
 
-### 后台侧
+### 后台侧（Pages 主面板）
 
 - 登录鉴权与密码修改
 - 运行状态仪表盘
@@ -57,12 +57,13 @@
 - 系统配置维护
 - 关键词与消息模板维护
 
+> 当前默认架构：**Pages 作为唯一主后台入口**。Worker 的 `/admin` 在配置 `ADMIN_PANEL_URL` 后会直接跳转到 Pages，仅在未配置时显示轻量提示页；完整后台 UI 不再由 Worker 承载。
 ## 技术架构
 
-- `worker.js`：Cloudflare Worker 主入口
+- `worker.js`：Cloudflare Worker 主入口，负责 Telegram Webhook、消息转发、状态接口与 `/admin/api/*`
 - `wrangler.toml`：Worker 部署配置
-- `admin-panel/`：Vue 3 + Vite + Naive UI 后台前端
-- `BOT_KV`：Cloudflare KV，用于保存机器人运行状态
+- `admin-panel/`：Vue 3 + Vite + Naive UI 主后台前端，部署到 Cloudflare Pages
+- `BOT_KV`：Cloudflare KV，用于保存系统配置、管理员密码、用户状态、授权和映射数据
 
 ```text
 .
@@ -249,7 +250,7 @@ https://your-worker.your-subdomain.workers.dev/
 https://your-worker.your-subdomain.workers.dev/setWebhook
 ```
 
-或者进入后台面板点击 “Set Webhook”。如果没有配置 `PUBLIC_BASE_URL`，Webhook 会自动使用当前 Worker 的默认访问域名。
+或者进入后台面板点击 “Set Webhook”。如果没有配置 `PUBLIC_BASE_URL`，Webhook 会自动使用当前 Worker 的默认访问域名。后台主入口建议始终使用 Pages 域名。
 
 ## GitHub Actions 全自动部署
 
@@ -297,7 +298,7 @@ https://your-worker.your-subdomain.workers.dev/setWebhook
 https://your-worker.your-subdomain.workers.dev/getWebhookInfo
 ```
 
-## 第八步：部署后台前端到 Cloudflare Pages
+## 第八步：部署主后台到 Cloudflare Pages
 
 进入前端目录：
 
@@ -378,7 +379,7 @@ npx wrangler pages deploy dist --project-name tg-admin-panel
 
 然后把 `PUBLIC_BASE_URL` 改成你的正式域名。
 
-### 后台域名
+### 后台域名（推荐作为唯一主入口）
 
 例如：
 
@@ -386,7 +387,7 @@ npx wrangler pages deploy dist --project-name tg-admin-panel
 
 然后把：
 
-- Worker 里的 `ADMIN_PANEL_URL`
+- Worker 里的 `ADMIN_PANEL_URL`（建议指向 Pages 正式域名）
 - 前端的 `VITE_CANONICAL_HOST`
 
 都改成你的正式后台域名。
@@ -411,7 +412,7 @@ https://deploy.workers.cloudflare.com/?url=<YOUR_GITHUB_REPO_URL>
 
 - 这个按钮是 **Cloudflare Workers 官方能力**
 - 它主要用于部署 Worker
-- `admin-panel` 仍建议通过 **Cloudflare Pages** 单独部署
+- `admin-panel` 应通过 **Cloudflare Pages** 部署，并作为唯一主后台入口
 - Cloudflare 官方文档说明 Deploy Button 支持自动创建 KV 等资源，但你的仓库需要保留正确的 Wrangler 配置
 
 ## 常用环境变量
@@ -472,7 +473,7 @@ https://deploy.workers.cloudflare.com/?url=<YOUR_GITHUB_REPO_URL>
 - 是否已经绑定 `BOT_KV`
 - 机器人在群里是否有发消息权限
 
-### 3. 后台登录失败
+### 3. Pages 后台登录失败
 
 请检查：
 
