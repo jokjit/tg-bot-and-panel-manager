@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="page-stack">
     <n-card class="glass-card hero-strip" :bordered="false">
       <div class="panel-heading">
@@ -21,7 +21,7 @@
             <n-input v-model:value="filters.userId" :placeholder="t('history.userIdPlaceholder')" />
           </n-form-item>
           <n-form-item :label="t('history.limit')">
-            <n-input-number v-model:value="filters.limit" :min="1" :max="100" />
+            <n-input-number v-model:value="filters.limit" :min="1" :max="100" style="width: 100%" />
           </n-form-item>
         </div>
       </n-form>
@@ -30,29 +30,48 @@
 
     <n-empty v-if="!loading && groupedSessions.length === 0" :description="t('history.empty')" class="glass-card history-empty" />
 
-    <div v-else class="history-group-list">
-      <n-card
-        v-for="session in groupedSessions"
-        :key="session.userId"
-        class="glass-card history-session"
-        :bordered="false"
-      >
+    <div v-else class="history-layout">
+      <n-card class="glass-card history-sidebar" :bordered="false">
+        <div class="history-sidebar__title">会话列表</div>
+        <div class="history-sidebar__list">
+          <button
+            v-for="session in groupedSessions"
+            :key="session.userId"
+            type="button"
+            class="history-session-link"
+            :class="{ 'history-session-link--active': String(activeSessionId) === String(session.userId) }"
+            @click="activeSessionId = session.userId"
+          >
+            <div class="history-session-link__top">
+              <strong>用户 #{{ session.userId }}</strong>
+              <span>{{ session.items.length }} 条</span>
+            </div>
+            <div class="history-session-link__meta">
+              <span>{{ formatTime(session.latestAt) }}</span>
+              <span v-if="session.topicId">Topic {{ session.topicId }}</span>
+            </div>
+            <div class="history-session-link__preview">{{ getSessionPreview(session) }}</div>
+          </button>
+        </div>
+      </n-card>
+
+      <n-card v-if="selectedSession" class="glass-card history-detail" :bordered="false">
         <div class="history-session__header">
           <div>
-            <div class="history-session__title">用户 #{{ session.userId }}</div>
+            <div class="history-session__title">用户 #{{ selectedSession.userId }}</div>
             <div class="history-session__subtitle">
-              {{ session.items.length }} 条消息 · 最近更新 {{ formatTime(session.latestAt) }}
+              {{ selectedSession.items.length }} 条消息 · 最近更新 {{ formatTime(selectedSession.latestAt) }}
             </div>
           </div>
           <div class="history-session__meta">
-            <n-tag size="small" type="default">{{ session.chatType || 'private' }}</n-tag>
-            <n-tag v-if="session.topicId" size="small" type="warning">Topic {{ session.topicId }}</n-tag>
+            <n-tag size="small" type="default">{{ selectedSession.chatType || 'private' }}</n-tag>
+            <n-tag v-if="selectedSession.topicId" size="small" type="warning">Topic {{ selectedSession.topicId }}</n-tag>
           </div>
         </div>
 
-        <div class="history-chat">
+        <div class="history-chat history-chat--detail">
           <div
-            v-for="item in session.items"
+            v-for="item in selectedSession.items"
             :key="item.id"
             class="history-bubble"
             :class="item.direction === 'admin_to_user' ? 'history-bubble--admin' : 'history-bubble--user'"
@@ -80,7 +99,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NTag, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchHistory } from '../services/api';
@@ -89,6 +108,7 @@ const message = useMessage();
 const { t } = useI18n();
 const loading = ref(false);
 const items = ref([]);
+const activeSessionId = ref('');
 const filters = reactive({
   userId: '',
   limit: 50,
@@ -120,6 +140,27 @@ const groupedSessions = computed(() => {
   return [...map.values()].sort((left, right) => new Date(right.latestAt) - new Date(left.latestAt));
 });
 
+const selectedSession = computed(() => {
+  if (!groupedSessions.value.length) return null;
+  return groupedSessions.value.find((session) => String(session.userId) === String(activeSessionId.value)) || groupedSessions.value[0];
+});
+
+watch(
+  groupedSessions,
+  (sessions) => {
+    if (!sessions.length) {
+      activeSessionId.value = '';
+      return;
+    }
+
+    const exists = sessions.some((session) => String(session.userId) === String(activeSessionId.value));
+    if (!exists) {
+      activeSessionId.value = sessions[0].userId;
+    }
+  },
+  { immediate: true },
+);
+
 function formatTime(value) {
   if (!value) return '-';
   return new Date(value).toLocaleString();
@@ -130,6 +171,12 @@ function renderMessageText(item) {
   if (text) return text;
   const type = String(item?.message_type || 'unknown');
   return `【${type}】`;
+}
+
+function getSessionPreview(session) {
+  const lastItem = session?.items?.[session.items.length - 1];
+  if (!lastItem) return '暂无内容';
+  return renderMessageText(lastItem);
 }
 
 async function load() {
@@ -172,14 +219,85 @@ onMounted(load);
   padding: 40px 0;
 }
 
-.history-group-list {
-  display: flex;
-  flex-direction: column;
+.history-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
   gap: 18px;
+  align-items: start;
 }
 
-.history-session {
+.history-sidebar,
+.history-detail {
+  min-height: 620px;
+}
+
+.history-sidebar__title {
+  margin-bottom: 14px;
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.history-sidebar__list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.history-session-link {
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--panel-border-strong);
+  border-radius: 18px;
+  background: var(--panel-strong);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.history-session-link:hover {
+  transform: translateY(-1px);
+  border-color: rgba(92, 139, 255, 0.45);
+}
+
+.history-session-link--active {
+  background: rgba(92, 139, 255, 0.14);
+  border-color: rgba(92, 139, 255, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(92, 139, 255, 0.12);
+}
+
+.history-session-link__top,
+.history-session-link__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-session-link__top strong {
+  color: var(--text-primary);
+  font-size: 15px;
+}
+
+.history-session-link__top span,
+.history-session-link__meta {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.history-session-link__meta {
+  margin-top: 6px;
+}
+
+.history-session-link__preview {
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .history-session__header {
@@ -191,7 +309,7 @@ onMounted(load);
 }
 
 .history-session__title {
-  font-size: 18px;
+  font-size: 22px;
   font-weight: 800;
   color: var(--text-primary);
 }
@@ -214,8 +332,12 @@ onMounted(load);
   gap: 12px;
 }
 
+.history-chat--detail {
+  min-height: 520px;
+}
+
 .history-bubble {
-  max-width: min(82%, 760px);
+  max-width: min(78%, 860px);
   padding: 14px 16px;
   border-radius: 20px;
   border: 1px solid var(--panel-border-strong);
@@ -254,6 +376,18 @@ onMounted(load);
   line-height: 1.75;
 }
 
+@media (max-width: 1100px) {
+  .history-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .history-sidebar,
+  .history-detail,
+  .history-chat--detail {
+    min-height: auto;
+  }
+}
+
 @media (max-width: 900px) {
   .history-filters {
     grid-template-columns: 1fr;
@@ -263,8 +397,11 @@ onMounted(load);
     max-width: 100%;
   }
 
-  .history-session__header {
+  .history-session__header,
+  .history-session-link__top,
+  .history-session-link__meta {
     flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>
