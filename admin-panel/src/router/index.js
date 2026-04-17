@@ -1,19 +1,20 @@
 import { createRouter, createWebHistory } from 'vue-router';
-import ConsoleLayout from '../views/ConsoleLayout.vue';
-import DashboardView from '../views/DashboardView.vue';
-import UsersView from '../views/UsersView.vue';
-import BlacklistView from '../views/BlacklistView.vue';
-import AdminsView from '../views/AdminsView.vue';
-import TrustView from '../views/TrustView.vue';
-import SettingsView from '../views/SettingsView.vue';
-import KeywordsView from '../views/KeywordsView.vue';
-import MessagesView from '../views/MessagesView.vue';
-import HistoryView from '../views/HistoryView.vue';
-import PasswordManageView from '../views/PasswordManageView.vue';
-import LoginView from '../views/LoginView.vue';
-import PasswordResetView from '../views/PasswordResetView.vue';
 import { fetchAuthState } from '../services/api';
 import { adminStore, clearAuthState, setAuthState } from '../stores/admin';
+
+const ConsoleLayout = () => import('../views/ConsoleLayout.vue');
+const DashboardView = () => import('../views/DashboardView.vue');
+const UsersView = () => import('../views/UsersView.vue');
+const BlacklistView = () => import('../views/BlacklistView.vue');
+const AdminsView = () => import('../views/AdminsView.vue');
+const TrustView = () => import('../views/TrustView.vue');
+const SettingsView = () => import('../views/SettingsView.vue');
+const KeywordsView = () => import('../views/KeywordsView.vue');
+const MessagesView = () => import('../views/MessagesView.vue');
+const HistoryView = () => import('../views/HistoryView.vue');
+const PasswordManageView = () => import('../views/PasswordManageView.vue');
+const LoginView = () => import('../views/LoginView.vue');
+const PasswordResetView = () => import('../views/PasswordResetView.vue');
 
 const routes = [
   {
@@ -47,7 +48,7 @@ const routes = [
   },
 ];
 
-const router = createRouter({
+const routerInstance = createRouter({
   history: createWebHistory(),
   routes,
 });
@@ -63,7 +64,7 @@ async function ensureAuthState() {
   }
 }
 
-router.beforeEach(async (to) => {
+routerInstance.beforeEach(async (to) => {
   await ensureAuthState();
 
   if (to.name === 'login') {
@@ -88,4 +89,4 @@ router.beforeEach(async (to) => {
   return true;
 });
 
-export default router;
+export default routerInstance;

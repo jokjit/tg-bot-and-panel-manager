@@ -235,6 +235,11 @@ const messages = {
       saveFailed: '保存失败',
       sectionGeneralDesc: '机器人基础接入、管理员群和 Webhook 地址配置。',
       sectionBehaviorDesc: '调整功能开关与验证策略。',
+      verifyCaptchaEnabled: '图形验证码',
+      verifyMathEnabled: '数学题验证',
+      verifyExpireMinutes: '验证有效期（分钟）',
+      verifyFailBlockSeconds: '答错后限制时长（秒）',
+      verifyTimeoutBlockSeconds: '超时后限制时长（秒）',
     },
     messages: {
       title: '消息文案',
@@ -576,6 +581,11 @@ const messages = {
       saveFailed: 'Save failed',
       sectionGeneralDesc: 'Configure bot access, admin chat, and webhook endpoint.',
       sectionBehaviorDesc: 'Adjust feature toggles and verification behavior.',
+      verifyCaptchaEnabled: 'Image captcha',
+      verifyMathEnabled: 'Math challenge',
+      verifyExpireMinutes: 'Verification TTL (minutes)',
+      verifyFailBlockSeconds: 'Wrong-answer cooldown (seconds)',
+      verifyTimeoutBlockSeconds: 'Timeout cooldown (seconds)',
     },
     messages: {
       title: 'Messages',
@@ -692,3 +702,4 @@ export const i18n = createI18n({
   fallbackLocale: 'zh-CN',
   messages,
 });
+

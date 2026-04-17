@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="page-stack">
     <n-card class="glass-card hero-strip" :bordered="false">
       <div class="panel-heading">
@@ -15,8 +15,8 @@
     </n-card>
 
     <n-form label-placement="top" :model="form" class="page-stack">
-      <n-grid :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
-        <n-gi span="24 m:12">
+      <n-grid :cols="24" x-gap="12" y-gap="12" responsive="screen" item-responsive>
+        <n-gi span="24 l:12">
           <n-card class="glass-card" :bordered="false">
             <div class="panel-heading compact">
               <div>
@@ -34,17 +34,19 @@
                   :placeholder="t('settings.keepEmpty')"
                 />
               </n-form-item>
+
               <n-form-item :label="t('settings.adminChatId')">
                 <n-input v-model:value="form.ADMIN_CHAT_ID" placeholder="-100..." />
               </n-form-item>
-              <n-form-item :label="t('settings.publicBaseUrl')">
+
+              <n-form-item class="settings-grid-span-2" :label="t('settings.publicBaseUrl')">
                 <n-input v-model:value="form.PUBLIC_BASE_URL" :placeholder="t('settings.publicBaseUrlPlaceholder')" />
               </n-form-item>
             </div>
           </n-card>
         </n-gi>
 
-        <n-gi span="24 m:12">
+        <n-gi span="24 l:12">
           <n-card class="glass-card" :bordered="false">
             <div class="panel-heading compact">
               <div>
@@ -61,12 +63,68 @@
                 </div>
                 <n-switch v-model:value="form.TOPIC_MODE_BOOL" />
               </div>
+
               <div class="switch-tile">
                 <div>
                   <strong>{{ t('settings.userVerification') }}</strong>
                   <span>{{ form.USER_VERIFICATION_BOOL ? t('app.enabled') : t('app.disabled') }}</span>
                 </div>
                 <n-switch v-model:value="form.USER_VERIFICATION_BOOL" />
+              </div>
+            </div>
+
+            <div v-if="form.USER_VERIFICATION_BOOL" class="verify-block">
+              <div class="verify-grid">
+                <n-form-item :label="t('settings.verifyExpireMinutes')">
+                  <n-input-number
+                    v-model:value="form.VERIFY_EXPIRE_MINUTES"
+                    :min="1"
+                    :max="120"
+                    :step="1"
+                    clearable
+                    style="width: 100%"
+                  />
+                </n-form-item>
+
+                <n-form-item :label="t('settings.verifyFailBlockSeconds')">
+                  <n-input-number
+                    v-model:value="form.VERIFY_FAIL_BLOCK_SECONDS"
+                    :min="10"
+                    :max="3600"
+                    :step="10"
+                    clearable
+                    style="width: 100%"
+                  />
+                </n-form-item>
+
+                <n-form-item :label="t('settings.verifyTimeoutBlockSeconds')">
+                  <n-input-number
+                    v-model:value="form.VERIFY_TIMEOUT_BLOCK_SECONDS"
+                    :min="10"
+                    :max="3600"
+                    :step="10"
+                    clearable
+                    style="width: 100%"
+                  />
+                </n-form-item>
+              </div>
+
+              <div class="switch-stack compact-stack">
+                <div class="switch-tile">
+                  <div>
+                    <strong>{{ t('settings.verifyCaptchaEnabled') }}</strong>
+                    <span>{{ form.VERIFY_CAPTCHA_ENABLED_BOOL ? t('app.enabled') : t('app.disabled') }}</span>
+                  </div>
+                  <n-switch v-model:value="form.VERIFY_CAPTCHA_ENABLED_BOOL" />
+                </div>
+
+                <div class="switch-tile">
+                  <div>
+                    <strong>{{ t('settings.verifyMathEnabled') }}</strong>
+                    <span>{{ form.VERIFY_MATH_ENABLED_BOOL ? t('app.enabled') : t('app.disabled') }}</span>
+                  </div>
+                  <n-switch v-model:value="form.VERIFY_MATH_ENABLED_BOOL" />
+                </div>
               </div>
             </div>
           </n-card>
@@ -86,11 +144,16 @@ import {
   NGi,
   NGrid,
   NInput,
+  NInputNumber,
   NSwitch,
   useMessage,
 } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchSystemConfig, saveSystemConfig } from '../services/api';
+
+const DEFAULT_VERIFY_EXPIRE_MS = 15 * 60 * 1000;
+const DEFAULT_VERIFY_FAIL_BLOCK_MS = 60 * 1000;
+const DEFAULT_VERIFY_TIMEOUT_BLOCK_MS = 60 * 1000;
 
 const message = useMessage();
 const { t } = useI18n();
@@ -103,13 +166,36 @@ const form = reactive({
   PUBLIC_BASE_URL: '',
   TOPIC_MODE_BOOL: true,
   USER_VERIFICATION_BOOL: true,
+  VERIFY_CAPTCHA_ENABLED_BOOL: true,
+  VERIFY_MATH_ENABLED_BOOL: true,
+  VERIFY_EXPIRE_MINUTES: 15,
+  VERIFY_FAIL_BLOCK_SECONDS: 60,
+  VERIFY_TIMEOUT_BLOCK_SECONDS: 60,
 });
+
+function toPositiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function msToMinutes(value, fallbackMs) {
+  return Math.max(1, Math.round(toPositiveNumber(value, fallbackMs) / 60000));
+}
+
+function msToSeconds(value, fallbackMs) {
+  return Math.max(1, Math.round(toPositiveNumber(value, fallbackMs) / 1000));
+}
 
 function assignConfig(cfg = {}) {
   form.ADMIN_CHAT_ID = cfg.ADMIN_CHAT_ID || '';
   form.PUBLIC_BASE_URL = cfg.PUBLIC_BASE_URL || '';
   form.TOPIC_MODE_BOOL = String(cfg.TOPIC_MODE || 'true') !== 'false';
   form.USER_VERIFICATION_BOOL = String(cfg.USER_VERIFICATION || 'true') !== 'false';
+  form.VERIFY_CAPTCHA_ENABLED_BOOL = String(cfg.VERIFY_CAPTCHA_ENABLED ?? 'true') !== 'false';
+  form.VERIFY_MATH_ENABLED_BOOL = String(cfg.VERIFY_MATH_ENABLED ?? 'true') !== 'false';
+  form.VERIFY_EXPIRE_MINUTES = msToMinutes(cfg.VERIFY_EXPIRE_MS, DEFAULT_VERIFY_EXPIRE_MS);
+  form.VERIFY_FAIL_BLOCK_SECONDS = msToSeconds(cfg.VERIFY_FAIL_BLOCK_MS, DEFAULT_VERIFY_FAIL_BLOCK_MS);
+  form.VERIFY_TIMEOUT_BLOCK_SECONDS = msToSeconds(cfg.VERIFY_TIMEOUT_BLOCK_MS, DEFAULT_VERIFY_TIMEOUT_BLOCK_MS);
   form.BOT_TOKEN = '';
 }
 
@@ -133,6 +219,11 @@ async function save() {
       PUBLIC_BASE_URL: form.PUBLIC_BASE_URL,
       TOPIC_MODE: form.TOPIC_MODE_BOOL ? 'true' : 'false',
       USER_VERIFICATION: form.USER_VERIFICATION_BOOL ? 'true' : 'false',
+      VERIFY_CAPTCHA_ENABLED: form.VERIFY_CAPTCHA_ENABLED_BOOL ? 'true' : 'false',
+      VERIFY_MATH_ENABLED: form.VERIFY_MATH_ENABLED_BOOL ? 'true' : 'false',
+      VERIFY_EXPIRE_MS: String(Math.max(1, Number(form.VERIFY_EXPIRE_MINUTES) || 15) * 60 * 1000),
+      VERIFY_FAIL_BLOCK_MS: String(Math.max(1, Number(form.VERIFY_FAIL_BLOCK_SECONDS) || 60) * 1000),
+      VERIFY_TIMEOUT_BLOCK_MS: String(Math.max(1, Number(form.VERIFY_TIMEOUT_BLOCK_SECONDS) || 60) * 1000),
     };
 
     if (form.BOT_TOKEN) payload.BOT_TOKEN = form.BOT_TOKEN;
@@ -151,10 +242,15 @@ onMounted(load);
 </script>
 
 <style scoped>
-.settings-grid {
+.settings-grid,
+.verify-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px 16px;
+}
+
+.settings-grid-span-2 {
+  grid-column: 1 / -1;
 }
 
 .switch-stack {
@@ -163,18 +259,31 @@ onMounted(load);
   gap: 14px;
 }
 
-.settings-grid :deep(.n-form-item),
-.settings-grid :deep(.n-form-item-blank) {
-  min-width: 0;
-}
-
-.settings-grid-full {
+.compact-stack {
   margin-top: 16px;
 }
 
+.verify-block {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.settings-grid :deep(.n-form-item),
+.settings-grid :deep(.n-form-item-blank),
+.verify-grid :deep(.n-form-item),
+.verify-grid :deep(.n-form-item-blank) {
+  min-width: 0;
+}
+
 @media (max-width: 900px) {
-  .settings-grid {
+  .settings-grid,
+  .verify-grid {
     grid-template-columns: 1fr;
+  }
+
+  .settings-grid-span-2 {
+    grid-column: auto;
   }
 }
 </style>
