@@ -168,6 +168,10 @@ onMounted(load);
   min-width: 0;
 }
 
+.settings-grid-full {
+  margin-top: 16px;
+}
+
 @media (max-width: 900px) {
   .settings-grid {
     grid-template-columns: 1fr;

@@ -988,11 +988,11 @@ async function handleUserVerificationCallback(callbackQuery, env) {
     return;
   }
 
-  if (isVerificationExpired(state.challenge)) {
+  if (isVerificationExpired(state.challenge, env)) {
     await markUserVerificationFailed(env, userId, {
       selectedAnswer: '',
       correctAnswer: String(state.challenge.correct || ''),
-      blockMs: VERIFY_TIMEOUT_BLOCK_MS,
+      blockMs: getVerificationTimeoutBlockMs(env),
     });
 
     try {
@@ -1023,7 +1023,7 @@ async function handleUserVerificationCallback(callbackQuery, env) {
     const failedState = await markUserVerificationFailed(env, userId, {
       selectedAnswer: answer,
       correctAnswer: String(state.challenge.correct),
-      blockMs: VERIFY_FAIL_BLOCK_MS,
+      blockMs: getVerificationFailBlockMs(env),
     });
 
     try {
@@ -1114,11 +1114,11 @@ async function ensureUserVerifiedOrPrompt(message, env) {
     return false;
   }
 
-  if (state?.challenge && isVerificationExpired(state.challenge)) {
+  if (state?.challenge && isVerificationExpired(state.challenge, env)) {
     await markUserVerificationFailed(env, userId, {
       selectedAnswer: '',
       correctAnswer: String(state.challenge.correct || ''),
-      blockMs: VERIFY_TIMEOUT_BLOCK_MS,
+      blockMs: getVerificationTimeoutBlockMs(env),
     });
     await telegram(env, 'sendMessage', {
       chat_id: userId,
@@ -1504,6 +1504,7 @@ function buildAdminActionKeyboard(userId) {
 }
 
 function buildUserVerificationText(challenge) {
+  const expireMs = expireMs;
   const modeText = challenge.mode === 'math' ? '10 ?????????' : '?????';
   const promptText = challenge.mode === 'math'
     ? '???? 4 ???????????? 1 ?????'
@@ -1511,12 +1512,12 @@ function buildUserVerificationText(challenge) {
 
   return [
     '?? ????????????',
-    `?? ${Math.floor(VERIFY_EXPIRE_MS / 60000)} ????????`,
+    `?? ${Math.floor(expireMs / 60000)} ????????`,
     promptText,
     '?????????? 1 ???',
     `??????${modeText}`,
     `???${challenge.question}`,
-    `????${Math.floor(VERIFY_EXPIRE_MS / 60000)} ??`,
+    `????${Math.floor(expireMs / 60000)} ??`,
   ].join('\n');
 }
 
@@ -1645,12 +1646,19 @@ function generateMathChallenge() {
 }
 
 function generateVerificationChallenge() {
-  return Math.random() < 0.5 ? generateCaptchaChallenge() : generateMathChallenge();
+  const env = globalThis.__verificationEnv || {};
+  const captchaEnabled = getVerificationCaptchaEnabled(env);
+  const mathEnabled = getVerificationMathEnabled(env);
+  if (captchaEnabled && mathEnabled) {
+    return Math.random() < 0.5 ? generateCaptchaChallenge() : generateMathChallenge();
+  }
+  if (mathEnabled) return generateMathChallenge();
+  return generateCaptchaChallenge();
 }
 
-function isVerificationExpired(challenge) {
+function isVerificationExpired(challenge, env = {}) {
   if (!challenge?.createdAt) return true;
-  return Date.now() - new Date(challenge.createdAt).getTime() > VERIFY_EXPIRE_MS;
+  return Date.now() - new Date(challenge.createdAt).getTime() > getVerificationExpireMs(env);
 }
 
 async function updateVerificationPromptMessage(env, message, state) {
@@ -1667,7 +1675,8 @@ async function updateVerificationPromptMessage(env, message, state) {
     });
     await setVerificationPromptMessageId(env, Number(message.chat.id), message.message_id);
   } catch (error) {
-    const sent = await telegram(env, 'sendPhoto', {
+    globalThis.__verificationEnv = env;
+  const sent = await telegram(env, 'sendPhoto', {
       chat_id: message.chat.id,
       photo: buildVerificationImageUrl(state.challenge),
       caption: buildUserVerificationText(state.challenge),
@@ -2358,6 +2367,32 @@ function isTopicModeEnabled(env) {
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
+function parsePositiveInt(value, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return fallback;
+  return Math.floor(num);
+}
+
+function getVerificationExpireMs(env) {
+  return parsePositiveInt(env.VERIFY_EXPIRE_MS, VERIFY_EXPIRE_MS);
+}
+
+function getVerificationFailBlockMs(env) {
+  return parsePositiveInt(env.VERIFY_FAIL_BLOCK_MS, VERIFY_FAIL_BLOCK_MS);
+}
+
+function getVerificationTimeoutBlockMs(env) {
+  return parsePositiveInt(env.VERIFY_TIMEOUT_BLOCK_MS, VERIFY_TIMEOUT_BLOCK_MS);
+}
+
+function getVerificationMathEnabled(env) {
+  return String(env.VERIFY_MATH_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+}
+
+function getVerificationCaptchaEnabled(env) {
+  return String(env.VERIFY_CAPTCHA_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+}
+
 function isUserVerificationEnabled(env) {
   const raw = String(env.USER_VERIFICATION ?? 'true').trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
@@ -2424,6 +2459,11 @@ async function getRuntimeEnv(env) {
   const systemConfig = await getSystemConfig(env);
   const runtime = { ...env };
   const runtimeKeys = [
+    'VERIFY_EXPIRE_MS',
+    'VERIFY_FAIL_BLOCK_MS',
+    'VERIFY_TIMEOUT_BLOCK_MS',
+    'VERIFY_MATH_ENABLED',
+    'VERIFY_CAPTCHA_ENABLED',
     'BOT_TOKEN',
     'ADMIN_CHAT_ID',
     'ADMIN_IDS',
@@ -2749,6 +2789,11 @@ async function updateSystemConfig(env, payload) {
   const existing = await getSystemConfig(env);
   const next = { ...existing };
   const allowed = [
+    'VERIFY_EXPIRE_MS',
+    'VERIFY_FAIL_BLOCK_MS',
+    'VERIFY_TIMEOUT_BLOCK_MS',
+    'VERIFY_MATH_ENABLED',
+    'VERIFY_CAPTCHA_ENABLED',
     'BOT_TOKEN',
     'ADMIN_CHAT_ID',
     'ADMIN_IDS',
@@ -2791,6 +2836,11 @@ function buildSystemConfigView(config) {
     WEBHOOK_PATH: config.WEBHOOK_PATH || '',
     TOPIC_MODE: config.TOPIC_MODE || '',
     USER_VERIFICATION: config.USER_VERIFICATION || '',
+    VERIFY_EXPIRE_MS: config.VERIFY_EXPIRE_MS || '',
+    VERIFY_FAIL_BLOCK_MS: config.VERIFY_FAIL_BLOCK_MS || '',
+    VERIFY_TIMEOUT_BLOCK_MS: config.VERIFY_TIMEOUT_BLOCK_MS || '',
+    VERIFY_MATH_ENABLED: config.VERIFY_MATH_ENABLED || '',
+    VERIFY_CAPTCHA_ENABLED: config.VERIFY_CAPTCHA_ENABLED || '',
     WELCOME_TEXT: config.WELCOME_TEXT || '',
     BLOCKED_TEXT: config.BLOCKED_TEXT || '',
     ADMIN_API_KEY: maskSecret(config.ADMIN_API_KEY),
