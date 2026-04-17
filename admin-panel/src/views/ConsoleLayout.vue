@@ -1,42 +1,5 @@
 <template>
-  <n-layout position="absolute" style="inset: 0" class="layout-root" :has-sider="!isMobile">
-    <n-layout-sider
-      v-if="!isMobile"
-      collapse-mode="width"
-      :collapsed-width="88"
-      :width="290"
-      :collapsed="collapsed"
-      @update:collapsed="(v) => (collapsed = v)"
-      show-trigger
-      :native-scrollbar="false"
-      class="side-rail"
-    >
-      <div class="sider-panel glass-card">
-        <div class="brand">
-          <div class="brand-badge">
-            <div class="logo">
-              <Icon icon="solar:chat-round-like-broken" width="22" />
-            </div>
-            <div class="title-wrap" v-if="!collapsed">
-              <div class="title">{{ t('app.title') }}</div>
-              <div class="sub">{{ t('app.subtitle') }}</div>
-            </div>
-          </div>
-          <div class="brand-chip" v-if="!collapsed">{{ t('app.pageStyle') }}</div>
-        </div>
-
-        <n-menu
-          class="nav-menu"
-          :collapsed="collapsed"
-          :collapsed-width="88"
-          :collapsed-icon-size="22"
-          :options="menuOptions"
-          :value="activeKey"
-          @update:value="handleMenuSelect"
-        />
-      </div>
-    </n-layout-sider>
-
+  <n-layout position="absolute" style="inset: 0" class="layout-root">
     <n-drawer v-model:show="drawerVisible" placement="left" :width="304" :trap-focus="false">
       <n-drawer-content :title="t('app.navigation')" closable body-content-style="padding: 0">
         <div class="drawer-panel">
@@ -60,16 +23,15 @@
       </n-drawer-content>
     </n-drawer>
 
-    <n-layout embedded class="main-shell" :class="{ 'main-shell--mobile': isMobile }">
+    <n-layout embedded class="main-shell">
       <n-layout-header class="header-shell">
         <div class="header-panel glass-card">
           <div class="page-intro">
             <div class="page-intro__top">
               <n-button
-                v-if="isMobile"
                 quaternary
                 circle
-                class="mobile-nav-trigger"
+                class="nav-trigger"
                 :aria-label="t('app.openMenu')"
                 @click="drawerVisible = true"
               >
@@ -140,7 +102,6 @@ import {
   NLayout,
   NLayoutContent,
   NLayoutHeader,
-  NLayoutSider,
   NMenu,
   NSelect,
   NSwitch,
@@ -169,9 +130,8 @@ const route = useRoute();
 const router = useRouter();
 const message = useMessage();
 const { t, te, locale } = useI18n();
-const collapsed = ref(false);
-const isMobile = ref(false);
 const drawerVisible = ref(false);
+const isMobile = ref(false);
 
 function renderIcon(icon) {
   return () => h(NIcon, null, { default: () => h(icon) });
@@ -206,17 +166,7 @@ const contentStyle = computed(() => `padding: 0 ${isMobile.value ? 12 : 24}px ${
 
 function updateViewport() {
   if (typeof window === 'undefined') return;
-  const width = window.innerWidth;
-  isMobile.value = width < 960;
-  if (!isMobile.value) {
-    drawerVisible.value = false;
-  }
-  if (width >= 960 && width < 1280) {
-    collapsed.value = true;
-  }
-  if (width >= 1280) {
-    collapsed.value = false;
-  }
+  isMobile.value = window.innerWidth < 960;
 }
 
 function onLocaleChange(next) {
@@ -280,19 +230,6 @@ onBeforeUnmount(() => {
   overflow-x: hidden;
 }
 
-.side-rail {
-  background: transparent;
-  padding: 20px 0 20px 20px;
-}
-
-.sider-panel {
-  height: calc(100vh - 40px);
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  padding: 18px 14px;
-}
-
 .drawer-panel {
   padding: 12px;
 }
@@ -300,6 +237,13 @@ onBeforeUnmount(() => {
 .drawer-panel__inner {
   min-height: calc(100vh - 120px);
   height: auto;
+}
+
+.sider-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 18px 14px;
 }
 
 .brand {
@@ -376,7 +320,7 @@ onBeforeUnmount(() => {
   gap: 14px;
 }
 
-.mobile-nav-trigger {
+.nav-trigger {
   flex-shrink: 0;
   margin-top: 4px;
 }
@@ -435,17 +379,6 @@ onBeforeUnmount(() => {
 .user-chip strong {
   font-size: 14px;
   color: var(--text-primary);
-}
-
-:deep(.n-layout-sider-scroll-container) {
-  padding-right: 10px;
-}
-
-:deep(.side-rail .n-layout-toggle-button) {
-  background: var(--panel-strong);
-  border: 1px solid var(--panel-border-strong);
-  color: var(--text-primary);
-  box-shadow: var(--soft-shadow);
 }
 
 :deep(.nav-menu) {

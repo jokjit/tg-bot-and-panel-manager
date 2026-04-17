@@ -10,6 +10,7 @@
 
         <div class="panel-summary">
           <n-tag type="success" round>{{ t('dashboard.loggedInAs', { name: adminStore.username || 'admin' }) }}</n-tag>
+          <n-button tertiary round @click="router.push('/history')">{{ t('app.history') }}</n-button>
           <n-button secondary round @click="refresh">{{ t('dashboard.refresh') }}</n-button>
         </div>
       </div>
@@ -34,6 +35,9 @@
             </div>
           </div>
           <div class="action-grid">
+            <n-button tertiary @click="router.push('/history')">
+              {{ t('history.panelTitle') }}
+            </n-button>
             <n-button type="primary" :loading="loadingWebhook" @click="handleSetWebhook">
               {{ t('dashboard.setWebhook') }}
             </n-button>
