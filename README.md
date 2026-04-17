@@ -184,7 +184,7 @@ npm run setup:d1 -- --database-name tg-bot-history --binding DB --remote
 这个脚本会自动：
 
 - 创建 D1 数据库
-- 把 `database_name` 和 `database_id` 写回 `wrangler.toml`
+- 把 `database_name` 和 `database_id` 写回本地部署配置；公开仓库模板中不要保留真实 `database_id`
 - 执行 `migrations/0001_message_history.sql`
 
 查看帮助：
