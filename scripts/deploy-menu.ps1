@@ -245,9 +245,7 @@ function Update-LocalConfigVars {
   $content = Get-Content $path -Raw -Encoding UTF8
   foreach ($key in $Vars.Keys) {
     $value = [string]$Vars[$key]
-    if (-not [string]::IsNullOrWhiteSpace($value)) {
-      $content = Set-OrAddTomlVar -Content $content -Key $key -Value $value
-    }
+    $content = Set-OrAddTomlVar -Content $content -Key $key -Value $value
   }
   $utf8Bom = New-Object System.Text.UTF8Encoding($true)
   [System.IO.File]::WriteAllText($path, $content, $utf8Bom)
@@ -354,6 +352,19 @@ function Read-RequiredInput {
   }
 }
 
+function Read-OptionalInput {
+  param(
+    [string]$Prompt,
+    [string]$DefaultValue
+  )
+
+  $fullPrompt = if ([string]::IsNullOrWhiteSpace($DefaultValue)) { $Prompt } else { ($Prompt + ' [' + $DefaultValue + ']') }
+  $value = Read-Host $fullPrompt
+  if ([string]::IsNullOrWhiteSpace($value)) {
+    return $DefaultValue
+  }
+  return $value.Trim()
+}
 function Invoke-MergeConfig {
   param([object]$Config)
 
@@ -460,14 +471,13 @@ function Invoke-FirstDeployWizard {
 
   Ensure-LocalConfigExists -Config $Config
 
-  $workerUrlDefault = if ($Config.PublicBaseUrl) { $Config.PublicBaseUrl } elseif ($Config.WorkersDevGuess) { $Config.WorkersDevGuess } else { '' }
-  $panelUrlDefault = if ($Config.AdminPanelUrl) { $Config.AdminPanelUrl } else { 'https://tg-admin.example.com' }
   $botTokenDefault = [string]$Config.WizardSecrets.BOT_TOKEN
   $adminChatIdDefault = [string]$Config.WizardSecrets.ADMIN_CHAT_ID
 
   Write-Host '步骤 1/5：填写基础地址' -ForegroundColor Green
-  $publicBaseUrl = Read-RequiredInput -Prompt '请输入 Worker 对外地址（可先用 workers.dev）' -DefaultValue $workerUrlDefault
-  $adminPanelUrl = Read-RequiredInput -Prompt '请输入 Pages 面板地址（可后续改成正式域名）' -DefaultValue $panelUrlDefault
+  Write-Host '提示：这两项都可回车跳过，后续使用 Cloudflare 默认分配域名。' -ForegroundColor DarkYellow
+  $publicBaseUrl = Read-OptionalInput -Prompt '请输入 Worker 自定义地址（示例：https://your-worker.example.com，回车跳过使用默认 workers.dev 域名）' -DefaultValue ''
+  $adminPanelUrl = Read-OptionalInput -Prompt '请输入 Pages 面板地址（示例：https://tg-admin.example.com，回车跳过使用 Pages 默认分配域名）' -DefaultValue ''
 
   Write-Host ''
   Write-Host '步骤 2/5：填写 Telegram 必要参数' -ForegroundColor Green
