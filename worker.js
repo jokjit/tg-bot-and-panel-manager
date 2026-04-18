@@ -962,7 +962,7 @@ async function handleUserVerificationCallback(callbackQuery, env) {
   const senderId = callbackQuery.from?.id ? Number(callbackQuery.from.id) : null;
 
   if (!chatId || !senderId || senderId !== userId || chatId !== userId) {
-    await answerCallback(env, callbackQuery.id, '???????????', true);
+    await answerCallback(env, callbackQuery.id, '这不是你的验证题目。', true);
     return;
   }
 
@@ -973,7 +973,7 @@ async function handleUserVerificationCallback(callbackQuery, env) {
       await telegram(env, 'editMessageCaption', {
         chat_id: userId,
         message_id: callbackQuery.message.message_id,
-        caption: '? ???????????????????',
+        caption: '✅ 验证通过，已解除限制。',
         reply_markup: { inline_keyboard: [] },
       });
     } catch (error) {
@@ -982,27 +982,27 @@ async function handleUserVerificationCallback(callbackQuery, env) {
 
     await telegram(env, 'sendMessage', {
       chat_id: userId,
-      text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n???????????????`,
+      text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n你已完成首次验证，现在可以正常发送消息了。`,
     });
 
-    await answerCallback(env, callbackQuery.id, '????');
+    await answerCallback(env, callbackQuery.id, '验证通过');
     return;
   }
 
   if (result.status === 'already-verified') {
-    await answerCallback(env, callbackQuery.id, '?????????');
+    await answerCallback(env, callbackQuery.id, '你已经通过验证了。');
     return;
   }
 
   if (result.status === 'blocked') {
-    await answerCallback(env, callbackQuery.id, `????????? ${result.leftSec} ?????`, true);
+    await answerCallback(env, callbackQuery.id, `验证冷却中，请 ${result.leftSec} 秒后再试。`, true);
     return;
   }
 
   if (result.status === 'token-mismatch') {
     const refreshed = await createOrRefreshUserVerification(env, userId, true);
     await updateVerificationPromptMessage(env, callbackQuery.message, refreshed);
-    await answerCallback(env, callbackQuery.id, '????????????', true);
+    await answerCallback(env, callbackQuery.id, '题目已刷新，请重新验证。', true);
     return;
   }
 
@@ -1012,9 +1012,9 @@ async function handleUserVerificationCallback(callbackQuery, env) {
         chat_id: userId,
         message_id: callbackQuery.message.message_id,
         caption: [
-          '? ??????',
-          '?????????????',
-          '??? 1 ???????????????????',
+          '⏰ 验证已过期',
+          '本次验证题目已失效。',
+          '请等待 1 分钟后重新发送消息获取新题目。',
         ].join('\n'),
         reply_markup: { inline_keyboard: [] },
       });
@@ -1022,12 +1022,12 @@ async function handleUserVerificationCallback(callbackQuery, env) {
       // ignore
     }
 
-    await answerCallback(env, callbackQuery.id, '???????? 1 ???', true);
+    await answerCallback(env, callbackQuery.id, '验证已过期，请 1 分钟后重试。', true);
     return;
   }
 
   if (result.status === 'already-answered') {
-    await answerCallback(env, callbackQuery.id, '??????????????????', true);
+    await answerCallback(env, callbackQuery.id, '本题已处理，请勿重复提交。', true);
     return;
   }
 
@@ -1037,10 +1037,10 @@ async function handleUserVerificationCallback(callbackQuery, env) {
         chat_id: userId,
         message_id: callbackQuery.message.message_id,
         caption: [
-          '? ?????',
-          `?????${answer}???????${result.correctAnswer}` ,
-          '????? 1 ???????????????????',
-          `?????${result.blockedUntil}` ,
+          '❌ 验证失败',
+          `你的答案：${answer}，正确答案：${result.correctAnswer}`,
+          '请等待 1 分钟后重新发送消息获取新题目。',
+          `解封时间：${result.blockedUntil}`,
         ].join('\n'),
         reply_markup: { inline_keyboard: [] },
       });
@@ -1048,7 +1048,7 @@ async function handleUserVerificationCallback(callbackQuery, env) {
       // ignore
     }
 
-    await answerCallback(env, callbackQuery.id, '???????? 1 ???', true);
+    await answerCallback(env, callbackQuery.id, '验证失败，请 1 分钟后重试。', true);
     return;
   }
 }
@@ -1079,7 +1079,7 @@ async function tryHandleUserVerificationText(message, env) {
         await telegram(env, 'editMessageCaption', {
           chat_id: userId,
           message_id: promptMessageId,
-          caption: '? ???????????????????',
+          caption: '✅ 验证通过，已解除限制。',
           reply_markup: { inline_keyboard: [] },
         });
       } catch (error) {
@@ -1089,7 +1089,7 @@ async function tryHandleUserVerificationText(message, env) {
 
     await telegram(env, 'sendMessage', {
       chat_id: userId,
-      text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n???????????????`,
+      text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n你已完成首次验证，现在可以正常发送消息了。`,
     });
     return true;
   }
@@ -1097,7 +1097,7 @@ async function tryHandleUserVerificationText(message, env) {
   if (result.status === 'blocked') {
     await telegram(env, 'sendMessage', {
       chat_id: userId,
-      text: `?????????????? ${result.leftSec} ?????`,
+      text: `验证冷却中，请 ${result.leftSec} 秒后再试。`,
     });
     return true;
   }
@@ -1110,9 +1110,9 @@ async function tryHandleUserVerificationText(message, env) {
           chat_id: userId,
           message_id: promptMessageId,
           caption: [
-            '? ??????',
-            '?????????????',
-            '??? 1 ???????????????????',
+            '⏰ 验证已过期',
+            '本次验证题目已失效。',
+            '请等待 1 分钟后重新发送消息获取新题目。',
           ].join('\n'),
           reply_markup: { inline_keyboard: [] },
         });
@@ -1123,7 +1123,7 @@ async function tryHandleUserVerificationText(message, env) {
 
     await telegram(env, 'sendMessage', {
       chat_id: userId,
-      text: '?????????????? 1 ?????????????????',
+      text: '验证已过期，请等待 1 分钟后重新发送消息获取新题目。',
     });
     return true;
   }
@@ -1136,10 +1136,10 @@ async function tryHandleUserVerificationText(message, env) {
           chat_id: userId,
           message_id: promptMessageId,
           caption: [
-            '? ?????',
-            `?????${answer}???????${result.correctAnswer}`,
-            '????? 1 ???????????????????',
-            `?????${result.blockedUntil}`,
+            '❌ 验证失败',
+            `你的答案：${answer}，正确答案：${result.correctAnswer}`,
+            '请等待 1 分钟后重新发送消息获取新题目。',
+            `解封时间：${result.blockedUntil}`,
           ].join('\n'),
           reply_markup: { inline_keyboard: [] },
         });
@@ -1150,7 +1150,7 @@ async function tryHandleUserVerificationText(message, env) {
 
     await telegram(env, 'sendMessage', {
       chat_id: userId,
-      text: '???????? 1 ???',
+      text: '验证失败，请等待 1 分钟后重新发送消息获取新题目。',
     });
     return true;
   }
@@ -1158,7 +1158,7 @@ async function tryHandleUserVerificationText(message, env) {
   if (result.status === 'already-answered') {
     await telegram(env, 'sendMessage', {
       chat_id: userId,
-      text: '??????????????????',
+      text: '本题已处理，请勿重复提交。',
     });
     return true;
   }
@@ -1266,7 +1266,7 @@ async function ensureUserVerifiedOrPrompt(message, env) {
     const leftSec = Math.max(1, Math.ceil((blockedUntilMs - Date.now()) / 1000));
     await telegram(env, 'sendMessage', {
       chat_id: userId,
-      text: `?????????????? ${leftSec} ?????`,
+      text: `验证冷却中，请 ${leftSec} 秒后再试。`,
     });
     return false;
   }
@@ -1279,7 +1279,7 @@ async function ensureUserVerifiedOrPrompt(message, env) {
     });
     await telegram(env, 'sendMessage', {
       chat_id: userId,
-      text: '?????????????? 1 ?????????????????',
+      text: '验证已过期，请等待 1 分钟后重新发送消息获取新题目。',
     });
     return false;
   }
@@ -1662,19 +1662,19 @@ function buildAdminActionKeyboard(userId) {
 
 function buildUserVerificationText(challenge) {
   const expireMs = getVerificationExpireMs(globalThis.__verificationEnv || {});
-  const modeText = challenge.mode === 'math' ? '10 ?????????' : '?????';
+  const modeText = challenge.mode === 'math' ? '10 以内算术题' : '图形验证码';
   const promptText = challenge.mode === 'math'
-    ? '???? 4 ???????????? 1 ?????'
-    : '??????????????? 4 ???????????? 1 ?????';
+    ? '请从下方 4 个选项中选择正确答案，答错后需等待 1 分钟。'
+    : '请识别图片中的验证码，并从下方 4 个选项中选择正确答案，答错后需等待 1 分钟。';
 
   return [
-    '?? ????????????',
-    `?? ${Math.floor(expireMs / 60000)} ????????`,
+    '🔐 首次私聊验证',
+    `⏱ 请在 ${Math.floor(expireMs / 60000)} 分钟内完成验证`,
     promptText,
-    '?????????? 1 ???',
-    `??????${modeText}`,
-    `???${challenge.question}`,
-    `????${Math.floor(expireMs / 60000)} ??`,
+    '❗ 验证失败后需等待 1 分钟',
+    `验证方式：${modeText}`,
+    `题目：${challenge.question}`,
+    `有效期：${Math.floor(expireMs / 60000)} 分钟`,
   ].join('\n');
 }
 
@@ -1778,7 +1778,7 @@ function generateCaptchaChallenge() {
   return {
     mode: 'captcha',
     token: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` ,
-    question: '????????????',
+    question: '请选择图片中正确的验证码',
     correct,
     options: shuffleArray(Array.from(options)).slice(0, 4),
     createdAt: new Date().toISOString(),
@@ -1795,7 +1795,7 @@ function generateMathChallenge() {
   return {
     mode: 'math',
     token: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` ,
-    question: `${left} ${displayOperator} ${right} = ????? 0~10 ??`,
+    question: `${left} ${displayOperator} ${right} = ?（答案范围 0~10）`,
     correct,
     options: generateMathOptions(correct),
     createdAt: new Date().toISOString(),
