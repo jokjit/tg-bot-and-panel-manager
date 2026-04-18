@@ -398,7 +398,7 @@ function Read-RequiredInput {
   )
 
   while ($true) {
-    $fullPrompt = if ([string]::IsNullOrWhiteSpace($DefaultValue)) { $Prompt } else { ($Prompt + ' [' + $DefaultValue + ']') }
+    $fullPrompt = if ([string]::IsNullOrWhiteSpace($DefaultValue)) { $Prompt } else { ($Prompt + ' [已保存，直接回车复用]') }
     $value = Read-Host $fullPrompt
     if ([string]::IsNullOrWhiteSpace($value)) {
       if (-not [string]::IsNullOrWhiteSpace($DefaultValue)) {
@@ -417,7 +417,7 @@ function Read-OptionalInput {
     [string]$DefaultValue
   )
 
-  $fullPrompt = if ([string]::IsNullOrWhiteSpace($DefaultValue)) { $Prompt } else { ($Prompt + ' [' + $DefaultValue + ']') }
+  $fullPrompt = if ([string]::IsNullOrWhiteSpace($DefaultValue)) { $Prompt } else { ($Prompt + ' [已保存，直接回车复用]') }
   $value = Read-Host $fullPrompt
   if ([string]::IsNullOrWhiteSpace($value)) {
     return $DefaultValue
@@ -847,4 +847,6 @@ try {
   Write-Host ('执行失败：' + $_.Exception.Message) -ForegroundColor Red
   exit 1
 }
+
+
 
