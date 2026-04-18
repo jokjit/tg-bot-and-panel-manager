@@ -966,35 +966,47 @@ async function handleUserVerificationCallback(callbackQuery, env) {
     return;
   }
 
-  ensureKv(env);
+  const result = await processUserVerificationAnswer(env, userId, answer, { expectedToken: token });
 
-  const state = await getUserVerificationState(env, userId);
-  if (state?.verified) {
+  if (result.status === 'verified') {
+    try {
+      await telegram(env, 'editMessageCaption', {
+        chat_id: userId,
+        message_id: callbackQuery.message.message_id,
+        caption: '? ???????????????????',
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch (error) {
+      // ignore
+    }
+
+    await telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n???????????????`,
+    });
+
+    await answerCallback(env, callbackQuery.id, '????');
+    return;
+  }
+
+  if (result.status === 'already-verified') {
     await answerCallback(env, callbackQuery.id, '?????????');
     return;
   }
 
-  const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
-  if (blockedUntilMs && blockedUntilMs > Date.now()) {
-    const leftSec = Math.max(1, Math.ceil((blockedUntilMs - Date.now()) / 1000));
-    await answerCallback(env, callbackQuery.id, `????????? ${leftSec} ?????`, true);
+  if (result.status === 'blocked') {
+    await answerCallback(env, callbackQuery.id, `????????? ${result.leftSec} ?????`, true);
     return;
   }
 
-  if (!state?.challenge || state.challenge.token !== token) {
+  if (result.status === 'token-mismatch') {
     const refreshed = await createOrRefreshUserVerification(env, userId, true);
     await updateVerificationPromptMessage(env, callbackQuery.message, refreshed);
     await answerCallback(env, callbackQuery.id, '????????????', true);
     return;
   }
 
-  if (isVerificationExpired(state.challenge, env)) {
-    await markUserVerificationFailed(env, userId, {
-      selectedAnswer: '',
-      correctAnswer: String(state.challenge.correct || ''),
-      blockMs: getVerificationTimeoutBlockMs(env),
-    });
-
+  if (result.status === 'expired') {
     try {
       await telegram(env, 'editMessageCaption', {
         chat_id: userId,
@@ -1014,27 +1026,21 @@ async function handleUserVerificationCallback(callbackQuery, env) {
     return;
   }
 
-  if (state?.answeredAt) {
+  if (result.status === 'already-answered') {
     await answerCallback(env, callbackQuery.id, '??????????????????', true);
     return;
   }
 
-  if (answer !== String(state.challenge.correct)) {
-    const failedState = await markUserVerificationFailed(env, userId, {
-      selectedAnswer: answer,
-      correctAnswer: String(state.challenge.correct),
-      blockMs: getVerificationFailBlockMs(env),
-    });
-
+  if (result.status === 'incorrect') {
     try {
       await telegram(env, 'editMessageCaption', {
         chat_id: userId,
         message_id: callbackQuery.message.message_id,
         caption: [
           '? ?????',
-          `?????${answer}???????${state.challenge.correct}` ,
+          `?????${answer}???????${result.correctAnswer}` ,
           '????? 1 ???????????????????',
-          `?????${failedState.blockedUntil}` ,
+          `?????${result.blockedUntil}` ,
         ].join('\n'),
         reply_markup: { inline_keyboard: [] },
       });
@@ -1045,26 +1051,173 @@ async function handleUserVerificationCallback(callbackQuery, env) {
     await answerCallback(env, callbackQuery.id, '???????? 1 ???', true);
     return;
   }
+}
 
-  await markUserVerified(env, userId);
-
-  try {
-    await telegram(env, 'editMessageCaption', {
-      chat_id: userId,
-      message_id: callbackQuery.message.message_id,
-      caption: '? ???????????????????',
-      reply_markup: { inline_keyboard: [] },
-    });
-  } catch (error) {
-    // ignore
+async function tryHandleUserVerificationText(message, env) {
+  if (!isUserVerificationEnabled(env) || typeof message?.text !== 'string') {
+    return false;
   }
 
-  await telegram(env, 'sendMessage', {
-    chat_id: userId,
-    text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n???????????????`,
-  });
+  ensureKv(env);
+  const userId = Number(message.chat.id);
+  const state = await getUserVerificationState(env, userId);
+  if (!state || state.verified || !state.challenge) {
+    return false;
+  }
 
-  await answerCallback(env, callbackQuery.id, '????');
+  const answer = String(message.text || '').trim();
+  if (!answer) {
+    return false;
+  }
+
+  const result = await processUserVerificationAnswer(env, userId, answer);
+
+  if (result.status === 'verified') {
+    const promptMessageId = Number(state.promptMessageId || 0);
+    if (promptMessageId) {
+      try {
+        await telegram(env, 'editMessageCaption', {
+          chat_id: userId,
+          message_id: promptMessageId,
+          caption: '? ???????????????????',
+          reply_markup: { inline_keyboard: [] },
+        });
+      } catch (error) {
+        // ignore
+      }
+    }
+
+    await telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n???????????????`,
+    });
+    return true;
+  }
+
+  if (result.status === 'blocked') {
+    await telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text: `?????????????? ${result.leftSec} ?????`,
+    });
+    return true;
+  }
+
+  if (result.status === 'expired') {
+    const promptMessageId = Number(state.promptMessageId || 0);
+    if (promptMessageId) {
+      try {
+        await telegram(env, 'editMessageCaption', {
+          chat_id: userId,
+          message_id: promptMessageId,
+          caption: [
+            '? ??????',
+            '?????????????',
+            '??? 1 ???????????????????',
+          ].join('\n'),
+          reply_markup: { inline_keyboard: [] },
+        });
+      } catch (error) {
+        // ignore
+      }
+    }
+
+    await telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text: '?????????????? 1 ?????????????????',
+    });
+    return true;
+  }
+
+  if (result.status === 'incorrect') {
+    const promptMessageId = Number(state.promptMessageId || 0);
+    if (promptMessageId) {
+      try {
+        await telegram(env, 'editMessageCaption', {
+          chat_id: userId,
+          message_id: promptMessageId,
+          caption: [
+            '? ?????',
+            `?????${answer}???????${result.correctAnswer}`,
+            '????? 1 ???????????????????',
+            `?????${result.blockedUntil}`,
+          ].join('\n'),
+          reply_markup: { inline_keyboard: [] },
+        });
+      } catch (error) {
+        // ignore
+      }
+    }
+
+    await telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text: '???????? 1 ???',
+    });
+    return true;
+  }
+
+  if (result.status === 'already-answered') {
+    await telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text: '??????????????????',
+    });
+    return true;
+  }
+
+  return false;
+}
+
+async function processUserVerificationAnswer(env, userId, answer, options = {}) {
+  ensureKv(env);
+
+  const state = await getUserVerificationState(env, userId);
+  if (state?.verified) {
+    return { status: 'already-verified' };
+  }
+
+  const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
+  if (blockedUntilMs && blockedUntilMs > Date.now()) {
+    return {
+      status: 'blocked',
+      leftSec: Math.max(1, Math.ceil((blockedUntilMs - Date.now()) / 1000)),
+    };
+  }
+
+  if (!state?.challenge) {
+    return { status: 'no-challenge' };
+  }
+
+  if (options.expectedToken && state.challenge.token !== options.expectedToken) {
+    return { status: 'token-mismatch' };
+  }
+
+  if (isVerificationExpired(state.challenge, env)) {
+    await markUserVerificationFailed(env, userId, {
+      selectedAnswer: '',
+      correctAnswer: String(state.challenge.correct || ''),
+      blockMs: getVerificationTimeoutBlockMs(env),
+    });
+    return { status: 'expired' };
+  }
+
+  if (state?.answeredAt) {
+    return { status: 'already-answered' };
+  }
+
+  if (String(answer) !== String(state.challenge.correct)) {
+    const failedState = await markUserVerificationFailed(env, userId, {
+      selectedAnswer: answer,
+      correctAnswer: String(state.challenge.correct),
+      blockMs: getVerificationFailBlockMs(env),
+    });
+    return {
+      status: 'incorrect',
+      correctAnswer: String(state.challenge.correct),
+      blockedUntil: failedState.blockedUntil,
+    };
+  }
+
+  await markUserVerified(env, userId);
+  return { status: 'verified' };
 }
 
 function isUserPrivateCommand(message) {
@@ -1102,6 +1255,10 @@ async function ensureUserVerifiedOrPrompt(message, env) {
   const state = await getUserVerificationState(env, userId);
   if (state?.verified) {
     return true;
+  }
+
+  if (await tryHandleUserVerificationText(message, env)) {
+    return false;
   }
 
   const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
@@ -1504,7 +1661,7 @@ function buildAdminActionKeyboard(userId) {
 }
 
 function buildUserVerificationText(challenge) {
-  const expireMs = expireMs;
+  const expireMs = getVerificationExpireMs(globalThis.__verificationEnv || {});
   const modeText = challenge.mode === 'math' ? '10 ?????????' : '?????';
   const promptText = challenge.mode === 'math'
     ? '???? 4 ???????????? 1 ?????'
@@ -1662,6 +1819,7 @@ function isVerificationExpired(challenge, env = {}) {
 }
 
 async function updateVerificationPromptMessage(env, message, state) {
+  globalThis.__verificationEnv = env;
   try {
     await telegram(env, 'editMessageMedia', {
       chat_id: message.chat.id,
@@ -1675,8 +1833,7 @@ async function updateVerificationPromptMessage(env, message, state) {
     });
     await setVerificationPromptMessageId(env, Number(message.chat.id), message.message_id);
   } catch (error) {
-    globalThis.__verificationEnv = env;
-  const sent = await telegram(env, 'sendPhoto', {
+    const sent = await telegram(env, 'sendPhoto', {
       chat_id: message.chat.id,
       photo: buildVerificationImageUrl(state.challenge),
       caption: buildUserVerificationText(state.challenge),
@@ -1687,6 +1844,7 @@ async function updateVerificationPromptMessage(env, message, state) {
 }
 
 async function sendUserVerificationPrompt(env, userId, state) {
+  globalThis.__verificationEnv = env;
   const sent = await telegram(env, 'sendPhoto', {
     chat_id: userId,
     photo: buildVerificationImageUrl(state.challenge),
