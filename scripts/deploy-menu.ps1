@@ -105,23 +105,67 @@ function Get-WhoAmIInfo {
   }
 }
 
+function Get-WranglerConfigFilePath {
+  $paths = @(
+    (Join-Path $env:APPDATA 'xdg.config\.wrangler\config\default.toml'),
+    (Join-Path $env:USERPROFILE '.wrangler\config\default.toml')
+  ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+  foreach ($path in $paths) {
+    if (Test-Path $path) {
+      return $path
+    }
+  }
+
+  return $null
+}
+
+function Get-CloudflareApiToken {
+  if (-not [string]::IsNullOrWhiteSpace($env:CLOUDFLARE_API_TOKEN)) {
+    return $env:CLOUDFLARE_API_TOKEN
+  }
+
+  $configPath = Get-WranglerConfigFilePath
+  if ([string]::IsNullOrWhiteSpace($configPath)) {
+    return $null
+  }
+
+  try {
+    $content = Get-Content $configPath -Raw -Encoding UTF8
+    return (Get-ConfigMatchValue -Content $content -Pattern '^oauth_token\s*=\s*"([^"]+)"')
+  } catch {
+    return $null
+  }
+}
+
+function Get-PrimaryAccountId {
+  param([object]$WhoAmI)
+
+  if ($null -eq $WhoAmI -or -not $WhoAmI.accounts -or $WhoAmI.accounts.Count -eq 0) {
+    return $null
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($env:CLOUDFLARE_ACCOUNT_ID)) {
+    return $env:CLOUDFLARE_ACCOUNT_ID.Trim()
+  }
+
+  return [string]$WhoAmI.accounts[0].id
+}
+
 function Get-WorkersDevSubdomain {
-  if ([string]::IsNullOrWhiteSpace($env:CLOUDFLARE_API_TOKEN)) {
+  $token = Get-CloudflareApiToken
+  if ([string]::IsNullOrWhiteSpace($token)) {
     return $null
   }
 
   $who = Get-WhoAmIInfo
-  if ($null -eq $who -or -not $who.accounts -or $who.accounts.Count -eq 0) {
-    return $null
-  }
-
-  $accountId = $who.accounts[0].id
+  $accountId = Get-PrimaryAccountId -WhoAmI $who
   if ([string]::IsNullOrWhiteSpace($accountId)) {
     return $null
   }
 
   try {
-    $headers = @{ Authorization = ('Bearer ' + $env:CLOUDFLARE_API_TOKEN) }
+    $headers = @{ Authorization = ('Bearer ' + $token) }
     $uri = 'https://api.cloudflare.com/client/v4/accounts/' + $accountId + '/workers/subdomain'
     $response = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
     return $response.result.subdomain
@@ -148,6 +192,16 @@ function Get-WorkersDevUrlGuess {
   }
 
   return ('https://' + $workerName + '.' + $subdomain + '.workers.dev')
+}
+
+function Get-PagesDevUrlGuess {
+  param([string]$ProjectName)
+
+  if ([string]::IsNullOrWhiteSpace($ProjectName)) {
+    return $null
+  }
+
+  return ('https://' + $ProjectName.Trim() + '.pages.dev')
 }
 
 function Read-WizardSecrets {
@@ -212,11 +266,11 @@ function Set-OrAddTomlVar {
     for ($i = $varsIndex + 1; $i -lt $items.Count; $i += 1) {
       $trimmed = $items[$i].Trim()
       if ($trimmed.StartsWith('[')) {
-        $items.Insert($i, $line)
+        [void]$items.Insert($i, $line)
         return (($items -join "`r`n").TrimEnd("`r", "`n") + "`r`n")
       }
 
-      if ($trimmed.StartsWith($Key + ' =')) {
+      if ($trimmed -match ('^' + [regex]::Escape($Key) + '\s*=')) {
         $items[$i] = $line
         return (($items -join "`r`n").TrimEnd("`r", "`n") + "`r`n")
       }
@@ -274,6 +328,7 @@ function Read-DeployConfig {
   $adminPanelUrl = Get-ConfigMatchValue -Content $localContent -Pattern '^ADMIN_PANEL_URL\s*=\s*"([^"]+)"'
   $wizardSecrets = Read-WizardSecrets
   $who = Get-WhoAmIInfo
+  $pagesProjectName = $(if ($env:PAGES_PROJECT_NAME) { $env:PAGES_PROJECT_NAME } else { 'tg-admin-panel' })
 
   return [pscustomobject]@{
     RepoRoot = $repoRoot
@@ -283,13 +338,15 @@ function Read-DeployConfig {
     PublicBaseUrl = $publicBaseUrl
     AdminPanelUrl = $adminPanelUrl
     CanonicalHost = Get-CanonicalHost -Url $adminPanelUrl
-    PagesProjectName = $(if ($env:PAGES_PROJECT_NAME) { $env:PAGES_PROJECT_NAME } else { 'tg-admin-panel' })
+    PagesProjectName = $pagesProjectName
     PagesBranch = $(if ($env:CF_PAGES_BRANCH) { $env:CF_PAGES_BRANCH } else { 'production' })
+    PagesDevGuess = Get-PagesDevUrlGuess -ProjectName $pagesProjectName
     DatabaseName = $databaseName
     DatabaseId = $databaseId
     WizardSecrets = $wizardSecrets
     WranglerLoggedIn = [bool]($who -and $who.loggedIn)
     WranglerAccountEmail = $(if ($who -and $who.email) { $who.email } else { $null })
+    CloudflareAccountId = Get-PrimaryAccountId -WhoAmI $who
     WorkersDevGuess = Get-WorkersDevUrlGuess
   }
 }
@@ -304,10 +361,12 @@ function Show-ConfigSummary {
   Write-Host ('Worker 名称      : ' + $Config.WorkerName)
   Write-Host ('Wrangler 登录    : ' + $(if ($Config.WranglerLoggedIn) { '已登录' } else { '未检测到' }))
   Write-Host ('Cloudflare 账号  : ' + $(if ($Config.WranglerAccountEmail) { $Config.WranglerAccountEmail } else { '未知' }))
+  Write-Host ('Cloudflare 账户ID: ' + $(if ($Config.CloudflareAccountId) { $Config.CloudflareAccountId } else { '未知' }))
   Write-Host ('私有配置文件    : ' + $(if ($Config.LocalConfigExists) { '已找到' } else { '未找到' }))
   Write-Host ('Worker 地址      : ' + $(if ($Config.PublicBaseUrl) { $Config.PublicBaseUrl } else { '未设置' }))
   Write-Host ('面板地址         : ' + $(if ($Config.AdminPanelUrl) { $Config.AdminPanelUrl } else { '未设置' }))
   Write-Host ('workers.dev 猜测 : ' + $(if ($Config.WorkersDevGuess) { $Config.WorkersDevGuess } else { '不可用' }))
+  Write-Host ('pages.dev 猜测   : ' + $(if ($Config.PagesDevGuess) { $Config.PagesDevGuess } else { '不可用' }))
   Write-Host ('Pages 项目       : ' + $Config.PagesProjectName)
   Write-Host ('Pages 分支       : ' + $Config.PagesBranch)
   Write-Host ('D1 数据库        : ' + $(if ($Config.DatabaseName) { $Config.DatabaseName } else { '未设置' }))
@@ -365,6 +424,140 @@ function Read-OptionalInput {
   }
   return $value.Trim()
 }
+
+function Invoke-WranglerLogin {
+  param([object]$Config)
+
+  if ($DryRun) {
+    Write-Host ''
+    Write-Host '[Cloudflare 登录]' -ForegroundColor Yellow
+    Write-Host '> npx wrangler login --browser' -ForegroundColor DarkGray
+    return
+  }
+
+  Invoke-RepoCommand -Title 'Cloudflare 登录' -FilePath 'npx' -Arguments @('wrangler', 'login', '--browser') -WorkingDirectory $Config.RepoRoot
+}
+
+function Ensure-CloudflareAuth {
+  param(
+    [object]$Config,
+    [switch]$AutoLogin
+  )
+
+  if ($Config.WranglerLoggedIn -or -not [string]::IsNullOrWhiteSpace((Get-CloudflareApiToken))) {
+    return (Read-DeployConfig)
+  }
+
+  $shouldLogin = [bool]$AutoLogin
+  if (-not $shouldLogin) {
+    $shouldLogin = Get-YesNo -Prompt '未检测到 Cloudflare 登录状态，是否现在自动打开 Wrangler 登录？' -Default $true
+  }
+
+  if (-not $shouldLogin) {
+    throw '未完成 Cloudflare 登录，无法继续部署。'
+  }
+
+  Invoke-WranglerLogin -Config $Config
+  $refresh = Read-DeployConfig
+  if (-not $refresh.WranglerLoggedIn -and [string]::IsNullOrWhiteSpace((Get-CloudflareApiToken))) {
+    throw 'Cloudflare 登录未完成，请完成授权后重新运行。'
+  }
+
+  return $refresh
+}
+
+function Test-PagesProjectExists {
+  param([object]$Config)
+
+  Push-Location $Config.RepoRoot
+  try {
+    $raw = & npx wrangler pages project list --json 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+      return $false
+    }
+
+    $items = $raw | ConvertFrom-Json
+    foreach ($item in $items) {
+      $itemName = [string]$item.name
+      if ([string]::IsNullOrWhiteSpace($itemName)) {
+        $itemName = [string]$item.'Project Name'
+      }
+
+      if ($itemName -eq [string]$Config.PagesProjectName) {
+        return $true
+      }
+    }
+
+    return $false
+  } catch {
+    return $false
+  } finally {
+    Pop-Location
+  }
+}
+
+function Ensure-PagesProject {
+  param([object]$Config)
+
+  if (Test-PagesProjectExists -Config $Config) {
+    return
+  }
+
+  if ($DryRun) {
+    Write-Host ''
+    Write-Host '[创建 Pages 项目]' -ForegroundColor Yellow
+    Write-Host ('> npx wrangler pages project create ' + $Config.PagesProjectName + ' --production-branch ' + $Config.PagesBranch) -ForegroundColor DarkGray
+    return
+  }
+
+  Invoke-RepoCommand -Title '创建 Pages 项目' -FilePath 'npx' -Arguments @('wrangler', 'pages', 'project', 'create', $Config.PagesProjectName, '--production-branch', $Config.PagesBranch) -WorkingDirectory $Config.RepoRoot
+}
+
+function Resolve-WorkerBaseUrl {
+  param(
+    [object]$Config,
+    [string]$PreferredValue
+  )
+
+  $candidates = @($PreferredValue, $Config.PublicBaseUrl, $Config.WorkersDevGuess)
+  foreach ($candidate in $candidates) {
+    if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+      return $candidate.Trim().TrimEnd('/')
+    }
+  }
+
+  return $null
+}
+
+function Resolve-AdminPanelUrl {
+  param(
+    [object]$Config,
+    [string]$PreferredValue
+  )
+
+  $candidates = @($PreferredValue, $Config.AdminPanelUrl, $Config.PagesDevGuess)
+  foreach ($candidate in $candidates) {
+    if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+      return $candidate.Trim().TrimEnd('/')
+    }
+  }
+
+  return $null
+}
+
+function Show-DeployResult {
+  param([object]$Config)
+
+  Write-Host ''
+  Write-Host '部署完成摘要' -ForegroundColor Cyan
+  Write-Host ('-' * 48)
+  Write-Host ('Worker 地址      : ' + $(if ($Config.PublicBaseUrl) { $Config.PublicBaseUrl } else { '未识别' }))
+  Write-Host ('面板地址         : ' + $(if ($Config.AdminPanelUrl) { $Config.AdminPanelUrl } else { $Config.PagesDevGuess }))
+  Write-Host ('Pages 项目       : ' + $Config.PagesProjectName)
+  Write-Host ('workers.dev 猜测 : ' + $(if ($Config.WorkersDevGuess) { $Config.WorkersDevGuess } else { '不可用' }))
+  Write-Host ''
+}
+
 function Invoke-MergeConfig {
   param([object]$Config)
 
@@ -375,6 +568,7 @@ function Invoke-MergeConfig {
 function Invoke-SetupD1 {
   param([object]$Config)
 
+  $Config = Ensure-CloudflareAuth -Config $Config -AutoLogin
   Ensure-LocalConfigExists -Config $Config
   Invoke-MergeConfig -Config $Config
 
@@ -390,7 +584,16 @@ function Invoke-SetupD1 {
 function Invoke-DeployWorker {
   param([object]$Config)
 
+  $Config = Ensure-CloudflareAuth -Config $Config -AutoLogin
   Ensure-LocalConfigExists -Config $Config
+
+  if ([string]::IsNullOrWhiteSpace($Config.PublicBaseUrl)) {
+    $resolvedWorkerBaseUrl = Resolve-WorkerBaseUrl -Config $Config -PreferredValue ''
+    if (-not [string]::IsNullOrWhiteSpace($resolvedWorkerBaseUrl)) {
+      Update-LocalConfigVars -Config $Config -Vars @{ PUBLIC_BASE_URL = $resolvedWorkerBaseUrl }
+      $Config = Read-DeployConfig
+    }
+  }
 
   if ($DryRun) {
     Invoke-MergeConfig -Config $Config
@@ -404,11 +607,19 @@ function Invoke-DeployWorker {
 function Invoke-DeployPanel {
   param([object]$Config)
 
-  if ([string]::IsNullOrWhiteSpace($Config.PublicBaseUrl)) {
-    throw '未在 wrangler.local.toml 中找到 PUBLIC_BASE_URL，无法部署 Pages 面板。'
+  $Config = Ensure-CloudflareAuth -Config $Config -AutoLogin
+  Ensure-PagesProject -Config $Config
+
+  $resolvedWorkerBaseUrl = Resolve-WorkerBaseUrl -Config $Config -PreferredValue $Config.PublicBaseUrl
+  if ([string]::IsNullOrWhiteSpace($resolvedWorkerBaseUrl)) {
+    throw '未找到 PUBLIC_BASE_URL，也无法自动推断 workers.dev 地址。请先登录 Cloudflare，或在 wrangler.local.toml 中手动填写。'
   }
 
-  $arguments = @('scripts/deploy-admin-panel.mjs', '--project-name', $Config.PagesProjectName, '--worker-base-url', $Config.PublicBaseUrl, '--branch', $Config.PagesBranch)
+  $resolvedAdminPanelUrl = Resolve-AdminPanelUrl -Config $Config -PreferredValue $Config.AdminPanelUrl
+  Update-LocalConfigVars -Config $Config -Vars @{ PUBLIC_BASE_URL = $resolvedWorkerBaseUrl; ADMIN_PANEL_URL = $resolvedAdminPanelUrl }
+  $Config = Read-DeployConfig
+
+  $arguments = @('scripts/deploy-admin-panel.mjs', '--project-name', $Config.PagesProjectName, '--worker-base-url', $resolvedWorkerBaseUrl, '--branch', $Config.PagesBranch)
   if (-not [string]::IsNullOrWhiteSpace($Config.CanonicalHost)) {
     $arguments += @('--canonical-host', $Config.CanonicalHost)
   }
@@ -422,8 +633,9 @@ function Invoke-DeployPanel {
 function Invoke-DeployAll {
   param([object]$Config)
 
+  $Config = Ensure-CloudflareAuth -Config $Config -AutoLogin
   Invoke-DeployWorker -Config $Config
-  Invoke-DeployPanel -Config $Config
+  Invoke-DeployPanel -Config (Read-DeployConfig)
 }
 
 function Set-WorkerSecrets {
@@ -431,6 +643,8 @@ function Set-WorkerSecrets {
     [object]$Config,
     [hashtable]$Secrets
   )
+
+  $Config = Ensure-CloudflareAuth -Config $Config -AutoLogin
 
   foreach ($key in $Secrets.Keys) {
     $value = [string]$Secrets[$key]
@@ -462,22 +676,19 @@ function Invoke-FirstDeployWizard {
   param([object]$Config)
 
   Write-Host ''
-  Write-Host '首次部署向导' -ForegroundColor Cyan
-  Write-Host ('=' * 48)
+  Write-Host '首次部署向导（本地全自动版）' -ForegroundColor Cyan
+  Write-Host ('=' * 56)
 
-  if (-not $Config.WranglerLoggedIn -and [string]::IsNullOrWhiteSpace($env:CLOUDFLARE_API_TOKEN)) {
-    throw '未检测到 Wrangler 登录状态，也未设置 CLOUDFLARE_API_TOKEN。请先执行 npx wrangler login。'
-  }
-
+  $Config = Ensure-CloudflareAuth -Config $Config -AutoLogin
   Ensure-LocalConfigExists -Config $Config
 
   $botTokenDefault = [string]$Config.WizardSecrets.BOT_TOKEN
   $adminChatIdDefault = [string]$Config.WizardSecrets.ADMIN_CHAT_ID
 
-  Write-Host '步骤 1/5：填写基础地址' -ForegroundColor Green
-  Write-Host '提示：这两项都可回车跳过，后续使用 Cloudflare 默认分配域名。' -ForegroundColor DarkYellow
-  $publicBaseUrl = Read-OptionalInput -Prompt '请输入 Worker 自定义地址（示例：https://your-worker.example.com，回车跳过使用默认 workers.dev 域名）' -DefaultValue ''
-  $adminPanelUrl = Read-OptionalInput -Prompt '请输入 Pages 面板地址（示例：https://tg-admin.example.com，回车跳过使用 Pages 默认分配域名）' -DefaultValue ''
+  Write-Host '步骤 1/5：填写可选自定义地址' -ForegroundColor Green
+  Write-Host '提示：两项都可直接回车；脚本会自动回退到 workers.dev / pages.dev 默认域名。' -ForegroundColor DarkYellow
+  $publicBaseUrlInput = Read-OptionalInput -Prompt '请输入 Worker 自定义地址（示例：https://your-worker.example.com，回车自动使用 workers.dev）' -DefaultValue $Config.PublicBaseUrl
+  $adminPanelUrlInput = Read-OptionalInput -Prompt '请输入 Pages 面板地址（示例：https://tg-admin.example.com，回车自动使用 pages.dev）' -DefaultValue $Config.AdminPanelUrl
 
   Write-Host ''
   Write-Host '步骤 2/5：填写 Telegram 必要参数' -ForegroundColor Green
@@ -485,15 +696,19 @@ function Invoke-FirstDeployWizard {
   $adminChatId = Read-RequiredInput -Prompt '请输入 ADMIN_CHAT_ID' -DefaultValue $adminChatIdDefault
 
   Write-Host ''
-  Write-Host '步骤 3/5：写入本地私有配置' -ForegroundColor Green
-  Update-LocalConfigVars -Config $Config -Vars @{ PUBLIC_BASE_URL = $publicBaseUrl; ADMIN_PANEL_URL = $adminPanelUrl }
+  Write-Host '步骤 3/5：自动补全本地私有配置' -ForegroundColor Green
+  $resolvedPublicBaseUrl = Resolve-WorkerBaseUrl -Config $Config -PreferredValue $publicBaseUrlInput
+  $resolvedAdminPanelUrl = Resolve-AdminPanelUrl -Config $Config -PreferredValue $adminPanelUrlInput
+  Update-LocalConfigVars -Config $Config -Vars @{ PUBLIC_BASE_URL = $(if ($resolvedPublicBaseUrl) { $resolvedPublicBaseUrl } else { '' }); ADMIN_PANEL_URL = $(if ($resolvedAdminPanelUrl) { $resolvedAdminPanelUrl } else { '' }) }
+
   $savedSecrets = Read-WizardSecrets
   $savedSecrets.BOT_TOKEN = $botToken
   $savedSecrets.ADMIN_CHAT_ID = $adminChatId
   Save-WizardSecrets -Secrets $savedSecrets
-  Write-Host '已更新 wrangler.local.toml，并缓存必要 Telegram 参数到本地向导文件。' -ForegroundColor DarkGreen
-
   $refresh = Read-DeployConfig
+
+  Write-Host ('Worker 地址将使用：' + $(if ($refresh.PublicBaseUrl) { $refresh.PublicBaseUrl } else { '部署后自动继续尝试识别' })) -ForegroundColor DarkGreen
+  Write-Host ('面板地址将使用 ：' + $(if ($refresh.AdminPanelUrl) { $refresh.AdminPanelUrl } else { $refresh.PagesDevGuess })) -ForegroundColor DarkGreen
 
   Write-Host ''
   Write-Host '步骤 4/5：是否初始化 D1 历史消息数据库' -ForegroundColor Green
@@ -505,19 +720,14 @@ function Invoke-FirstDeployWizard {
   }
 
   Write-Host ''
-  Write-Host '步骤 5/5：部署并写入必要 Secret' -ForegroundColor Green
+  Write-Host '步骤 5/5：自动创建资源并完成部署' -ForegroundColor Green
+  Ensure-PagesProject -Config $refresh
   Invoke-MergeConfig -Config $refresh
-  if (Get-YesNo -Prompt '是否把 BOT_TOKEN 和 ADMIN_CHAT_ID 写入 Worker Secret？' -Default $true) {
-    Set-WorkerSecrets -Config $refresh -Secrets @{ BOT_TOKEN = $botToken; ADMIN_CHAT_ID = $adminChatId }
-  }
+  Set-WorkerSecrets -Config $refresh -Secrets @{ BOT_TOKEN = $botToken; ADMIN_CHAT_ID = $adminChatId }
+  Invoke-DeployAll -Config (Read-DeployConfig)
 
-  if (Get-YesNo -Prompt '是否现在一键部署 Worker 与 Pages 面板？' -Default $true) {
-    Invoke-DeployAll -Config (Read-DeployConfig)
-  } else {
-    Write-Host '已跳过正式部署，你可以稍后从菜单中单独执行。' -ForegroundColor Yellow
-  }
-
-  Write-Host ''
+  $finalConfig = Read-DeployConfig
+  Show-DeployResult -Config $finalConfig
   Write-Host '首次部署向导完成。' -ForegroundColor Green
 }
 
@@ -637,3 +847,4 @@ try {
   Write-Host ('执行失败：' + $_.Exception.Message) -ForegroundColor Red
   exit 1
 }
+

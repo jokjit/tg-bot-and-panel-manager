@@ -1,4 +1,4 @@
-# Telegram 双向聊天机器人（Cloudflare Workers）
+﻿# Telegram 双向聊天机器人（Cloudflare Workers）
 
 一个可直接部署到 **Cloudflare Workers** 的 Telegram 双向聊天项目，提供：
 
@@ -530,15 +530,17 @@ https://deploy.workers.cloudflare.com/?url=<YOUR_GITHUB_REPO_URL>
 
 - `首次部署向导`
 
-向导会依次帮你完成：
+现在这个向导已经升级为更接近新手可直接使用的本地全自动流程，会依次帮你完成：
 
-- 检查 `Wrangler` 是否已登录
+- 自动检测 Cloudflare 登录状态；未登录时直接拉起 `wrangler login`
 - 自动创建或补全 `wrangler.local.toml`
-- 引导填写 `PUBLIC_BASE_URL` 与 `ADMIN_PANEL_URL`
+- 可选填写自定义 `PUBLIC_BASE_URL` 与 `ADMIN_PANEL_URL`
+- 如果留空，自动回退到默认 `workers.dev` 与 `pages.dev` 地址
 - 引导填写 `BOT_TOKEN` 与 `ADMIN_CHAT_ID`
 - 可选自动创建并迁移 D1 历史消息数据库
-- 可选自动把 `BOT_TOKEN`、`ADMIN_CHAT_ID` 写入 Worker Secret
-- 可选一键部署 Worker 与 Pages 面板
+- 自动创建缺失的 Pages 项目
+- 自动把 `BOT_TOKEN`、`ADMIN_CHAT_ID` 写入 Worker Secret
+- 自动连续部署 Worker 与 Pages 面板
 
 其中：
 
@@ -568,3 +570,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy-menu.ps1 -DryRun -Text
 - `PUBLIC_BASE_URL` 会用于面板构建时注入 Worker API 地址
 - `ADMIN_PANEL_URL` 会自动解析出域名，并传给 Pages 前端作为正式后台地址
 - `wrangler.local.toml`、`.wrangler.private.toml`、`.deploy-wizard.secrets.json` 都不会提交到 GitHub
+
