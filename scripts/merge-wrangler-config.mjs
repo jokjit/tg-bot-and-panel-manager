@@ -14,6 +14,7 @@ if (!existsSync(basePath)) {
 const base = readFileSync(basePath, 'utf8');
 
 let merged = base;
+let managedRouteBlock = '';
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -52,9 +53,24 @@ function upsertBindingBlock(content, tableName, binding, block) {
   return `${content.replace(/\s+$/, '')}\n\n${block}\n`;
 }
 
+function findManagedWorkerRouteBlock(content) {
+  return String(content || '').match(/# TG_BOT_WORKER_ROUTE_START[\s\S]*?# TG_BOT_WORKER_ROUTE_END/)?.[0] || '';
+}
+
+function insertTopLevelBlock(content, block) {
+  if (!block) return content;
+  const firstTableIndex = content.search(/^[ \t]*\[/m);
+  if (firstTableIndex >= 0) {
+    return `${content.slice(0, firstTableIndex).replace(/\s+$/, '')}\n\n${block}\n\n${content.slice(firstTableIndex).replace(/^\s+/, '')}`;
+  }
+  return `${content.replace(/\s+$/, '')}\n\n${block}\n`;
+}
+
 if (existsSync(localPath)) {
   const local = readFileSync(localPath, 'utf8').trim();
   if (local) {
+    managedRouteBlock = findManagedWorkerRouteBlock(local);
+
     const kvBlock = findBindingBlock(local, 'kv_namespaces', 'BOT_KV');
     if (kvBlock) {
       merged = upsertBindingBlock(merged, 'kv_namespaces', 'BOT_KV', kvBlock);
@@ -117,6 +133,10 @@ if (/^[ \t]*main[ \t]*=.*$/m.test(merged)) {
   merged = merged.replace(/^[ \t]*name[ \t]*=.*$/m, (hit) => `${hit}\n${mainLine}`);
 } else {
   merged = `${mainLine}\n${merged}`;
+}
+
+if (managedRouteBlock) {
+  merged = insertTopLevelBlock(merged, managedRouteBlock);
 }
 
 mkdirSync(dirname(outputPath), { recursive: true });

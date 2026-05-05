@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.1.14'
+const DEPLOY_TOOL_VERSION = 'v1.1.15'
 
 // paths
 function findRepoRoot() {
@@ -148,13 +148,63 @@ function buildEnv(account) {
 function normalizeHttpUrl(raw) {
   const text = String(raw || '').trim()
   if (!text) return ''
+  const withProtocol = /^https?:\/\//i.test(text) ? text : `https://${text}`
   try {
-    const parsed = new URL(text)
+    const parsed = new URL(withProtocol)
     if (!/^https?:$/.test(parsed.protocol)) return ''
     return parsed.toString().replace(/\/$/, '')
   } catch {
     return ''
   }
+}
+
+function ensureLocalWranglerFile(env = {}) {
+  const localPath = getLocalWranglerPath(env)
+  if (!fs.existsSync(localPath)) {
+    fs.mkdirSync(path.dirname(localPath), { recursive: true })
+    fs.writeFileSync(localPath, ['# Account private deployment config', '', '[vars]', ''].join('\n'), 'utf8')
+  }
+  return localPath
+}
+
+function getWorkerCustomDomainHost(workerUrl) {
+  const normalized = normalizeHttpUrl(workerUrl)
+  if (!normalized) return ''
+  try {
+    const host = new URL(normalized).hostname.toLowerCase()
+    if (!host || host.endsWith('.workers.dev') || host.endsWith('.pages.dev')) return ''
+    return host
+  } catch {
+    return ''
+  }
+}
+
+function stripManagedWorkerRouteBlock(content) {
+  return String(content || '').replace(/\n?# TG_BOT_WORKER_ROUTE_START[\s\S]*?# TG_BOT_WORKER_ROUTE_END\n?/m, '\n')
+}
+
+function upsertManagedWorkerRoute(content, workerUrl) {
+  const current = String(content || '')
+  const withoutManaged = stripManagedWorkerRouteBlock(current).replace(/\n{3,}/g, '\n\n')
+  const host = getWorkerCustomDomainHost(workerUrl)
+  if (!host) {
+    return { content: withoutManaged, updated: withoutManaged !== current, host: '' }
+  }
+
+  const block = [
+    '# TG_BOT_WORKER_ROUTE_START',
+    '# Managed by TG Bot Deploy Tool. Do not edit this block manually.',
+    'routes = [',
+    `  { pattern = ${JSON.stringify(host)}, custom_domain = true }`,
+    ']',
+    '# TG_BOT_WORKER_ROUTE_END',
+  ].join('\n')
+
+  const firstTableIndex = withoutManaged.search(/^[ \t]*\[/m)
+  const next = firstTableIndex >= 0
+    ? `${withoutManaged.slice(0, firstTableIndex).replace(/\s+$/, '')}\n\n${block}\n\n${withoutManaged.slice(firstTableIndex).replace(/^\s+/, '')}`
+    : `${withoutManaged.replace(/\s+$/, '')}\n\n${block}\n`
+  return { content: next, updated: next !== current, host }
 }
 
 function upsertVarsBlock(content, updates) {
@@ -198,8 +248,7 @@ function upsertVarsBlock(content, updates) {
 }
 
 function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl, env = {}) {
-  const localPath = getLocalWranglerPath(env)
-  if (!fs.existsSync(localPath)) return []
+  const localPath = ensureLocalWranglerFile(env)
 
   const updates = {}
   const normalizedWorker = normalizeHttpUrl(workerUrl)
@@ -208,9 +257,16 @@ function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl, env = {}) {
   if (normalizedPanel) updates.ADMIN_PANEL_URL = normalizedPanel
 
   const current = fs.readFileSync(localPath, 'utf8')
-  const { content, updatedKeys } = upsertVarsBlock(current, updates)
-  if (updatedKeys.length > 0 && content !== current) {
-    fs.writeFileSync(localPath, content, 'utf8')
+  let { content, updatedKeys } = upsertVarsBlock(current, updates)
+  if (String(workerUrl || '').trim()) {
+    const route = upsertManagedWorkerRoute(content, normalizedWorker)
+    content = route.content
+    if (route.updated) {
+      updatedKeys.push(route.host ? `WORKER_CUSTOM_DOMAIN:${route.host}` : 'WORKER_CUSTOM_DOMAIN_REMOVED')
+    }
+  }
+  if (content !== current) {
+    fs.writeFileSync(localPath, content.replace(/\s+$/, '') + '\n', 'utf8')
   }
   return updatedKeys
 }
@@ -272,6 +328,44 @@ async function createPagesProject(env, projectName) {
     return { ok: false, reason }
   }
   return { ok: true, project: json.result || null }
+}
+
+async function listPagesDeployments(env, projectName) {
+  const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
+  if (!token || !accountId || !projectName) {
+    return { ok: false, reason: 'missing_token_or_account_or_project', deployments: [] }
+  }
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects/${projectName}/deployments?per_page=5`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const json = await response.json().catch(() => null)
+  if (!json?.success) {
+    return { ok: false, reason: buildCfErrorReason(json, response.status), deployments: [] }
+  }
+  return { ok: true, deployments: Array.isArray(json.result) ? json.result : [] }
+}
+
+async function verifyPagesDeployment(env, projectName, previousIds = new Set()) {
+  const list = await listPagesDeployments(env, projectName)
+  if (!list.ok) return { ok: false, reason: list.reason || 'deployment_list_failed' }
+  const latest = list.deployments.find((item) => !previousIds.has(String(item.id || ''))) || list.deployments[0]
+  if (!latest) return { ok: false, reason: 'no_pages_deployments_found' }
+  if (previousIds.size > 0 && previousIds.has(String(latest.id || ''))) {
+    return { ok: false, reason: 'no_new_pages_deployment_found' }
+  }
+  const stage = latest.latest_stage || {}
+  if (stage.name === 'deploy' && stage.status === 'failure') {
+    return { ok: false, reason: `latest_deployment_failed:${latest.id || 'unknown'}` }
+  }
+  return {
+    ok: true,
+    id: latest.id || '',
+    url: normalizeHttpUrl(latest.url || ''),
+    environment: latest.environment || '',
+    stage: stage.status || '',
+  }
 }
 
 function getWorkerNameFromConfig(configPath) {
@@ -665,8 +759,16 @@ async function runAction(action, params, env) {
       await runScript('merge-wrangler-config.mjs', [], env)
       return
     case 'deploy-worker':
+      {
+        const runtimeUpdates = syncRuntimeUrlsToLocalConfig(params?.workerUrl || '', params?.panelUrl || '', env)
+        if (runtimeUpdates.length > 0) send(`Updated wrangler.local.toml vars/routes: ${runtimeUpdates.join(', ')}`)
+      }
       send('Initializing KV...')
       await runScript('setup-kv.mjs', [], env)
+      {
+        const runtimeUpdates = syncRuntimeUrlsToLocalConfig(params?.workerUrl || '', params?.panelUrl || '', env)
+        if (runtimeUpdates.length > 0) send(`Updated wrangler.local.toml vars/routes: ${runtimeUpdates.join(', ')}`)
+      }
       await runScript('merge-wrangler-config.mjs', [], env)
       const workerConfigPath = getPrivateWranglerPath(env)
       validatePrivateWranglerConfig(workerConfigPath)
@@ -684,7 +786,7 @@ async function runAction(action, params, env) {
       }
       return
     case 'deploy-panel': {
-      const workerUrl = params?.workerUrl || ''
+      const workerUrl = normalizeHttpUrl(params?.workerUrl || '')
       const panelUrl = normalizeHttpUrl(params?.panelUrl || '')
       const tempDist = path.join(os.tmpdir(), 'tg-bot-panel-dist-' + Date.now())
       const viteBin = path.join(getAdminPanelDir(), 'node_modules', 'vite', 'bin', 'vite.js')
@@ -710,9 +812,16 @@ async function runAction(action, params, env) {
         send(`Pages project exists, uploading overwrite: ${projectName}`)
       }
 
-      const deployArgs = ['pages', 'deploy', tempDist, '--project-name', projectName]
-      if (params?.branch) deployArgs.push('--branch', params.branch)
+      const beforeDeployments = await listPagesDeployments(env, projectName)
+      const beforeDeploymentIds = new Set((beforeDeployments.deployments || []).map((item) => String(item.id || '')).filter(Boolean))
+      const deployArgs = ['pages', 'deploy', tempDist, '--project-name', projectName, '--branch', params?.branch || 'main']
       await runWrangler(deployArgs, { ...env, ELECTRON_RUN_AS_NODE: '1' })
+
+      const deployment = await verifyPagesDeployment(env, projectName, beforeDeploymentIds)
+      if (!deployment.ok) {
+        throw new Error(`Pages upload command finished but deployment verification failed: ${deployment.reason || 'unknown'}`)
+      }
+      send(`Pages deployment verified: ${deployment.id || projectName}${deployment.url ? ` -> ${deployment.url}` : ''}`)
 
       const check = await getPagesProject(env, projectName)
       if (!check?.ok || !check.project) {
@@ -727,7 +836,7 @@ async function runAction(action, params, env) {
       }
 
       const deployedPanelUrl = subdomain ? normalizeHttpUrl(`https://${subdomain}`) : ''
-      const effectivePanelUrl = panelUrl || deployedPanelUrl
+      const effectivePanelUrl = panelUrl || deployedPanelUrl || deployment.url
       if (workerUrl || effectivePanelUrl) {
         const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env)
         if (updatedVars.length > 0) {
@@ -750,19 +859,26 @@ async function runAction(action, params, env) {
     }
     case 'first-deploy': {
       const { botToken, adminChatId, workerUrl, panelUrl } = params || {}
+      let effectiveWorkerUrl = normalizeHttpUrl(workerUrl || '')
       const effectivePanelUrl = normalizeHttpUrl(panelUrl || '')
       send('Step 1/4: Merging config...')
       await runScript('merge-wrangler-config.mjs', [], env)
 
-      const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env)
+      const updatedVars = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
       if (updatedVars.length > 0) {
-        send(`Updated wrangler.local.toml vars: ${updatedVars.join(', ')}`)
+        send(`Updated wrangler.local.toml vars/routes: ${updatedVars.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
       }
 
       send('Step 2/4: Initializing KV and D1...')
       await runScript('setup-kv.mjs', [], env)
       await runScript('setup-d1.mjs', ['--remote'], env)
+      {
+        const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+        if (postInitUpdates.length > 0) {
+          send(`Updated wrangler.local.toml vars/routes: ${postInitUpdates.join(', ')}`)
+        }
+      }
       await runScript('merge-wrangler-config.mjs', [], env)
       send('Step 3/4: Deploying Worker...')
       const workerConfigPath = getPrivateWranglerPath(env)
@@ -772,22 +888,40 @@ async function runAction(action, params, env) {
       {
         const check = await verifyWorkerDeployment(env, workerConfigPath, send, {
           deployOutput: deploy?.output || '',
-          workerUrl,
+          workerUrl: effectiveWorkerUrl,
         })
         if (!check.ok) {
           throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
         }
         send(`Worker verified: ${check.workerName}${check.method ? ` (${check.method})` : ''}`)
       }
-      if (botToken) await runWranglerSecret('BOT_TOKEN', botToken, env)
-      if (adminChatId) await runWranglerSecret('ADMIN_CHAT_ID', adminChatId, env)
+      if (!effectiveWorkerUrl) {
+        effectiveWorkerUrl = extractWorkerUrls(deploy?.output || '', getWorkerNameFromConfig(workerConfigPath))[0] || ''
+      }
       send('Step 4/4: Deploying Pages panel...')
-      const panelResult = await runAction('deploy-panel', { workerUrl, panelUrl: effectivePanelUrl }, env)
+      const panelResult = await runAction('deploy-panel', { workerUrl: effectiveWorkerUrl, panelUrl: effectivePanelUrl }, env)
       if (panelResult?.panelUrl) {
         send(`Panel URL: ${panelResult.panelUrl}`)
       }
+      const finalPanelUrl = panelResult?.panelUrl || effectivePanelUrl
+      const finalRuntimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, finalPanelUrl, env)
+      if (finalRuntimeUpdates.length > 0) {
+        send(`Updating Worker runtime vars after Pages deployment: ${finalRuntimeUpdates.join(', ')}`)
+        await runScript('merge-wrangler-config.mjs', [], env)
+        const finalDeploy = await runWrangler(['deploy', '--config', workerConfigPath], env)
+        const finalCheck = await verifyWorkerDeployment(env, workerConfigPath, send, {
+          deployOutput: finalDeploy?.output || '',
+          workerUrl: effectiveWorkerUrl,
+        })
+        if (!finalCheck.ok) {
+          throw new Error(`Worker final runtime URL update failed (${finalCheck.workerName || 'unknown'}): ${finalCheck.reason}`)
+        }
+        send(`Worker runtime URLs updated: ${finalCheck.workerName}`)
+      }
+      if (botToken) await runWranglerSecret('BOT_TOKEN', botToken, env)
+      if (adminChatId) await runWranglerSecret('ADMIN_CHAT_ID', adminChatId, env)
       send('\nFirst deployment completed.')
-      return { panelUrl: panelResult?.panelUrl || effectivePanelUrl }
+      return { panelUrl: finalPanelUrl, workerUrl: effectiveWorkerUrl }
     }
   }
 }

@@ -30,6 +30,7 @@ body {
   overflow: hidden;
 }
 body[data-theme="dark"] {
+  color-scheme: dark;
   --accent: #3b82f6;
   --accent-light: #1d4ed833;
   --bg: #0f172a;
@@ -349,7 +350,9 @@ body[data-theme="dark"] {
   outline: none;
   transition: border-color 0.15s;
   background: var(--bg);
+  color: var(--text);
 }
+.field input::placeholder { color: var(--text-2); opacity: 0.78; }
 .field input:focus {
   border-color: var(--accent);
   background: var(--surface);
@@ -361,6 +364,7 @@ body[data-theme="dark"] {
   font-size: 12px;
   color: var(--text-2);
 }
+.field-inline input[type="checkbox"] { accent-color: var(--accent); }
 .modal-actions {
   display: flex;
   gap: 8px;
