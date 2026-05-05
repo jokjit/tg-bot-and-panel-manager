@@ -9,9 +9,11 @@ workers_dev = true
 # ]
 
 # BOT_KV 用于面板密码、用户资料、话题映射、黑白名单和验证状态。
-# 在新版 Wrangler / GitHub Actions 流程中，如果未填写 ID，Cloudflare 可在部署时自动创建资源。
-[[kv_namespaces]]
-binding = "BOT_KV"
+# 桌面部署工具会自动创建/复用 KV，并把真实 namespace id 写入 wrangler.local.toml。
+# 手动部署时请取消下面注释并填入真实 id，或者先运行部署工具完成回填。
+# [[kv_namespaces]]
+# binding = "BOT_KV"
+# id = "<YOUR_KV_NAMESPACE_ID>"
 
 # 可选：用于保存聊天历史。建议通过 `npm run setup:d1` 初始化并自动回填。
 # [[d1_databases]]

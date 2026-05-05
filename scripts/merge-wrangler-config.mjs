@@ -15,15 +15,54 @@ const base = readFileSync(basePath, 'utf8');
 
 let merged = base;
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findBindingBlock(content, tableName, binding) {
+  const blockPattern = new RegExp(`\\[\\[${escapeRegExp(tableName)}\\]\\][\\s\\S]*?(?=\\n\\[\\[|\\n\\[|$)`, 'g');
+  const matches = [...String(content).matchAll(blockPattern)];
+  return matches.find((match) => {
+    const block = match[0];
+    return new RegExp(`^\\s*binding\\s*=\\s*"${escapeRegExp(binding)}"\\s*$`, 'm').test(block);
+  })?.[0] || '';
+}
+
+function upsertBindingBlock(content, tableName, binding, block) {
+  const blockPattern = new RegExp(`\\[\\[${escapeRegExp(tableName)}\\]\\][\\s\\S]*?(?=\\n\\[\\[|\\n\\[|$)`, 'g');
+  const matches = [...String(content).matchAll(blockPattern)];
+  for (const match of matches) {
+    if (new RegExp(`^\\s*binding\\s*=\\s*"${escapeRegExp(binding)}"\\s*$`, 'm').test(match[0])) {
+      return content.replace(match[0], block);
+    }
+  }
+
+  const commentedPlaceholder = new RegExp(
+    `#\\s*\\[\\[${escapeRegExp(tableName)}\\]\\][\\s\\S]*?#\\s*(?:id|database_id)\\s*=\\s*"<YOUR_[^"]+_ID>"`,
+  );
+  if (commentedPlaceholder.test(content)) {
+    return content.replace(commentedPlaceholder, block);
+  }
+
+  const varsIndex = content.search(/\n\[vars\]/);
+  if (varsIndex >= 0) {
+    return `${content.slice(0, varsIndex).replace(/\s+$/, '')}\n\n${block}\n${content.slice(varsIndex)}`;
+  }
+
+  return `${content.replace(/\s+$/, '')}\n\n${block}\n`;
+}
+
 if (existsSync(localPath)) {
   const local = readFileSync(localPath, 'utf8').trim();
   if (local) {
-    const d1BlockMatch = local.match(/\[\[d1_databases\]\][\s\S]*?(?=\n\[|$)/);
-    if (d1BlockMatch) {
-      merged = merged.replace(
-        /# \[\[d1_databases\]\][\s\S]*?# database_id = "<YOUR_D1_DATABASE_ID>"/,
-        d1BlockMatch[0],
-      );
+    const kvBlock = findBindingBlock(local, 'kv_namespaces', 'BOT_KV');
+    if (kvBlock) {
+      merged = upsertBindingBlock(merged, 'kv_namespaces', 'BOT_KV', kvBlock);
+    }
+
+    const d1Block = findBindingBlock(local, 'd1_databases', 'DB');
+    if (d1Block) {
+      merged = upsertBindingBlock(merged, 'd1_databases', 'DB', d1Block);
     }
 
     const varsMatch = local.match(/\[vars\][\s\S]*?(?=\n\[|$)/);

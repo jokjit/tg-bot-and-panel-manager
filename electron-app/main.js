@@ -246,6 +246,37 @@ function getWorkerNameFromConfig(configPath) {
   return match?.[1]?.trim() || ''
 }
 
+function getBindingBlock(content, tableName, binding) {
+  const escapedTable = String(tableName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const escapedBinding = String(binding).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const blockPattern = new RegExp(`\\[\\[${escapedTable}\\]\\][\\s\\S]*?(?=\\n\\[\\[|\\n\\[|$)`, 'g')
+  const matches = [...String(content || '').matchAll(blockPattern)]
+  return matches.find((match) => new RegExp(`^\\s*binding\\s*=\\s*"${escapedBinding}"\\s*$`, 'm').test(match[0]))?.[0] || ''
+}
+
+function validatePrivateWranglerConfig(configPath) {
+  if (!fs.existsSync(configPath)) {
+    throw new Error(`部署配置不存在：${configPath}`)
+  }
+
+  const content = fs.readFileSync(configPath, 'utf8')
+  const activeContent = content
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith('#'))
+    .join('\n')
+  if (/<YOUR_[A-Z0-9_]+>/.test(activeContent)) {
+    throw new Error('部署配置仍包含占位符，请先完成资源初始化。')
+  }
+
+  const kvBlock = getBindingBlock(content, 'kv_namespaces', 'BOT_KV')
+  if (!kvBlock) {
+    throw new Error('部署配置缺少 KV 绑定 BOT_KV，请先初始化 KV。')
+  }
+  if (!/^\s*id\s*=\s*"[^"]+"\s*$/m.test(kvBlock)) {
+    throw new Error('部署配置中的 BOT_KV 缺少 namespace id，请先初始化 KV。')
+  }
+}
+
 async function getWorkerScript(env, workerName) {
   const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
   const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
@@ -320,9 +351,11 @@ function runProc(bin, args, opts) {
     const commandText = [bin, ...args].join(' ')
     BrowserWindow.getAllWindows()[0]?.webContents.send('output', `\n> ${commandText}\n`)
     const proc = spawn(bin, args, { cwd: getRepoRoot(), windowsHide: true, ...opts })
+    let outputTail = ''
     const send = (data) => {
       const text = data.toString()
       if (/cache_util_win|gpu_disk_cache|disk_cache\.cc|Unable to (move|create) cache|Gpu Cache/.test(text)) return
+      outputTail = `${outputTail}${text}`.slice(-5000)
       BrowserWindow.getAllWindows()[0]?.webContents.send('output', text)
     }
     proc.stdout?.on('data', send)
@@ -334,7 +367,8 @@ function runProc(bin, args, opts) {
     proc.on('close', (code) => {
       if (code !== 0) {
         send(`\n[Exit code ${code}]\n`)
-        reject(new Error(`Command failed (exit ${code}): ${commandText}`))
+        const detail = outputTail.trim()
+        reject(new Error(`Command failed (exit ${code}): ${commandText}${detail ? `\n\nLast output:\n${detail}` : ''}`))
         return
       }
       resolve(code ?? 0)
@@ -399,11 +433,18 @@ async function runAction(action, params, env) {
       await runScript('merge-wrangler-config.mjs', [], env)
       return
     case 'setup-d1':
-      await runScript('merge-wrangler-config.mjs', [], env)
       await runScript('setup-d1.mjs', [], env)
+      await runScript('merge-wrangler-config.mjs', [], env)
+      return
+    case 'setup-kv':
+      await runScript('setup-kv.mjs', [], env)
+      await runScript('merge-wrangler-config.mjs', [], env)
       return
     case 'deploy-worker':
+      send('Initializing KV...')
+      await runScript('setup-kv.mjs', [], env)
       await runScript('merge-wrangler-config.mjs', [], env)
+      validatePrivateWranglerConfig(path.join(getRepoRoot(), '.wrangler.private.toml'))
       await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
       {
         const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'), send)
@@ -488,9 +529,12 @@ async function runAction(action, params, env) {
         await runScript('merge-wrangler-config.mjs', [], env)
       }
 
-      send('Step 2/4: Initializing D1...')
+      send('Step 2/4: Initializing KV and D1...')
+      await runScript('setup-kv.mjs', [], env)
       await runScript('setup-d1.mjs', [], env)
+      await runScript('merge-wrangler-config.mjs', [], env)
       send('Step 3/4: Deploying Worker...')
+      validatePrivateWranglerConfig(path.join(getRepoRoot(), '.wrangler.private.toml'))
       await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
       {
         const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'), send)

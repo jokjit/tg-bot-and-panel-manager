@@ -1777,7 +1777,7 @@ function generateCaptchaChallenge() {
 
   return {
     mode: 'captcha',
-    token: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` ,
+    token: createChallengeToken(),
     question: '请选择图片中正确的验证码',
     correct,
     options: shuffleArray(Array.from(options)).slice(0, 4),
@@ -1794,7 +1794,7 @@ function generateMathChallenge() {
 
   return {
     mode: 'math',
-    token: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` ,
+    token: createChallengeToken(),
     question: `${left} ${displayOperator} ${right} = ?（答案范围 0~10）`,
     correct,
     options: generateMathOptions(correct),
@@ -1807,7 +1807,7 @@ function generateVerificationChallenge() {
   const captchaEnabled = getVerificationCaptchaEnabled(env);
   const mathEnabled = getVerificationMathEnabled(env);
   if (captchaEnabled && mathEnabled) {
-    return Math.random() < 0.5 ? generateCaptchaChallenge() : generateMathChallenge();
+    return randomInt(0, 1) === 0 ? generateCaptchaChallenge() : generateMathChallenge();
   }
   if (mathEnabled) return generateMathChallenge();
   return generateCaptchaChallenge();
@@ -3026,6 +3026,12 @@ function createSessionToken() {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+function createChallengeToken() {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return `${Date.now().toString(36)}${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+}
+
 function createBootstrapPassword(length = 12) {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
   const bytes = new Uint8Array(length);
@@ -3531,13 +3537,21 @@ function clamp(value, min, max) {
 function randomInt(min, max) {
   const low = Math.ceil(min);
   const high = Math.floor(max);
-  return Math.floor(Math.random() * (high - low + 1)) + low;
+  const range = high - low + 1;
+  if (range <= 0) return low;
+  const maxUint = 0xffffffff;
+  const limit = maxUint - (maxUint % range);
+  const value = new Uint32Array(1);
+  do {
+    crypto.getRandomValues(value);
+  } while (value[0] >= limit);
+  return low + (value[0] % range);
 }
 
 function shuffleArray(items) {
   const arr = [...items];
   for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = randomInt(0, i);
     [arr[i], arr[j]] = [arr[j], arr[i]];
   }
   return arr;
