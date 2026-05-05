@@ -117,7 +117,11 @@ body { font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif; background: va
     <span>+</span> 添加账号
   </div>
   <div class="sidebar-footer">
-    <div class="repo-root" id="repo-root-display"></div>
+    <div style="font-size:11px;color:var(--text-2);margin-bottom:4px;">项目目录</div>
+    <div style="display:flex;gap:4px;align-items:center;">
+      <div id="repo-root-display" style="flex:1;font-size:10px;color:var(--text-2);word-break:break-all;min-width:0;"></div>
+      <button id="select-dir-btn" style="flex-shrink:0;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);font-size:11px;cursor:pointer;">浏览</button>
+    </div>
     <div id="clear-data-btn" style="margin-top:8px;padding:6px 8px;border-radius:8px;border:1px solid #FCA5A5;color:#EF4444;font-size:11px;cursor:pointer;text-align:center;" title="删除所有账号数据">清除数据</div>
   </div>
 </aside>
@@ -343,8 +347,22 @@ async function renderAccounts() {
 }
 
 // repo root display
-window.api.getRepoRoot().then(root => {
-  document.getElementById('repo-root-display').textContent = '仓库: ' + root
+async function refreshRepoRoot() {
+  const root = await window.api.getRepoRoot()
+  const el = document.getElementById('repo-root-display')
+  if (root) {
+    el.textContent = root
+    el.style.color = 'var(--text-2)'
+  } else {
+    el.textContent = '未选择（点浏览选择项目目录）'
+    el.style.color = '#EF4444'
+  }
+}
+refreshRepoRoot()
+
+document.getElementById('select-dir-btn').addEventListener('click', async () => {
+  const dir = await window.api.selectProjectDir()
+  if (dir) refreshRepoRoot()
 })
 
 document.getElementById('clear-data-btn').addEventListener('click', async () => {

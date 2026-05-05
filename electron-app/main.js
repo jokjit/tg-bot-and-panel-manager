@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage } = require('electron')
+const { app, BrowserWindow, ipcMain, safeStorage, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
@@ -6,14 +6,22 @@ const { spawn } = require('child_process')
 const crypto = require('crypto')
 
 // ── paths ──────────────────────────────────────────────────────────────────
+const projectDirFile = () => path.join(app.getPath('userData'), 'project-dir.txt')
+
+function getSavedProjectDir() {
+  try { return fs.readFileSync(projectDirFile(), 'utf8').trim() } catch { return null }
+}
+
 function findRepoRoot() {
   if (!app.isPackaged) return path.join(__dirname, '..')
+  const saved = getSavedProjectDir()
+  if (saved && fs.existsSync(path.join(saved, 'wrangler.toml'))) return saved
   let dir = path.dirname(process.execPath)
   for (let i = 0; i < 6; i++) {
     if (fs.existsSync(path.join(dir, 'wrangler.toml'))) return dir
     dir = path.dirname(dir)
   }
-  return path.dirname(process.execPath)
+  return null
 }
 
 let _repoRoot, _scriptsDir, _adminPanelDir
@@ -61,7 +69,7 @@ function buildEnv(account) {
   const binDir = app.isPackaged
     ? path.join(process.resourcesPath, 'node_modules', '.bin')
     : null
-  const env = { ...process.env }
+  const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE: process.execPath }
   if (account) {
     if (account.apiToken) env.CLOUDFLARE_API_TOKEN = account.apiToken
     if (account.accountId) env.CLOUDFLARE_ACCOUNT_ID = account.accountId
@@ -77,7 +85,9 @@ function runProc(bin, args, opts) {
   return new Promise((resolve) => {
     const proc = spawn(bin, args, { cwd: getRepoRoot(), windowsHide: true, ...opts })
     const send = (data) => {
-      BrowserWindow.getAllWindows()[0]?.webContents.send('output', data.toString())
+      const text = data.toString()
+      if (/cache_util_win|gpu_disk_cache|disk_cache\.cc|Unable to (move|create) cache|Gpu Cache/.test(text)) return
+      BrowserWindow.getAllWindows()[0]?.webContents.send('output', text)
     }
     proc.stdout?.on('data', send)
     proc.stderr?.on('data', send)
@@ -206,6 +216,14 @@ ipcMain.handle('data:clear', () => {
   activeAccountId = null
 })
 ipcMain.handle('get-repo-root', () => getRepoRoot())
+ipcMain.handle('select-project-dir', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+  if (result.canceled) return null
+  const dir = result.filePaths[0]
+  fs.writeFileSync(projectDirFile(), dir)
+  _repoRoot = null // reset cache
+  return dir
+})
 
 app.whenReady().then(() => {
   try { activeAccountId = fs.readFileSync(activeFile(), 'utf8').trim() } catch {}
