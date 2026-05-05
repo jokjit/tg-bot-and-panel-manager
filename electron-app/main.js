@@ -102,7 +102,25 @@ function runScript(scriptName, args = [], env) {
 }
 
 function runWrangler(args, env) {
-  return runProc(getWranglerBin(), args, { env, shell: process.platform === 'win32' })
+  const bin = getWranglerBin()
+  const quotedBin = bin.includes(' ') ? `"${bin}"` : bin
+  return runProc(quotedBin, args, { env, shell: process.platform === 'win32' })
+}
+
+function runWranglerSecret(key, value, env) {
+  return new Promise((resolve) => {
+    const bin = getWranglerBin()
+    const quotedBin = bin.includes(' ') ? `"${bin}"` : bin
+    const proc = spawn(quotedBin, ['secret', 'put', key, '--config', '.wrangler.private.toml'], {
+      cwd: getRepoRoot(), windowsHide: true, env, shell: true, stdio: ['pipe', 'pipe', 'pipe']
+    })
+    const send = (data) => BrowserWindow.getAllWindows()[0]?.webContents.send('output', data.toString())
+    proc.stdout?.on('data', send)
+    proc.stderr?.on('data', send)
+    proc.stdin.write(value + '\n')
+    proc.stdin.end()
+    proc.on('close', resolve)
+  })
 }
 
 // ── actions ────────────────────────────────────────────────────────────────
@@ -135,10 +153,10 @@ async function runAction(action, params, env) {
       const panelUrl = params?.panelUrl || ''
       const tempDist = path.join(os.tmpdir(), 'tg-bot-panel-dist-' + Date.now())
       const viteBin = path.join(getAdminPanelDir(), 'node_modules', 'vite', 'bin', 'vite.js')
-      const buildEnv = { ...env, VITE_WORKER_BASE_URL: workerUrl }
-      if (panelUrl) buildEnv.VITE_CANONICAL_HOST = new URL(panelUrl).host
+      const viteEnv = { ...env, ELECTRON_RUN_AS_NODE: '1', VITE_WORKER_BASE_URL: workerUrl }
+      try { if (panelUrl) viteEnv.VITE_CANONICAL_HOST = new URL(panelUrl).host } catch {}
       send('构建 admin-panel...\n')
-      await runProc(process.execPath, [viteBin, 'build', '--outDir', tempDist], { env: buildEnv, cwd: getAdminPanelDir() })
+      await runProc(process.execPath, [viteBin, 'build', '--outDir', tempDist], { env: viteEnv, cwd: getAdminPanelDir() })
       send('上传到 Cloudflare Pages...\n')
       const deployArgs = ['pages', 'deploy', tempDist, '--project-name', 'tg-admin-panel']
       if (params?.branch) deployArgs.push('--branch', params.branch)
@@ -159,8 +177,8 @@ async function runAction(action, params, env) {
       await runScript('setup-d1.mjs', [], env)
       send('步骤 3/4: 部署 Worker...')
       await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
-      if (botToken) await runWrangler(['secret', 'put', 'BOT_TOKEN', '--config', '.wrangler.private.toml'], { ...env, input: botToken })
-      if (adminChatId) await runWrangler(['secret', 'put', 'ADMIN_CHAT_ID', '--config', '.wrangler.private.toml'], { ...env, input: adminChatId })
+      if (botToken) await runWranglerSecret('BOT_TOKEN', botToken, env)
+      if (adminChatId) await runWranglerSecret('ADMIN_CHAT_ID', adminChatId, env)
       if (useBuiltinPanel) {
         send('步骤 4/4: 使用 Worker 内置面板，跳过 Pages 部署。\n面板地址：' + panelUrl)
       } else {
@@ -194,8 +212,13 @@ ipcMain.handle('run-action', async (_, action, params) => {
 ipcMain.handle('accounts:list', () => loadAccounts())
 ipcMain.handle('accounts:add', (_, account) => {
   const accounts = loadAccounts()
-  accounts.push({ ...account, id: crypto.randomUUID() })
+  const newAccount = { ...account, id: crypto.randomUUID() }
+  accounts.push(newAccount)
   saveAccounts(accounts)
+  if (!activeAccountId) {
+    activeAccountId = newAccount.id
+    fs.writeFileSync(activeFile(), activeAccountId)
+  }
   return accounts
 })
 ipcMain.handle('accounts:delete', (_, id) => {
@@ -211,8 +234,9 @@ ipcMain.handle('accounts:setActive', (_, id) => {
 })
 ipcMain.handle('accounts:getActive', () => activeAccountId)
 ipcMain.handle('data:clear', () => {
-  const dir = getDataDir()
-  fs.rmSync(dir, { recursive: true, force: true })
+  const dir = app.getPath('userData')
+  try { fs.rmSync(path.join(dir, 'accounts.json'), { force: true }) } catch {}
+  try { fs.rmSync(path.join(dir, 'active-account.txt'), { force: true }) } catch {}
   activeAccountId = null
 })
 ipcMain.handle('get-repo-root', () => getRepoRoot())

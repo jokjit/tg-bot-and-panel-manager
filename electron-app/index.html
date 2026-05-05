@@ -249,8 +249,9 @@ cards.forEach(card => {
   card.addEventListener('click', () => {
     if (running) return
     const action = card.dataset.action
-    if (action === 'first-deploy') {
+    if (action === 'first-deploy' || action === 'deploy-panel' || action === 'deploy-all') {
       document.getElementById('wizard-modal').classList.remove('hidden')
+      document.getElementById('wizard-modal').dataset.action = action
       return
     }
     if (action === 'switch-account') {
@@ -266,18 +267,20 @@ document.getElementById('cancel-wizard').addEventListener('click', () => {
   document.getElementById('wizard-modal').classList.add('hidden')
 })
 document.getElementById('confirm-wizard').addEventListener('click', () => {
+  const modal = document.getElementById('wizard-modal')
+  const action = modal.dataset.action || 'first-deploy'
   const params = {
     botToken: document.getElementById('w-bot-token').value.trim(),
     adminChatId: document.getElementById('w-admin-chat-id').value.trim(),
     workerUrl: document.getElementById('w-worker-url').value.trim(),
     panelUrl: document.getElementById('w-panel-url').value.trim(),
   }
-  if (!params.botToken || !params.adminChatId) {
+  if (action === 'first-deploy' && (!params.botToken || !params.adminChatId)) {
     alert('BOT_TOKEN 和 ADMIN_CHAT_ID 为必填项')
     return
   }
   document.getElementById('wizard-modal').classList.add('hidden')
-  execAction('first-deploy', params)
+  execAction(action, params)
 })
 
 // add account modal
