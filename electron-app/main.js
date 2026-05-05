@@ -86,10 +86,95 @@ function buildEnv(account) {
   return env
 }
 
+function normalizeHttpUrl(raw) {
+  const text = String(raw || '').trim()
+  if (!text) return ''
+  try {
+    const parsed = new URL(text)
+    if (!/^https?:$/.test(parsed.protocol)) return ''
+    return parsed.toString().replace(/\/$/, '')
+  } catch {
+    return ''
+  }
+}
+
+function upsertVarsBlock(content, updates) {
+  const entries = Object.entries(updates).filter(([, value]) => String(value || '').trim())
+  if (entries.length === 0) return { content, updatedKeys: [] }
+
+  const formatLine = (key, value) => `${key} = ${JSON.stringify(String(value))}`
+  const varsPattern = /\[vars\]([\s\S]*?)(?=\n\[|$)/
+  const updatedKeys = []
+
+  if (varsPattern.test(content)) {
+    const next = content.replace(varsPattern, (full, body) => {
+      const lines = String(body)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+
+      const result = [...lines]
+      for (const [key, value] of entries) {
+        const line = formatLine(key, value)
+        const index = result.findIndex((item) => item.split('=')[0]?.trim() === key)
+        if (index >= 0) {
+          if (result[index] !== line) updatedKeys.push(key)
+          result[index] = line
+        } else {
+          updatedKeys.push(key)
+          result.push(line)
+        }
+      }
+      return `[vars]\n${result.join('\n')}`
+    })
+    return { content: next, updatedKeys }
+  }
+
+  const lines = entries.map(([key, value]) => formatLine(key, value))
+  const prefix = content.replace(/\s+$/, '')
+  return {
+    content: `${prefix}\n\n[vars]\n${lines.join('\n')}\n`,
+    updatedKeys: entries.map(([key]) => key),
+  }
+}
+
+function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl) {
+  const localPath = path.join(getRepoRoot(), 'wrangler.local.toml')
+  if (!fs.existsSync(localPath)) return []
+
+  const updates = {}
+  const normalizedWorker = normalizeHttpUrl(workerUrl)
+  const normalizedPanel = normalizeHttpUrl(panelUrl)
+  if (normalizedWorker) updates.PUBLIC_BASE_URL = normalizedWorker
+  if (normalizedPanel) updates.ADMIN_PANEL_URL = normalizedPanel
+
+  const current = fs.readFileSync(localPath, 'utf8')
+  const { content, updatedKeys } = upsertVarsBlock(current, updates)
+  if (updatedKeys.length > 0 && content !== current) {
+    fs.writeFileSync(localPath, content, 'utf8')
+  }
+  return updatedKeys
+}
+
+async function getPagesProject(env, projectName) {
+  const token = String(env.CLOUDFLARE_API_TOKEN || '').trim()
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || '').trim()
+  if (!token || !accountId || !projectName) return null
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects/${projectName}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+
+  const json = await response.json().catch(() => null)
+  if (!json?.success) return null
+  return json.result || null
+}
+
 // ── process runner ─────────────────────────────────────────────────────────
 function runProc(bin, args, opts) {
   return new Promise((resolve, reject) => {
     const commandText = [bin, ...args].join(' ')
+    BrowserWindow.getAllWindows()[0]?.webContents.send('output', `\n> ${commandText}\n`)
     const proc = spawn(bin, args, { cwd: getRepoRoot(), windowsHide: true, ...opts })
     const send = (data) => {
       const text = data.toString()
@@ -187,11 +272,24 @@ async function runAction(action, params, env) {
       send('构建 admin-panel...\n')
       await runProc(process.execPath, [viteBin, 'build', '--outDir', tempDist], { env: viteEnv, cwd: getAdminPanelDir() })
       send('上传到 Cloudflare Pages...\n')
-      const deployArgs = ['pages', 'deploy', tempDist, '--project-name', 'tg-admin-panel']
+      const projectName = 'tg-admin-panel'
+      const deployArgs = ['pages', 'deploy', tempDist, '--project-name', projectName]
       if (params?.branch) deployArgs.push('--branch', params.branch)
       await runProc(process.execPath, [getWranglerJs(), ...deployArgs], {
         env: { ...env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'pipe']
       })
+
+      const project = await getPagesProject(env, projectName)
+      if (!project) {
+        throw new Error('Pages upload command finished but project verification failed. Please check Cloudflare token/account permissions.')
+      }
+      const subdomain = String(project.subdomain || '').trim()
+      if (subdomain) {
+        send(`Pages 项目已确认：${projectName} -> https://${subdomain}`)
+      } else {
+        send(`Pages 项目已确认：${projectName}`)
+      }
+
       try { fs.rmSync(tempDist, { recursive: true }) } catch {}
       return
     }
@@ -204,6 +302,13 @@ async function runAction(action, params, env) {
       const useBuiltinPanel = panelUrl && workerUrl && panelUrl === workerUrl.replace(/\/$/, '') + '/admin'
       send('步骤 1/4: 合并配置...')
       await runScript('merge-wrangler-config.mjs', [], env)
+
+      const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl)
+      if (updatedVars.length > 0) {
+        send(`已将向导地址写入 wrangler.local.toml: ${updatedVars.join(', ')}`)
+        await runScript('merge-wrangler-config.mjs', [], env)
+      }
+
       send('步骤 2/4: 初始化 D1...')
       await runScript('setup-d1.mjs', [], env)
       send('步骤 3/4: 部署 Worker...')
@@ -277,4 +382,3 @@ app.whenReady().then(() => {
   createWindow()
 })
 app.on('window-all-closed', () => app.quit())
-
