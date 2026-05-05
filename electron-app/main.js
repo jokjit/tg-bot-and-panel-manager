@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-// ── paths ──────────────────────────────────────────────────────────────────
+// paths
 function findRepoRoot() {
   if (!app.isPackaged) return path.join(__dirname, '..')
   return process.resourcesPath
@@ -20,7 +20,7 @@ function getWranglerJs() {
   return path.join(getScriptsDir(), 'wrangler-runner.cjs')
 }
 
-// ── accounts ───────────────────────────────────────────────────────────────
+// accounts
 const accountsFile = () => path.join(app.getPath('userData'), 'accounts.json')
 const activeFile = () => path.join(app.getPath('userData'), 'active-account.txt')
 let activeAccountId = null
@@ -51,16 +51,29 @@ function getActiveAccount() {
 
 function normalizeDeployPrefs(input = {}) {
   const asText = (value) => String(value ?? '').trim()
+  const openPanelInClient = Boolean(input.openPanelInClient ?? input.useBuiltinPanel)
   return {
     botToken: asText(input.botToken),
     adminChatId: asText(input.adminChatId),
     workerUrl: asText(input.workerUrl),
     panelUrl: asText(input.panelUrl),
-    useBuiltinPanel: Boolean(input.useBuiltinPanel),
+    openPanelInClient,
   }
 }
 
-// ── env injection ──────────────────────────────────────────────────────────
+function saveActiveDeployPrefsPatch(patch = {}) {
+  const accounts = loadAccounts()
+  const index = accounts.findIndex((item) => item.id === activeAccountId)
+  if (index < 0) return null
+
+  const currentPrefs = normalizeDeployPrefs(accounts[index]?.deployPrefs || {})
+  const nextPrefs = normalizeDeployPrefs({ ...currentPrefs, ...patch })
+  accounts[index] = { ...accounts[index], deployPrefs: nextPrefs }
+  saveAccounts(accounts)
+  return nextPrefs
+}
+
+// env injection
 let _fakeBinDir = null
 function getFakeBinDir() {
   if (_fakeBinDir) return _fakeBinDir
@@ -271,7 +284,7 @@ async function verifyWorkerDeployment(env, configPath) {
   return { ok: true, workerName }
 }
 
-// ── process runner ─────────────────────────────────────────────────────────
+// process runner
 function runProc(bin, args, opts) {
   return new Promise((resolve, reject) => {
     const commandText = [bin, ...args].join(' ')
@@ -338,16 +351,16 @@ function runWranglerSecret(key, value, env) {
     })
   })
 }
-// ── actions ────────────────────────────────────────────────────────────────
+// actions
 async function runAction(action, params, env) {
   const send = (msg) => BrowserWindow.getAllWindows()[0]?.webContents.send('output', msg + '\n')
 
   switch (action) {
     case 'show-config': {
       const toml = fs.existsSync(path.join(getRepoRoot(), 'wrangler.toml'))
-        ? fs.readFileSync(path.join(getRepoRoot(), 'wrangler.toml'), 'utf8') : '未找到 wrangler.toml'
+        ? fs.readFileSync(path.join(getRepoRoot(), 'wrangler.toml'), 'utf8') : 'missing wrangler.toml'
       const local = fs.existsSync(path.join(getRepoRoot(), 'wrangler.local.toml'))
-        ? fs.readFileSync(path.join(getRepoRoot(), 'wrangler.local.toml'), 'utf8') : '未找到 wrangler.local.toml'
+        ? fs.readFileSync(path.join(getRepoRoot(), 'wrangler.local.toml'), 'utf8') : 'missing wrangler.local.toml'
       send('=== wrangler.toml ===\n' + toml)
       send('\n=== wrangler.local.toml ===\n' + local)
       return
@@ -367,29 +380,29 @@ async function runAction(action, params, env) {
         if (!check.ok) {
           throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
         }
-        send(`Worker 已确认：${check.workerName}`)
+        send(`Worker verified: ${check.workerName}`)
       }
       return
     case 'deploy-panel': {
       const workerUrl = params?.workerUrl || ''
-      const panelUrl = params?.panelUrl || ''
+      const panelUrl = normalizeHttpUrl(params?.panelUrl || '')
       const tempDist = path.join(os.tmpdir(), 'tg-bot-panel-dist-' + Date.now())
       const viteBin = path.join(getAdminPanelDir(), 'node_modules', 'vite', 'bin', 'vite.js')
       const viteEnv = { ...env, ELECTRON_RUN_AS_NODE: '1', VITE_WORKER_BASE_URL: workerUrl }
       try { if (panelUrl) viteEnv.VITE_CANONICAL_HOST = new URL(panelUrl).host } catch {}
-      send('构建 admin-panel...\n')
+      send('Building admin-panel...\n')
       await runProc(process.execPath, [viteBin, 'build', '--outDir', tempDist], { env: viteEnv, cwd: getAdminPanelDir() })
-      send('上传到 Cloudflare Pages...\n')
+      send('Uploading to Cloudflare Pages...\n')
       const projectName = 'tg-admin-panel'
       const projectBeforeDeploy = await getPagesProject(env, projectName)
       if (!projectBeforeDeploy?.ok) {
         if (String(projectBeforeDeploy.reason || '').includes('8000007')) {
-          send(`Pages 项目不存在，正在自动创建：${projectName}`)
+          send(`Pages project not found, creating automatically: ${projectName}`)
           const created = await createPagesProject(env, projectName)
           if (!created?.ok) {
             throw new Error(`Failed to create Pages project ${projectName}: ${created?.reason || 'unknown'}`)
           }
-          send(`Pages 项目创建成功：${projectName}`)
+          send(`Pages project created: ${projectName}`)
         } else {
           throw new Error(`Pages project precheck failed: ${projectBeforeDeploy.reason || 'unknown'}`)
         }
@@ -406,73 +419,85 @@ async function runAction(action, params, env) {
       const project = check.project
       const subdomain = String(project.subdomain || '').trim()
       if (subdomain) {
-        send(`Pages 项目已确认：${projectName} -> https://${subdomain}`)
+        send(`Pages project verified: ${projectName} -> https://${subdomain}`)
       } else {
-        send(`Pages 项目已确认：${projectName}`)
+        send(`Pages project verified: ${projectName}`)
       }
 
+      const deployedPanelUrl = subdomain ? normalizeHttpUrl(`https://${subdomain}`) : ''
+      const effectivePanelUrl = panelUrl || deployedPanelUrl
+      if (workerUrl || effectivePanelUrl) {
+        const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl)
+        if (updatedVars.length > 0) {
+          send(`Updated wrangler.local.toml vars: ${updatedVars.join(', ')}`)
+          await runScript('merge-wrangler-config.mjs', [], env)
+        }
+      }
+      saveActiveDeployPrefsPatch({
+        workerUrl: workerUrl || undefined,
+        panelUrl: effectivePanelUrl || undefined,
+      })
+
       try { fs.rmSync(tempDist, { recursive: true }) } catch {}
-      return
+      return { projectName, panelUrl: effectivePanelUrl, subdomain }
     }
-    case 'deploy-all':
-      await runAction('deploy-worker', params, env)
-      await runAction('deploy-panel', params, env)
-      return
+    case 'deploy-all': {
+      const workerResult = await runAction('deploy-worker', params, env)
+      const panelResult = await runAction('deploy-panel', params, env)
+      return { worker: workerResult || null, panel: panelResult || null }
+    }
     case 'first-deploy': {
       const { botToken, adminChatId, workerUrl, panelUrl } = params || {}
-      const useBuiltinPanel = Boolean(params?.useBuiltinPanel)
-      const builtinPanelUrl = workerUrl ? `${workerUrl.replace(/\/$/, '')}/admin` : ''
-      const effectivePanelUrl = useBuiltinPanel ? (panelUrl || builtinPanelUrl) : panelUrl
-      send('步骤 1/4: 合并配置...')
+      const effectivePanelUrl = normalizeHttpUrl(panelUrl || '')
+      send('Step 1/4: Merging config...')
       await runScript('merge-wrangler-config.mjs', [], env)
 
       const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl)
       if (updatedVars.length > 0) {
-        send(`已将向导地址写入 wrangler.local.toml: ${updatedVars.join(', ')}`)
+        send(`Updated wrangler.local.toml vars: ${updatedVars.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
       }
 
-      send('步骤 2/4: 初始化 D1...')
+      send('Step 2/4: Initializing D1...')
       await runScript('setup-d1.mjs', [], env)
-      send('步骤 3/4: 部署 Worker...')
+      send('Step 3/4: Deploying Worker...')
       await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
       {
         const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'))
         if (!check.ok) {
           throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
         }
-        send(`Worker 已确认：${check.workerName}`)
+        send(`Worker verified: ${check.workerName}`)
       }
       if (botToken) await runWranglerSecret('BOT_TOKEN', botToken, env)
       if (adminChatId) await runWranglerSecret('ADMIN_CHAT_ID', adminChatId, env)
-      if (useBuiltinPanel) {
-        send('步骤 4/4: 使用 Worker 内置面板，跳过 Pages 部署。\n面板地址：' + (effectivePanelUrl || '/admin'))
-      } else {
-        send('步骤 4/4: 部署面板...')
-        await runAction('deploy-panel', { workerUrl, panelUrl: effectivePanelUrl }, env)
+      send('Step 4/4: Deploying Pages panel...')
+      const panelResult = await runAction('deploy-panel', { workerUrl, panelUrl: effectivePanelUrl }, env)
+      if (panelResult?.panelUrl) {
+        send(`Panel URL: ${panelResult.panelUrl}`)
       }
-      send('\n首次部署完成！')
-      return
+      send('\nFirst deployment completed.')
+      return { panelUrl: panelResult?.panelUrl || effectivePanelUrl }
     }
   }
 }
 
-// ── window ─────────────────────────────────────────────────────────────────
+// window
 function createWindow() {
   const win = new BrowserWindow({
     width: 1100, height: 720,
-    title: 'TG Bot 部署工具',
+    title: 'TG Bot Deploy Tool',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true }
   })
   win.loadFile(path.join(__dirname, 'index.html'))
   win.setMenu(null)
 }
 
-// ── IPC ────────────────────────────────────────────────────────────────────
+// IPC
 ipcMain.handle('run-action', async (_, action, params) => {
   const account = getActiveAccount()
   const env = buildEnv(account)
-  await runAction(action, params, env)
+  return await runAction(action, params, env)
 })
 
 ipcMain.handle('accounts:list', () => loadAccounts())
@@ -500,13 +525,7 @@ ipcMain.handle('accounts:setActive', (_, id) => {
 })
 ipcMain.handle('accounts:getActive', () => activeAccountId)
 ipcMain.handle('accounts:saveDeployPrefs', (_, prefs) => {
-  const accounts = loadAccounts()
-  const index = accounts.findIndex(a => a.id === activeAccountId)
-  if (index < 0) return null
-  const nextPrefs = normalizeDeployPrefs(prefs)
-  accounts[index] = { ...accounts[index], deployPrefs: nextPrefs }
-  saveAccounts(accounts)
-  return nextPrefs
+  return saveActiveDeployPrefsPatch(prefs)
 })
 ipcMain.handle('data:clear', () => {
   const dir = app.getPath('userData')
@@ -521,3 +540,4 @@ app.whenReady().then(() => {
   createWindow()
 })
 app.on('window-all-closed', () => app.quit())
+
