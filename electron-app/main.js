@@ -178,6 +178,36 @@ async function getPagesProject(env, projectName) {
   return { ok: true, project: json.result || null }
 }
 
+async function createPagesProject(env, projectName) {
+  const token = String(env.CLOUDFLARE_API_TOKEN || '').trim()
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || '').trim()
+  if (!token || !accountId || !projectName) {
+    return { ok: false, reason: 'missing_token_or_account_or_project' }
+  }
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: projectName,
+      production_branch: 'main',
+    }),
+  })
+
+  const json = await response.json().catch(() => null)
+  if (!json?.success) {
+    const errors = Array.isArray(json?.errors) ? json.errors : []
+    const reason = errors.length > 0
+      ? errors.map((item) => `${item.code || 'unknown'}:${item.message || 'unknown'}`).join('; ')
+      : `http_${response.status}`
+    return { ok: false, reason }
+  }
+  return { ok: true, project: json.result || null }
+}
+
 // ── process runner ─────────────────────────────────────────────────────────
 function runProc(bin, args, opts) {
   return new Promise((resolve, reject) => {
@@ -281,6 +311,20 @@ async function runAction(action, params, env) {
       await runProc(process.execPath, [viteBin, 'build', '--outDir', tempDist], { env: viteEnv, cwd: getAdminPanelDir() })
       send('上传到 Cloudflare Pages...\n')
       const projectName = 'tg-admin-panel'
+      const projectBeforeDeploy = await getPagesProject(env, projectName)
+      if (!projectBeforeDeploy?.ok) {
+        if (String(projectBeforeDeploy.reason || '').includes('8000007')) {
+          send(`Pages 项目不存在，正在自动创建：${projectName}`)
+          const created = await createPagesProject(env, projectName)
+          if (!created?.ok) {
+            throw new Error(`Failed to create Pages project ${projectName}: ${created?.reason || 'unknown'}`)
+          }
+          send(`Pages 项目创建成功：${projectName}`)
+        } else {
+          throw new Error(`Pages project precheck failed: ${projectBeforeDeploy.reason || 'unknown'}`)
+        }
+      }
+
       const deployArgs = ['pages', 'deploy', tempDist, '--project-name', projectName]
       if (params?.branch) deployArgs.push('--branch', params.branch)
       await runProc(process.execPath, [getWranglerJs(), ...deployArgs], {
