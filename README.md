@@ -1,6 +1,6 @@
-# Telegram 双向聊天机器人（Cloudflare Workers）
+# Telegram 双向聊天机器人
 
-一个部署在 **Cloudflare Workers** 上的 Telegram 双向私聊中转机器人，通过配套的桌面客户端一键完成部署与管理。
+一个部署在Cloudflare上的 Telegram 双向私聊中转机器人，通过配套的桌面客户端一键完成部署与管理。
 
 ## 功能
 
