@@ -5,6 +5,8 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
+const DEPLOY_TOOL_VERSION = 'v1.1.13'
+
 // paths
 function findRepoRoot() {
   if (!app.isPackaged) return path.join(__dirname, '..')
@@ -209,6 +211,13 @@ async function getPagesProject(env, projectName) {
   return { ok: true, project: json.result || null }
 }
 
+function buildCfErrorReason(json, status) {
+  const errors = Array.isArray(json?.errors) ? json.errors : []
+  return errors.length > 0
+    ? errors.map((item) => `${item.code || 'unknown'}:${item.message || 'unknown'}`).join('; ')
+    : `http_${status}`
+}
+
 async function createPagesProject(env, projectName) {
   const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
   const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
@@ -284,7 +293,7 @@ async function getWorkerScript(env, workerName) {
     return { ok: false, reason: 'missing_token_or_account_or_worker_name' }
   }
 
-  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${workerName}`, {
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${workerName}/deployments`, {
     headers: { Authorization: `Bearer ${token}` },
   })
 
@@ -293,13 +302,71 @@ async function getWorkerScript(env, workerName) {
   const text = await response.text().catch(() => '')
   try {
     const json = JSON.parse(text)
-    const errors = Array.isArray(json?.errors) ? json.errors : []
-    const reason = errors.length > 0
-      ? errors.map((item) => `${item.code || 'unknown'}:${item.message || 'unknown'}`).join('; ')
-      : `http_${response.status}`
-    return { ok: false, reason }
+    return { ok: false, reason: buildCfErrorReason(json, response.status) }
   } catch {
     return { ok: false, reason: `http_${response.status}` }
+  }
+}
+
+async function listWorkerScripts(env) {
+  const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
+  if (!token || !accountId) {
+    return { ok: false, reason: 'missing_token_or_account' }
+  }
+
+  const names = []
+  let totalPages = 1
+  for (let page = 1; page <= totalPages && page <= 10; page += 1) {
+    const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts?page=${page}&per_page=100`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    const json = await response.json().catch(() => null)
+    if (!json?.success) {
+      return { ok: false, reason: buildCfErrorReason(json, response.status), names }
+    }
+
+    const scripts = Array.isArray(json.result) ? json.result : []
+    for (const item of scripts) {
+      const name = String(item.id || item.name || '').trim()
+      if (name) names.push(name)
+    }
+    totalPages = Number(json.result_info?.total_pages || 1)
+  }
+  return { ok: true, names }
+}
+
+function extractWorkerUrls(output, workerName) {
+  const urls = [...String(output || '').matchAll(/https?:\/\/[^\s"'<>]+/g)]
+    .map((match) => match[0].replace(/[),.;]+$/, ''))
+    .filter((url) => /\.workers\.dev\b/i.test(url) || String(workerName || '') && url.includes(workerName))
+  return [...new Set(urls)]
+}
+
+async function checkWorkerHealth(rawUrl) {
+  const normalized = normalizeHttpUrl(rawUrl)
+  if (!normalized) return { ok: false, reason: 'missing_worker_url' }
+
+  let healthUrl = ''
+  try {
+    const parsed = new URL(normalized)
+    healthUrl = `${parsed.origin}/health`
+  } catch {
+    return { ok: false, reason: `invalid_worker_url:${rawUrl}` }
+  }
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const response = await fetch(healthUrl, { signal: controller.signal })
+    if (response.ok) {
+      return { ok: true, url: healthUrl }
+    }
+    return { ok: false, reason: `health_http_${response.status}` }
+  } catch (error) {
+    return { ok: false, reason: `health_${error instanceof Error ? error.message : String(error)}` }
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -312,22 +379,45 @@ function isWorkerVerifyRetryable(reason) {
   return text.includes('10007') || text.startsWith('http_5') || text === 'http_429'
 }
 
-async function verifyWorkerDeployment(env, configPath, onProgress) {
+async function verifyWorkerDeployment(env, configPath, onProgress, options = {}) {
   const workerName = getWorkerNameFromConfig(configPath)
   if (!workerName) {
     return { ok: false, workerName: '', reason: 'missing_worker_name_in_config' }
+  }
+
+  const healthCandidates = [
+    normalizeHttpUrl(options.workerUrl || ''),
+    ...extractWorkerUrls(options.deployOutput, workerName),
+  ].filter(Boolean)
+
+  for (const candidate of [...new Set(healthCandidates)]) {
+    const health = await checkWorkerHealth(candidate)
+    if (health.ok) {
+      return { ok: true, workerName, method: 'health', url: health.url }
+    }
+    onProgress?.(`Worker health check skipped/failed (${candidate}): ${health.reason}`)
   }
 
   const delays = [1200, 2200, 4000, 7000]
   let lastReason = 'unknown'
 
   for (let attempt = 0; attempt <= delays.length; attempt++) {
-    const check = await getWorkerScript(env, workerName)
-    if (check.ok) {
-      return { ok: true, workerName }
+    const list = await listWorkerScripts(env)
+    if (list.ok) {
+      if (list.names.includes(workerName)) {
+        return { ok: true, workerName, method: 'workers-list' }
+      }
+      lastReason = `worker_not_in_scripts_list:${workerName}; visible_workers=${list.names.slice(0, 10).join(',') || 'none'}`
+    } else {
+      lastReason = `workers_list_failed:${list.reason || 'unknown'}`
     }
 
-    lastReason = check.reason || 'unknown'
+    const deployments = await getWorkerScript(env, workerName)
+    if (deployments.ok) {
+      return { ok: true, workerName, method: 'deployments' }
+    }
+    lastReason = `${lastReason}; deployments_check_failed:${deployments.reason || 'unknown'}`
+
     if (!isWorkerVerifyRetryable(lastReason) || attempt >= delays.length) {
       break
     }
@@ -351,10 +441,12 @@ function runProc(bin, args, opts) {
     const commandText = [bin, ...args].join(' ')
     BrowserWindow.getAllWindows()[0]?.webContents.send('output', `\n> ${commandText}\n`)
     const proc = spawn(bin, args, { cwd: getRepoRoot(), windowsHide: true, ...opts })
+    let output = ''
     let outputTail = ''
     const send = (data) => {
       const text = data.toString()
       if (/cache_util_win|gpu_disk_cache|disk_cache\.cc|Unable to (move|create) cache|Gpu Cache/.test(text)) return
+      output += text
       outputTail = `${outputTail}${text}`.slice(-5000)
       BrowserWindow.getAllWindows()[0]?.webContents.send('output', text)
     }
@@ -371,7 +463,7 @@ function runProc(bin, args, opts) {
         reject(new Error(`Command failed (exit ${code}): ${commandText}${detail ? `\n\nLast output:\n${detail}` : ''}`))
         return
       }
-      resolve(code ?? 0)
+      resolve({ code: code ?? 0, output })
     })
   })
 }
@@ -418,6 +510,7 @@ function runWranglerSecret(key, value, env) {
 // actions
 async function runAction(action, params, env) {
   const send = (msg) => BrowserWindow.getAllWindows()[0]?.webContents.send('output', msg + '\n')
+  send(`Deploy tool version: ${DEPLOY_TOOL_VERSION}`)
 
   switch (action) {
     case 'show-config': {
@@ -445,13 +538,16 @@ async function runAction(action, params, env) {
       await runScript('setup-kv.mjs', [], env)
       await runScript('merge-wrangler-config.mjs', [], env)
       validatePrivateWranglerConfig(path.join(getRepoRoot(), '.wrangler.private.toml'))
-      await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
+      const deploy = await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
       {
-        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'), send)
+        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'), send, {
+          deployOutput: deploy?.output || '',
+          workerUrl: params?.workerUrl || '',
+        })
         if (!check.ok) {
           throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
         }
-        send(`Worker verified: ${check.workerName}`)
+        send(`Worker verified: ${check.workerName}${check.method ? ` (${check.method})` : ''}`)
       }
       return
     case 'deploy-panel': {
@@ -535,13 +631,16 @@ async function runAction(action, params, env) {
       await runScript('merge-wrangler-config.mjs', [], env)
       send('Step 3/4: Deploying Worker...')
       validatePrivateWranglerConfig(path.join(getRepoRoot(), '.wrangler.private.toml'))
-      await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
+      const deploy = await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
       {
-        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'), send)
+        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'), send, {
+          deployOutput: deploy?.output || '',
+          workerUrl,
+        })
         if (!check.ok) {
           throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
         }
-        send(`Worker verified: ${check.workerName}`)
+        send(`Worker verified: ${check.workerName}${check.method ? ` (${check.method})` : ''}`)
       }
       if (botToken) await runWranglerSecret('BOT_TOKEN', botToken, env)
       if (adminChatId) await runWranglerSecret('ADMIN_CHAT_ID', adminChatId, env)
