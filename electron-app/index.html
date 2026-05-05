@@ -156,11 +156,6 @@ body { font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif; background: va
       <div class="card-label">一键部署全部</div>
       <div class="card-desc">依次部署 Worker 与面板</div>
     </div>
-    <div class="card danger" data-action="switch-account">
-      <div class="card-icon">🔄</div>
-      <div class="card-label">切换 CF 账户</div>
-      <div class="card-desc">在左侧点击账号切换</div>
-    </div>
   </div>
   <div class="terminal-wrap">
     <div class="terminal-bar">
@@ -247,10 +242,6 @@ cards.forEach(card => {
     if (action === 'first-deploy' || action === 'deploy-panel' || action === 'deploy-all') {
       document.getElementById('wizard-modal').classList.remove('hidden')
       document.getElementById('wizard-modal').dataset.action = action
-      return
-    }
-    if (action === 'switch-account') {
-      output.textContent = '请在左侧点击账号进行切换，或添加新账号。\n'
       return
     }
     execAction(action)
