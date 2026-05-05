@@ -20,12 +20,6 @@ function getWranglerJs() {
   return path.join(getScriptsDir(), 'wrangler-runner.cjs')
 }
 
-function getWranglerCliJs() {
-  return app.isPackaged
-    ? path.join(process.resourcesPath, 'node_modules', 'wrangler', 'wrangler-dist', 'cli.js')
-    : path.join(__dirname, '..', 'electron-app', 'node_modules', 'wrangler', 'wrangler-dist', 'cli.js')
-}
-
 // ── accounts ───────────────────────────────────────────────────────────────
 const accountsFile = () => path.join(app.getPath('userData'), 'accounts.json')
 const activeFile = () => path.join(app.getPath('userData'), 'active-account.txt')
@@ -311,23 +305,14 @@ function runScript(scriptName, args = [], env) {
 }
 
 function runWrangler(args, env) {
-  const wranglerCli = getWranglerCliJs()
-  if (!fs.existsSync(wranglerCli)) {
-    throw new Error(`Wrangler CLI not found: ${wranglerCli}`)
-  }
-  return runProc(process.execPath, [wranglerCli, ...args], {
+  return runProc(process.execPath, [getWranglerJs(), ...args], {
     env: { ...env, ELECTRON_RUN_AS_NODE: '1' }
   })
 }
 
 function runWranglerSecret(key, value, env) {
   return new Promise((resolve, reject) => {
-    const wranglerCli = getWranglerCliJs()
-    if (!fs.existsSync(wranglerCli)) {
-      reject(new Error(`Wrangler CLI not found: ${wranglerCli}`))
-      return
-    }
-    const args = [wranglerCli, 'secret', 'put', key, '--config', '.wrangler.private.toml']
+    const args = [getWranglerJs(), 'secret', 'put', key, '--config', '.wrangler.private.toml']
     const commandText = [process.execPath, ...args].join(' ')
     const proc = spawn(process.execPath, args, {
       cwd: getRepoRoot(), windowsHide: true,
