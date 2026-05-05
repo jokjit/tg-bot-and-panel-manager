@@ -159,15 +159,23 @@ function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl) {
 async function getPagesProject(env, projectName) {
   const token = String(env.CLOUDFLARE_API_TOKEN || '').trim()
   const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || '').trim()
-  if (!token || !accountId || !projectName) return null
+  if (!token || !accountId || !projectName) {
+    return { ok: false, reason: 'missing_token_or_account_or_project' }
+  }
 
   const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects/${projectName}`, {
     headers: { Authorization: `Bearer ${token}` },
   })
 
   const json = await response.json().catch(() => null)
-  if (!json?.success) return null
-  return json.result || null
+  if (!json?.success) {
+    const errors = Array.isArray(json?.errors) ? json.errors : []
+    const reason = errors.length > 0
+      ? errors.map((item) => `${item.code || 'unknown'}:${item.message || 'unknown'}`).join('; ')
+      : `http_${response.status}`
+    return { ok: false, reason }
+  }
+  return { ok: true, project: json.result || null }
 }
 
 // ── process runner ─────────────────────────────────────────────────────────
@@ -279,10 +287,11 @@ async function runAction(action, params, env) {
         env: { ...env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'pipe']
       })
 
-      const project = await getPagesProject(env, projectName)
-      if (!project) {
-        throw new Error('Pages upload command finished but project verification failed. Please check Cloudflare token/account permissions.')
+      const check = await getPagesProject(env, projectName)
+      if (!check?.ok || !check.project) {
+        throw new Error(`Pages upload command finished but project verification failed: ${check?.reason || 'unknown'}`)
       }
+      const project = check.project
       const subdomain = String(project.subdomain || '').trim()
       if (subdomain) {
         send(`Pages 项目已确认：${projectName} -> https://${subdomain}`)
