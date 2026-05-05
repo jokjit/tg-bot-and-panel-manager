@@ -98,7 +98,7 @@ function runProc(bin, args, opts) {
     proc.stdout?.on('data', send)
     proc.stderr?.on('data', send)
     proc.on('error', (err) => { send('启动失败: ' + err.message + '\n'); resolve(1) })
-    proc.on('close', (code) => resolve(code))
+    proc.on('close', (code) => { if (code !== 0) send(`\n[退出码 ${code}]\n`); resolve(code) })
   })
 }
 
@@ -167,7 +167,9 @@ async function runAction(action, params, env) {
       send('上传到 Cloudflare Pages...\n')
       const deployArgs = ['pages', 'deploy', tempDist, '--project-name', 'tg-admin-panel']
       if (params?.branch) deployArgs.push('--branch', params.branch)
-      await runWrangler(deployArgs, env)
+      await runProc(process.execPath, [getWranglerJs(), ...deployArgs], {
+        env: { ...env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'pipe']
+      })
       try { fs.rmSync(tempDist, { recursive: true }) } catch {}
       return
     }
