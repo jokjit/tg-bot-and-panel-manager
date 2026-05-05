@@ -1,573 +1,85 @@
-﻿# Telegram 双向聊天机器人（Cloudflare Workers）
+# Telegram 双向聊天机器人（Cloudflare Workers）
 
-一个可直接部署到 **Cloudflare Workers** 的 Telegram 双向聊天项目，提供：
+一个部署在 **Cloudflare Workers** 上的 Telegram 双向私聊中转机器人，通过配套的桌面客户端一键完成部署与管理。
+
+## 功能
 
 - 用户 ↔ 管理员双向私聊中转
-- 支持管理员群 **话题模式（forum topics）**
-- 黑名单、信任用户、管理员授权
-- 首次私聊验证、防刷与基础风控
-- 主后台由 `admin-panel`（Cloudflare Pages）接管，Worker 仅保留 `/admin` 入口跳转与 `/admin/api/*` 接口
-- 支持 `Workers + KV + Pages` 的标准化部署
+- 管理员群**话题模式**（每个用户独立话题）
+- 黑名单、信任用户、多管理员授权
+- 首次私聊验证与基础风控
+- 关键词过滤
+- 独立后台管理面板（Cloudflare Pages）
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jokjit/tg-bot-and-panel-manager)
+## 项目结构
 
-> 使用前请先把上面按钮里的仓库地址替换成你自己的公开 GitHub 仓库地址。
-
-## 项目介绍
-
-这个项目适合做以下场景：
-
-- Telegram 私聊客服
-- 频道/社群咨询入口
-- 人工客服中转机器人
-- 小团队工单接待机器人
-- 需要“用户单开线程”的私聊管理场景
-
-项目核心思路是：
-
-1. 用户给机器人发私聊消息。
-2. Worker 接收 Telegram Webhook。
-3. 消息被转发到管理员私聊或管理员群话题。
-4. 管理员回复后，消息再回传给对应用户。
-5. KV 保存用户状态、授权、黑白名单、话题映射等数据。
-
-## 功能清单
-
-### 机器人侧
-
-- 文本消息双向转发
-- 管理员命令回复：`/reply 用户ID 内容`
-- 黑名单：`/ban`、`/unban`、`/blacklist`
-- 信任用户：`/trust`、`/untrust`
-- 管理员授权：`/adminadd`、`/admindel`、`/admins`
-- 用户查询：`/user`、`/users`
-- 首次验证重置：`/restart`
-- 关键词命中后自动处理
-- 用户资料同步与头像代理
-- Webhook 设置 / 删除 / 查询
-
-### 后台侧（Pages 主面板）
-
-- 登录鉴权与密码修改
-- 运行状态仪表盘
-- Webhook 一键设置与检查
-- 用户列表查询
-- 黑名单 / 信任名单管理
-- 管理员管理
-- 系统配置维护
-- 关键词与消息模板维护
-
-> 当前默认架构：**Pages 作为唯一主后台入口**。Worker 的 `/admin` 在配置 `ADMIN_PANEL_URL` 后会直接跳转到 Pages，仅在未配置时显示轻量提示页；完整后台 UI 不再由 Worker 承载。
-## 技术架构
-
-- `worker.js`：Cloudflare Worker 主入口，负责 Telegram Webhook、消息转发、状态接口与 `/admin/api/*`
-- `wrangler.toml`：Worker 部署配置
-- `admin-panel/`：Vue 3 + Vite + Naive UI 主后台前端，部署到 Cloudflare Pages
-- `BOT_KV`：Cloudflare KV，用于保存系统配置、管理员密码、用户状态、授权和映射数据
-
-```text
-.
-├─ worker.js
-├─ wrangler.toml
-├─ package.json
-├─ README.md
-├─ DEPLOY_BUTTON.md
-├─ 项目说明.md
-└─ admin-panel/
-   ├─ src/
-   ├─ public/
-   ├─ .env.example
-   ├─ package.json
-   └─ README.md
+```
+worker.js          # Cloudflare Worker 主逻辑（Webhook + API）
+wrangler.toml      # Worker 部署配置
+migrations/        # D1 数据库 Schema
+admin-panel/       # 后台管理面板（Vue 3 + Vite，部署到 Pages）
+electron-app/      # 桌面部署客户端（Electron）
+scripts/           # 部署辅助脚本（由客户端调用）
 ```
 
-## 部署前准备
+## 部署方式
 
-你需要提前准备：
+使用 `electron-app/` 中的桌面客户端完成所有部署操作，无需手动执行命令行。
 
-- 一个 Telegram Bot
-- 一个 Cloudflare 账号
-- 一个 GitHub 仓库
-- Node.js 18+
-- `npm` 或 `pnpm`
-
-建议额外准备：
-
-- 一个管理员超级群组
-- 已开启 Topics 的超级群（如果你要用话题模式）
-- 一个后台域名，例如 `tg-admin.example.com`
-- 一个 Worker 域名，例如 `tg.example.com`
-
-## 第一步：创建 Telegram 机器人
-
-1. 在 Telegram 中打开 `@BotFather`
-2. 执行 `/newbot`
-3. 按提示创建机器人
-4. 记录得到的 `BOT_TOKEN`
-
-如果你要让机器人在管理员群内工作：
-
-1. 把机器人拉进管理员群
-2. 给予发消息权限
-3. 若要使用 Topics，请确保该群为超级群并已开启 Topics
-4. 记录管理员群的 `ADMIN_CHAT_ID`
-
-## 第二步：准备 Git 仓库
-
-把当前项目推送到你自己的 GitHub 仓库，然后把 README 中的一键部署按钮地址替换成你的真实仓库地址：
-
-```md
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jokjit/tg-bot-and-panel-manager)
-```
-
-替换示例：
-
-```md
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jokjit/tg-bot-and-panel-manager)
-```
-
-## 第三步：配置 Worker
-### 公开模板与本地私有配置分离
-
-为了避免把真实实例 ID（如 D1 `database_id`）提交到公开仓库，项目现在采用：
-
-- `wrangler.toml`：公开模板，提交到 GitHub
-- `wrangler.local.example.toml`：本地私有配置示例，提交到 GitHub
-- `wrangler.local.toml`：你自己的私有配置，不提交到 GitHub
-- `npm run deploy:private`：将公开模板与本地私有配置合并后再部署到 Cloudflare
-
-建议流程：
-
-1. 复制 `wrangler.local.example.toml` 为 `wrangler.local.toml`
-2. 填入你自己的 `PUBLIC_BASE_URL`、`ADMIN_PANEL_URL`（D1 可后续由脚本自动创建并写入本地私有配置）
-3. 本地部署时运行：
+### 构建客户端
 
 ```bash
-npm run deploy:private
-```
-
-这样可以保证：
-
-- GitHub 保持可公开 fork 的通用模板
-- Cloudflare 仍然使用你自己的真实实例配置
-- 敏感实例信息不会再次误提交
-
-编辑 `wrangler.toml`：
-
-```toml
-name = "telegram-private-chatbot"
-main = "worker.js"
-compatibility_date = "2026-04-16"
-workers_dev = true
-
-[[kv_namespaces]]
-binding = "BOT_KV"
-
-[vars]
-WEBHOOK_PATH = "/webhook"
-TOPIC_MODE = "false"
-USER_VERIFICATION = "false"
-WELCOME_TEXT = "你好，欢迎使用私聊中转机器人。"
-BLOCKED_TEXT = "你已被管理员限制联系，如有需要请稍后再试。"
-```
-
-### 推荐配置说明
-
-- `TOPIC_MODE=true`：启用管理员群话题模式
-- `USER_VERIFICATION=true`：启用首次验证
-
-如果你要启用 `TOPIC_MODE` 或 `USER_VERIFICATION`，请先确保 `BOT_KV` 已在部署时创建成功。
-
-## 第四步：准备 KV（自动创建）
-
-本项目使用 `BOT_KV` 保存：
-
-- 面板首次登录密码
-- 用户资料
-- 话题映射
-- 黑名单 / 信任名单
-- 首次验证状态
-
-当前 `wrangler.toml` 已保留：
-
-```toml
-[[kv_namespaces]]
-binding = "BOT_KV"
-```
-
-在新版 Wrangler、Deploy Button 或 GitHub Actions 流程下，Cloudflare 可以在部署时自动创建这个 KV 资源。
-
-## 可选：一键初始化 D1（历史消息）
-
-如果你想给项目增加聊天历史能力，可以使用 D1。仓库已提供一键初始化脚本：
-
-```bash
-npm run setup:d1 -- --database-name tg-bot-history --binding DB --remote
-```
-
-这个脚本会自动：
-
-- 创建 D1 数据库
-- 把 `database_name` 和 `database_id` 写回本地部署配置；公开仓库模板中不要保留真实 `database_id`
-- 执行 `migrations/0001_message_history.sql`
-
-查看帮助：
-
-```bash
-npm run setup:d1 -- --help
-```
-
-> 说明：这一步只是先把 D1 和历史消息表结构准备好，后续我再帮你把 Worker 实际的消息写入和后台查询界面接上。
-
-当前仓库已接入第一版历史消息：
-
-- 用户发给机器人的消息会写入 D1
-- 管理员回复用户的消息会写入 D1
-- 后台新增“历史消息”页面，可按用户 ID 或最近记录查看
-
-## 第五步：配置 Secret
-
-如果你是手动部署，建议至少配置以下 Secret：
-
-```bash
-npx wrangler secret put BOT_TOKEN
-npx wrangler secret put ADMIN_CHAT_ID
-```
-
-说明：
-
-- `BOT_TOKEN`：机器人 Token，必要项
-- `ADMIN_CHAT_ID`：管理员群或管理员私聊 ID，必要项
-
-其中：
-
-- `BOT_TOKEN` 和 `ADMIN_CHAT_ID` 是机器人正常工作的必要项
-- 这两个值可以在 Worker Secrets/Vars 中配置，也可以在首次登录后台后写入 KV 覆盖
-- 当这两个值可用后，系统会自动生成一个 1 小时有效的首次临时密码，并发送到 `ADMIN_CHAT_ID`
-- 如果后台里清空某个字段，系统会回退使用 Worker 当前环境变量中的值
-- 其他像 `ADMIN_IDS`、`WEBHOOK_SECRET`、`ADMIN_API_KEY`、`PUBLIC_BASE_URL`、`ADMIN_PANEL_URL` 等配置，后续都可以在面板中维护，不必在首次部署时一次性填满
-
-## 第六步：部署 Worker
-
-建议使用 `wrangler 4.45+`，以便和当前仓库的自动资源创建流程保持一致。
-
-```bash
+cd electron-app
 npm install
-npm run deploy
-```
-
-如果你还没有自定义域名，系统会默认使用 Cloudflare 分配的 `workers.dev` 地址。
-
-部署完成后，访问根路径确认状态：
-
-```text
-https://your-worker.your-subdomain.workers.dev/
-```
-
-你会看到当前 Worker 的状态信息，包括 webhook 地址、是否绑定 KV、是否已配置 Token 等。
-
-## 第七步：设置 Telegram Webhook
-
-部署成功后，访问：
-
-```text
-https://your-worker.your-subdomain.workers.dev/setWebhook
-```
-
-或者进入后台面板点击 “Set Webhook”。如果没有配置 `PUBLIC_BASE_URL`，Webhook 会自动使用当前 Worker 的默认访问域名。后台主入口建议始终使用 Pages 域名。
-
-## GitHub Actions 全自动部署
-
-仓库已包含自动部署工作流：`.github/workflows/deploy.yml:1`
-
-触发方式：
-
-- 推送到 `main`
-- 在 GitHub Actions 页面手动执行 `workflow_dispatch`
-
-### 需要配置的 GitHub Secrets
-
-- `CLOUDFLARE_API_TOKEN`
-- `CLOUDFLARE_ACCOUNT_ID`
-- `BOT_TOKEN`
-- `ADMIN_CHAT_ID`
-
-### 可选的 GitHub Variables
-
-- `PAGES_PROJECT_NAME`：Pages 项目名，默认 `tg-admin-panel`
-- `PUBLIC_BASE_URL`：如果你已有 Worker 自定义域名，可显式指定；不填则自动回退到 `workers.dev`
-- `ADMIN_PANEL_CANONICAL_HOST`：如果你有正式后台域名，可用于 Pages 自动跳转
-- `CF_PAGES_BRANCH`：Pages 生产分支，默认 `main`
-
-### 自动部署流程
-
-1. 自动部署 Worker
-2. 自动写入 `BOT_TOKEN`、`ADMIN_CHAT_ID`
-3. 自动创建或复用 `BOT_KV`
-4. 自动生成首次临时密码并发送到 `ADMIN_CHAT_ID`
-5. 自动解析 Worker 访问地址
-6. 自动创建或复用 Pages 项目
-7. 自动构建并发布 `admin-panel`
-
-如果管理员没有收到首次临时密码，可以在 Telegram 管理会话里使用：
-
-- `/panelpass`：重发当前仍有效的临时密码
-- `/panelreset`：强制生成一个新的临时密码并发送
-
-> `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID` 只用于 GitHub Actions 调用 Cloudflare API 和 Wrangler 发版，不参与机器人业务运行。
-
-也可以检查当前 Webhook：
-
-```text
-https://your-worker.your-subdomain.workers.dev/getWebhookInfo
-```
-
-## 第八步：部署主后台到 Cloudflare Pages
-
-进入前端目录：
-
-```bash
-cd admin-panel
-npm install
-```
-
-创建本地配置文件：
-
-```bash
-cp .env.example .env.local
-```
-
-如果你在 Windows PowerShell 中执行，可以手动新建 `admin-panel/.env.local`，内容参考：
-
-```bash
-VITE_WORKER_BASE_URL=https://your-worker.your-subdomain.workers.dev
-VITE_CANONICAL_HOST=tg-admin.example.com
-```
-
-本地调试：
-
-```bash
-npm run dev
-```
-
-生产构建：
-
-```bash
 npm run build
 ```
 
-### 一键脚本部署面板
+生成 `electron-app/dist/tg-bot-deploy.exe`，将其放到仓库根目录运行。
 
-你也可以在仓库根目录直接运行下面这条命令，一次完成依赖安装、构建和 Pages 发布：
+### 部署流程
+
+1. 打开客户端，在左侧添加 Cloudflare 账号（API Token + Account ID）
+2. 点击**首次部署向导**，填写：
+   - `BOT_TOKEN`（从 [@BotFather](https://t.me/BotFather) 获取）
+   - `ADMIN_CHAT_ID`（管理员 Telegram ID，从 [@userinfobot](https://t.me/userinfobot) 获取）
+   - Worker 地址（可选，留空使用 workers.dev 默认域名）
+   - 面板地址（可选，Pages 独立域名）
+3. 点击开始，客户端自动完成 D1 初始化、Worker 部署、Secret 写入、面板部署
+
+### 后续操作
+
+| 操作 | 说明 |
+|---|---|
+| 部署 Worker | 更新 `worker.js` 后重新部署 |
+| 部署面板 | 更新 `admin-panel/` 后重新部署 |
+| 初始化 D1 | 首次启用历史消息功能时执行 |
+| 切换账号 | 在左侧点击不同账号即可切换 |
+
+## 配置说明
+
+| 变量 | 必填 | 说明 |
+|---|---|---|
+| `BOT_TOKEN` | 是 | Telegram Bot Token |
+| `ADMIN_CHAT_ID` | 是 | 管理员 Chat ID 或超级群 ID |
+| `TOPIC_MODE` | 否 | `true` 启用话题模式 |
+| `USER_VERIFICATION` | 否 | `true` 启用首次验证 |
+| `WEBHOOK_SECRET` | 建议 | Webhook 安全密钥 |
+| `ADMIN_API_KEY` | 建议 | 后台 API 访问密钥 |
+| `PUBLIC_BASE_URL` | 否 | Worker 自定义域名 |
+| `ADMIN_PANEL_URL` | 否 | Pages 面板地址 |
+
+## 首次登录后台
+
+部署完成后，`BOT_TOKEN` 和 `ADMIN_CHAT_ID` 生效时，系统会自动向管理员发送一条包含**临时密码**的消息（1小时有效）。
+
+使用临时密码登录 `<worker_url>/admin` 后会跳转到改密页，设置永久密码。
+
+如未收到临时密码，在管理员 Telegram 会话中发送 `/panelpass` 重发。
+
+## 本地开发
 
 ```bash
-npm run deploy:panel -- --project-name tg-admin-panel --worker-base-url https://your-worker.your-subdomain.workers.dev --canonical-host tg-admin.example.com
+npm install
+npm run dev        # 启动 wrangler dev
+npm run build:panel  # 构建 admin-panel
 ```
-
-常用参数：
-
-- `--project-name`：Pages 项目名，默认 `tg-admin-panel`
-- `--worker-base-url`：必填，前端请求的 Worker 地址
-- `--canonical-host`：可选，正式后台域名
-- `--branch`：可选，部署到指定分支环境
-- `--account-id`：可选，显式指定 Cloudflare 账户 ID
-
-查看脚本帮助：
-
-```bash
-npm run deploy:panel -- --help
-```
-
-> 注意：如果这个 Pages 项目还不存在，首次脚本部署通常会创建一个 Direct Upload 类型的 Pages 项目。若你计划长期使用 Git 自动部署，建议先在 Cloudflare Pages 控制台创建项目，再用这个脚本做后续发布。
-
-### Pages 控制台推荐配置
-
-- Framework preset：`Vue`
-- Root directory：`admin-panel`
-- Build command：`npm run build`
-- Build output directory：`dist`
-
-也可以命令行部署：
-
-```bash
-npx wrangler pages deploy dist --project-name tg-admin-panel
-```
-
-## 第九步：绑定自定义域名（可选）
-
-### Worker 域名
-
-例如：
-
-- `https://tg.example.com`
-
-然后把 `PUBLIC_BASE_URL` 改成你的正式域名。
-
-### 后台域名（推荐作为唯一主入口）
-
-例如：
-
-- `https://tg-admin.example.com`
-
-然后把：
-
-- Worker 里的 `ADMIN_PANEL_URL`（建议指向 Pages 正式域名）
-- 前端的 `VITE_CANONICAL_HOST`
-
-都改成你的正式后台域名。
-
-## 一键部署说明
-
-本仓库已经预留 **Deploy to Cloudflare** 按钮，适合快速初始化 Worker。
-
-按钮地址格式：
-
-```text
-https://deploy.workers.cloudflare.com/?url=<YOUR_GITHUB_REPO_URL>
-```
-
-按钮示例：
-
-```md
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jokjit/tg-bot-and-panel-manager)
-```
-
-注意：
-
-- 这个按钮是 **Cloudflare Workers 官方能力**
-- 它主要用于部署 Worker
-- `admin-panel` 应通过 **Cloudflare Pages** 部署，并作为唯一主后台入口
-- Cloudflare 官方文档说明 Deploy Button 支持自动创建 KV 等资源，但你的仓库需要保留正确的 Wrangler 配置
-
-## 常用环境变量
-
-### 初始必填
-
-- `BOT_TOKEN`
-- `ADMIN_CHAT_ID`
-
-### 后续可在面板维护
-
-- `ADMIN_IDS`
-- `PUBLIC_BASE_URL`
-- `ADMIN_PANEL_URL`
-- 面板登录永久密码
-- `TOPIC_MODE`
-- `USER_VERIFICATION`
-- `WELCOME_TEXT`
-- `BLOCKED_TEXT`
-- 其他扩展配置
-
-## 常用管理命令
-
-```text
-/help
-/reply 用户ID 内容
-/ban 用户ID 原因
-/unban 用户ID
-/trust 用户ID 备注
-/untrust 用户ID
-/restart 用户ID
-/users 20
-/user 用户ID
-/blacklist
-/admins
-/adminadd 用户ID 备注
-/admindel 用户ID
-```
-
-## 常见问题
-
-### 1. `/setWebhook` 失败
-
-请优先检查：
-
-- `BOT_TOKEN` 是否正确
-- `PUBLIC_BASE_URL` 是否正确
-- Worker 是否已经可公网访问
-- 是否设置了错误的 `WEBHOOK_PATH`
-
-### 2. 话题模式不工作
-
-请检查：
-
-- `TOPIC_MODE=true`
-- `ADMIN_CHAT_ID` 是否为超级群 ID
-- 群组是否开启 Topics
-- 是否已经绑定 `BOT_KV`
-- 机器人在群里是否有发消息权限
-
-### 3. Pages 后台登录失败
-
-请检查：
-
-- `BOT_TOKEN` 与 `ADMIN_CHAT_ID` 是否已正确配置
-- Worker 与前端的域名是否一致
-- `VITE_WORKER_BASE_URL` 是否指向正确 Worker
-
-## 相关文档
-
-- Cloudflare Deploy Buttons：<https://developers.cloudflare.com/workers/platform/deploy-buttons/>
-- Wrangler 配置：<https://developers.cloudflare.com/workers/wrangler/configuration/>
-- Wrangler Secret：<https://developers.cloudflare.com/workers/wrangler/commands/#secret>
-- Cloudflare Pages 构建配置：<https://developers.cloudflare.com/pages/configuration/build-configuration/>
-
-## 许可证
-
-如需对外开源，建议你补充 `MIT` 或你自己的许可证文件。
-
-## Windows 可视化部署
-
-如果你主要在 Windows 上维护这个项目，现在可以直接用可选择的部署脚本：
-
-- 双击仓库根目录的 `deploy-menu.bat`
-- 或运行 `npm run deploy:menu:win`
-- 脚本会优先使用图形选择窗口；如果系统没有 `Out-GridView`，会自动回退到文本菜单
-
-### 推荐：首次部署向导
-
-首次使用时，建议直接选择：
-
-- `首次部署向导`
-
-现在这个向导已经升级为更接近新手可直接使用的本地全自动流程，会依次帮你完成：
-
-- 自动检测 Cloudflare 登录状态；未登录时直接拉起 `wrangler login`
-- 自动创建或补全 `wrangler.local.toml`
-- 可选填写自定义 `PUBLIC_BASE_URL` 与 `ADMIN_PANEL_URL`
-- 如果留空，自动回退到默认 `workers.dev` 与 `pages.dev` 地址
-- 引导填写 `BOT_TOKEN` 与 `ADMIN_CHAT_ID`
-- 可选自动创建并迁移 D1 历史消息数据库
-- 自动创建缺失的 Pages 项目
-- 自动把 `BOT_TOKEN`、`ADMIN_CHAT_ID` 写入 Worker Secret
-- 自动连续部署 Worker 与 Pages 面板
-
-其中：
-
-- `BOT_TOKEN`、`ADMIN_CHAT_ID` 会临时保存到本地 `.deploy-wizard.secrets.json`
-- 这个文件只用于本机向导复用，不会提交到 GitHub
-- 真实 D1 `database_id` 默认只会写入 `wrangler.local.toml`
-
-### 当前菜单支持
-
-- 首次部署向导
-- 查看当前本地私有配置摘要
-- 生成 `.wrangler.private.toml`
-- 初始化或升级 D1 数据库
-- 单独部署 Worker
-- 单独部署 Pages 面板
-- 一键连续部署 Worker + 面板
-
-如果你只想先预演命令，不真正发布，可以运行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\deploy-menu.ps1 -DryRun -TextMode
-```
-
-说明：
-
-- 脚本会从 `wrangler.local.toml` 读取私有部署参数
-- `PUBLIC_BASE_URL` 会用于面板构建时注入 Worker API 地址
-- `ADMIN_PANEL_URL` 会自动解析出域名，并传给 Pages 前端作为正式后台地址
-- `wrangler.local.toml`、`.wrangler.private.toml`、`.deploy-wizard.secrets.json` 都不会提交到 GitHub
-
