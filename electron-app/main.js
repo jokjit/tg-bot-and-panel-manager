@@ -75,7 +75,7 @@ function buildEnv(account) {
 // ── process runner ─────────────────────────────────────────────────────────
 function runProc(bin, args, opts) {
   return new Promise((resolve) => {
-    const proc = spawn(bin, args, { cwd: getRepoRoot(), ...opts })
+    const proc = spawn(bin, args, { cwd: getRepoRoot(), windowsHide: true, ...opts })
     const send = (data) => {
       BrowserWindow.getAllWindows()[0]?.webContents.send('output', data.toString())
     }
@@ -86,7 +86,9 @@ function runProc(bin, args, opts) {
 }
 
 function runScript(scriptName, args = [], env) {
-  return runProc(process.execPath, [path.join(getScriptsDir(), scriptName), ...args], { env })
+  return runProc(process.execPath, [path.join(getScriptsDir(), scriptName), ...args], {
+    env: { ...env, ELECTRON_RUN_AS_NODE: '1' }
+  })
 }
 
 function runWrangler(args, env) {
