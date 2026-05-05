@@ -52,6 +52,20 @@ function getActiveAccount() {
 }
 
 // ── env injection ──────────────────────────────────────────────────────────
+let _fakeBinDir = null
+function getFakeBinDir() {
+  if (_fakeBinDir) return _fakeBinDir
+  _fakeBinDir = path.join(os.tmpdir(), 'tg-bot-bin')
+  if (!fs.existsSync(_fakeBinDir)) fs.mkdirSync(_fakeBinDir, { recursive: true })
+  // node.cmd → Electron binary in Node.js mode
+  fs.writeFileSync(path.join(_fakeBinDir, 'node.cmd'),
+    `@echo off\nset ELECTRON_RUN_AS_NODE=1\n"${process.execPath}" %*\n`)
+  // npx.cmd → strip first arg (package name) and run the rest
+  fs.writeFileSync(path.join(_fakeBinDir, 'npx.cmd'),
+    '@echo off\nfor /f "tokens=1,*" %%a in ("%*") do %%b\n')
+  return _fakeBinDir
+}
+
 function buildEnv(account) {
   const binDir = app.isPackaged
     ? path.join(process.resourcesPath, 'node_modules', '.bin')
@@ -61,9 +75,9 @@ function buildEnv(account) {
     if (account.apiToken) env.CLOUDFLARE_API_TOKEN = account.apiToken
     if (account.accountId) env.CLOUDFLARE_ACCOUNT_ID = account.accountId
   }
-  if (binDir) {
-    env.PATH = binDir + path.delimiter + (env.PATH || '')
-  }
+  const fakeBin = getFakeBinDir()
+  const dirs = [fakeBin, binDir].filter(Boolean)
+  env.PATH = dirs.join(path.delimiter) + path.delimiter + (env.PATH || '')
   return env
 }
 

@@ -24,6 +24,10 @@ jobs:
         run: npm install
         working-directory: electron-app
 
+      - name: Install admin-panel dependencies
+        run: npm install
+        working-directory: admin-panel
+
       - name: Build exe
         run: npm run build
         working-directory: electron-app
