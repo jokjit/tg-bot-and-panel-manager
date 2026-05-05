@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve, isAbsolute } from 'node:path';
+import { dirname, resolve, isAbsolute } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const cwd = process.cwd();
 const wranglerPath = resolve(cwd, 'wrangler.toml');
-const localWranglerPath = resolve(cwd, 'wrangler.local.toml');
+const localWranglerPath = resolve(cwd, process.env.TG_BOT_LOCAL_WRANGLER || 'wrangler.local.toml');
 const migrationsDir = resolve(cwd, 'migrations');
 
 function parseArgs(argv) {
@@ -139,6 +139,7 @@ function ensureLocalWranglerFile() {
     return;
   }
 
+  mkdirSync(dirname(localWranglerPath), { recursive: true });
   const template = [
     '# 本地私有部署配置',
     '# 该文件不会提交到 Git。',
@@ -187,12 +188,19 @@ async function findExistingDatabase(databaseName) {
 }
 
 async function createOrGetDatabase(databaseName) {
+  const existingBeforeCreate = await findExistingDatabase(databaseName);
+  if (existingBeforeCreate?.uuid) {
+    return existingBeforeCreate.uuid;
+  }
+
   const data = await cfApiRequest('/d1/database', 'POST', { name: databaseName });
   if (data.success) return data.result.uuid;
-  if (data.errors?.some(e => String(e.message).includes('already exists'))) {
-    const existing = await findExistingDatabase(databaseName);
-    return existing?.uuid || null;
+
+  const existingAfterCreate = await findExistingDatabase(databaseName);
+  if (existingAfterCreate?.uuid && data.errors?.some(e => /already exists|10014|7502/i.test(`${e.code || ''}:${e.message || ''}`))) {
+    return existingAfterCreate.uuid;
   }
+
   throw new Error(data.errors?.map(e => e.message).join(', ') || 'D1 创建失败');
 }
 

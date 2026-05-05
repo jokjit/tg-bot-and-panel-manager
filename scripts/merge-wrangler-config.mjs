@@ -1,10 +1,10 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 
 const cwd = process.cwd();
 const basePath = resolve(cwd, 'wrangler.toml');
-const localPath = resolve(cwd, 'wrangler.local.toml');
-const outputPath = resolve(cwd, '.wrangler.private.toml');
+const localPath = resolve(cwd, process.env.TG_BOT_LOCAL_WRANGLER || 'wrangler.local.toml');
+const outputPath = resolve(cwd, process.env.TG_BOT_PRIVATE_WRANGLER || '.wrangler.private.toml');
 const accountId = String(process.env.CLOUDFLARE_ACCOUNT_ID || process.env.CF_ACCOUNT_ID || '').trim();
 
 if (!existsSync(basePath)) {
@@ -24,7 +24,7 @@ function findBindingBlock(content, tableName, binding) {
   const matches = [...String(content).matchAll(blockPattern)];
   return matches.find((match) => {
     const block = match[0];
-    return new RegExp(`^\\s*binding\\s*=\\s*"${escapeRegExp(binding)}"\\s*$`, 'm').test(block);
+    return new RegExp(`^[ \\t]*binding[ \\t]*=[ \\t]*"${escapeRegExp(binding)}"[ \\t]*$`, 'm').test(block);
   })?.[0] || '';
 }
 
@@ -32,7 +32,7 @@ function upsertBindingBlock(content, tableName, binding, block) {
   const blockPattern = new RegExp(`\\[\\[${escapeRegExp(tableName)}\\]\\][\\s\\S]*?(?=\\n\\[\\[|\\n\\[|$)`, 'g');
   const matches = [...String(content).matchAll(blockPattern)];
   for (const match of matches) {
-    if (new RegExp(`^\\s*binding\\s*=\\s*"${escapeRegExp(binding)}"\\s*$`, 'm').test(match[0])) {
+    if (new RegExp(`^[ \\t]*binding[ \\t]*=[ \\t]*"${escapeRegExp(binding)}"[ \\t]*$`, 'm').test(match[0])) {
       return content.replace(match[0], block);
     }
   }
@@ -100,14 +100,25 @@ if (existsSync(localPath)) {
 
 if (accountId) {
   const line = `account_id = "${accountId}"`;
-  if (/^\s*account_id\s*=.*$/m.test(merged)) {
-    merged = merged.replace(/^\s*account_id\s*=.*$/m, line);
-  } else if (/^\s*name\s*=.*$/m.test(merged)) {
-    merged = merged.replace(/^\s*name\s*=.*$/m, (hit) => `${hit}\n${line}`);
+  if (/^[ \t]*account_id[ \t]*=.*$/m.test(merged)) {
+    merged = merged.replace(/^[ \t]*account_id[ \t]*=.*$/m, line);
+  } else if (/^[ \t]*name[ \t]*=.*$/m.test(merged)) {
+    merged = merged.replace(/^[ \t]*name[ \t]*=.*$/m, (hit) => `${hit}\n${line}`);
   } else {
     merged = `${line}\n${merged}`;
   }
 }
 
+const workerMainPath = resolve(cwd, 'worker.js').replace(/\\/g, '/');
+const mainLine = `main = ${JSON.stringify(workerMainPath)}`;
+if (/^[ \t]*main[ \t]*=.*$/m.test(merged)) {
+  merged = merged.replace(/^[ \t]*main[ \t]*=.*$/m, mainLine);
+} else if (/^[ \t]*name[ \t]*=.*$/m.test(merged)) {
+  merged = merged.replace(/^[ \t]*name[ \t]*=.*$/m, (hit) => `${hit}\n${mainLine}`);
+} else {
+  merged = `${mainLine}\n${merged}`;
+}
+
+mkdirSync(dirname(outputPath), { recursive: true });
 writeFileSync(outputPath, merged.replace(/\s+$/, '') + '\n', 'utf8');
 console.log(outputPath);

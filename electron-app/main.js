@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.1.13'
+const DEPLOY_TOOL_VERSION = 'v1.1.14'
 
 // paths
 function findRepoRoot() {
@@ -20,6 +20,27 @@ function getAdminPanelDir() { return _adminPanelDir || (_adminPanelDir = app.isP
 
 function getWranglerJs() {
   return path.join(getScriptsDir(), 'wrangler-runner.cjs')
+}
+
+function safePathSegment(value) {
+  return String(value || 'default').replace(/[^a-z0-9._-]+/gi, '_').slice(0, 80) || 'default'
+}
+
+function getAccountConfigDir(account) {
+  const accountKey = safePathSegment(account?.accountId || account?.id || 'default')
+  return path.join(app.getPath('userData'), 'cf-accounts', accountKey)
+}
+
+function getLocalWranglerPath(env = {}) {
+  return env.TG_BOT_LOCAL_WRANGLER || path.join(getRepoRoot(), 'wrangler.local.toml')
+}
+
+function getPrivateWranglerPath(env = {}) {
+  return env.TG_BOT_PRIVATE_WRANGLER || path.join(getRepoRoot(), '.wrangler.private.toml')
+}
+
+function getPagesProjectName(env = {}) {
+  return String(env.PAGES_PROJECT_NAME || 'tg-admin-panel').trim() || 'tg-admin-panel'
 }
 
 // accounts
@@ -104,6 +125,11 @@ function buildEnv(account) {
     NODE_PATH: app.isPackaged ? path.join(process.resourcesPath, 'node_modules') : path.join(__dirname, '..', 'electron-app', 'node_modules')
   }
   if (account) {
+    const configDir = getAccountConfigDir(account)
+    fs.mkdirSync(configDir, { recursive: true })
+    env.TG_BOT_ACCOUNT_CONFIG_DIR = configDir
+    env.TG_BOT_LOCAL_WRANGLER = path.join(configDir, 'wrangler.local.toml')
+    env.TG_BOT_PRIVATE_WRANGLER = path.join(configDir, '.wrangler.private.toml')
     if (account.apiToken) {
       env.CLOUDFLARE_API_TOKEN = account.apiToken
       env.CF_API_TOKEN = account.apiToken
@@ -171,8 +197,8 @@ function upsertVarsBlock(content, updates) {
   }
 }
 
-function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl) {
-  const localPath = path.join(getRepoRoot(), 'wrangler.local.toml')
+function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl, env = {}) {
+  const localPath = getLocalWranglerPath(env)
   if (!fs.existsSync(localPath)) return []
 
   const updates = {}
@@ -251,8 +277,35 @@ async function createPagesProject(env, projectName) {
 function getWorkerNameFromConfig(configPath) {
   if (!fs.existsSync(configPath)) return ''
   const content = fs.readFileSync(configPath, 'utf8')
-  const match = content.match(/^\s*name\s*=\s*"([^"]+)"/m)
+  const match = content.match(/^[ \t]*name[ \t]*=[ \t]*"([^"]+)"/m)
   return match?.[1]?.trim() || ''
+}
+
+function getTomlString(content, key) {
+  const match = String(content || '').match(new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*("[^"\\\\]*(?:\\\\.[^"\\\\]*)*"|[^\\r\\n#]+)`, 'm'))
+  if (!match) return ''
+  const raw = match[1].trim()
+  if (raw.startsWith('"')) {
+    try { return JSON.parse(raw) } catch {}
+    return raw.slice(1, -1)
+  }
+  return raw.trim()
+}
+
+function parseVarsBlock(content) {
+  const vars = {}
+  const match = String(content || '').match(/\[vars\]([\s\S]*?)(?=\n\[|$)/)
+  if (!match) return vars
+  for (const rawLine of match[1].split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const eq = line.indexOf('=')
+    if (eq <= 0) continue
+    const key = line.slice(0, eq).trim()
+    const value = getTomlString(line, key)
+    if (key && value !== '') vars[key] = value
+  }
+  return vars
 }
 
 function getBindingBlock(content, tableName, binding) {
@@ -260,7 +313,7 @@ function getBindingBlock(content, tableName, binding) {
   const escapedBinding = String(binding).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const blockPattern = new RegExp(`\\[\\[${escapedTable}\\]\\][\\s\\S]*?(?=\\n\\[\\[|\\n\\[|$)`, 'g')
   const matches = [...String(content || '').matchAll(blockPattern)]
-  return matches.find((match) => new RegExp(`^\\s*binding\\s*=\\s*"${escapedBinding}"\\s*$`, 'm').test(match[0]))?.[0] || ''
+  return matches.find((match) => new RegExp(`^[ \\t]*binding[ \\t]*=[ \\t]*"${escapedBinding}"[ \\t]*$`, 'm').test(match[0]))?.[0] || ''
 }
 
 function validatePrivateWranglerConfig(configPath) {
@@ -284,6 +337,79 @@ function validatePrivateWranglerConfig(configPath) {
   if (!/^\s*id\s*=\s*"[^"]+"\s*$/m.test(kvBlock)) {
     throw new Error('部署配置中的 BOT_KV 缺少 namespace id，请先初始化 KV。')
   }
+}
+
+function buildWorkerUploadMetadata(configPath) {
+  const content = fs.readFileSync(configPath, 'utf8')
+  const compatibilityDate = getTomlString(content, 'compatibility_date') || '2026-04-16'
+  const metadata = {
+    main_module: 'worker.js',
+    compatibility_date: compatibilityDate,
+    bindings: [],
+    keep_bindings: ['secret_text'],
+  }
+
+  for (const [key, value] of Object.entries(parseVarsBlock(content))) {
+    metadata.bindings.push({ type: 'plain_text', name: key, text: String(value) })
+  }
+
+  const kvBlock = getBindingBlock(content, 'kv_namespaces', 'BOT_KV')
+  const kvId = getTomlString(kvBlock, 'id')
+  if (kvId) {
+    metadata.bindings.push({ type: 'kv_namespace', name: 'BOT_KV', namespace_id: kvId })
+  }
+
+  const d1Block = getBindingBlock(content, 'd1_databases', 'DB')
+  const databaseId = getTomlString(d1Block, 'database_id')
+  if (databaseId) {
+    metadata.bindings.push({ type: 'd1', name: 'DB', id: databaseId })
+  }
+
+  return metadata
+}
+
+async function uploadWorkerViaApi(env, configPath, onProgress) {
+  const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
+  const workerName = getWorkerNameFromConfig(configPath)
+  if (!token || !accountId || !workerName) {
+    throw new Error('缺少 Cloudflare Token、Account ID 或 Worker name，无法上传 Worker。')
+  }
+
+  const existing = await listWorkerScripts(env)
+  if (!existing.ok) {
+    throw new Error(`Worker 列表检查失败：${existing.reason || 'unknown'}`)
+  }
+  onProgress?.(existing.names.includes(workerName)
+    ? `Worker exists, uploading overwrite: ${workerName}`
+    : `Worker not found, creating by upload: ${workerName}`)
+
+  const workerPath = path.join(getRepoRoot(), 'worker.js')
+  if (!fs.existsSync(workerPath)) {
+    throw new Error(`缺少 Worker 代码文件：${workerPath}`)
+  }
+
+  const metadata = buildWorkerUploadMetadata(configPath)
+  const form = new FormData()
+  form.append('metadata', JSON.stringify(metadata))
+  form.append(
+    'worker.js',
+    new Blob([fs.readFileSync(workerPath, 'utf8')], { type: 'application/javascript+module' }),
+    'worker.js',
+  )
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  })
+  const json = await response.json().catch(() => null)
+  if (!json?.success) {
+    throw new Error(`Worker API 上传失败：${buildCfErrorReason(json, response.status)}`)
+  }
+
+  onProgress?.(`Worker API upload completed: ${workerName}`)
+  return { ok: true, workerName }
 }
 
 async function getWorkerScript(env, workerName) {
@@ -481,7 +607,7 @@ function runWrangler(args, env) {
 
 function runWranglerSecret(key, value, env) {
   return new Promise((resolve, reject) => {
-    const args = [getWranglerJs(), 'secret', 'put', key, '--config', '.wrangler.private.toml']
+    const args = [getWranglerJs(), 'secret', 'put', key, '--config', getPrivateWranglerPath(env)]
     const commandText = [process.execPath, ...args].join(' ')
     const proc = spawn(process.execPath, args, {
       cwd: getRepoRoot(), windowsHide: true,
@@ -516,17 +642,22 @@ async function runAction(action, params, env) {
     case 'show-config': {
       const toml = fs.existsSync(path.join(getRepoRoot(), 'wrangler.toml'))
         ? fs.readFileSync(path.join(getRepoRoot(), 'wrangler.toml'), 'utf8') : 'missing wrangler.toml'
-      const local = fs.existsSync(path.join(getRepoRoot(), 'wrangler.local.toml'))
-        ? fs.readFileSync(path.join(getRepoRoot(), 'wrangler.local.toml'), 'utf8') : 'missing wrangler.local.toml'
+      const localPath = getLocalWranglerPath(env)
+      const privatePath = getPrivateWranglerPath(env)
+      const local = fs.existsSync(localPath)
+        ? fs.readFileSync(localPath, 'utf8') : `missing account wrangler.local.toml: ${localPath}`
+      const privateToml = fs.existsSync(privatePath)
+        ? fs.readFileSync(privatePath, 'utf8') : `missing account .wrangler.private.toml: ${privatePath}`
       send('=== wrangler.toml ===\n' + toml)
       send('\n=== wrangler.local.toml ===\n' + local)
+      send('\n=== .wrangler.private.toml ===\n' + privateToml)
       return
     }
     case 'merge-config':
       await runScript('merge-wrangler-config.mjs', [], env)
       return
     case 'setup-d1':
-      await runScript('setup-d1.mjs', [], env)
+      await runScript('setup-d1.mjs', ['--remote'], env)
       await runScript('merge-wrangler-config.mjs', [], env)
       return
     case 'setup-kv':
@@ -537,10 +668,12 @@ async function runAction(action, params, env) {
       send('Initializing KV...')
       await runScript('setup-kv.mjs', [], env)
       await runScript('merge-wrangler-config.mjs', [], env)
-      validatePrivateWranglerConfig(path.join(getRepoRoot(), '.wrangler.private.toml'))
-      const deploy = await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
+      const workerConfigPath = getPrivateWranglerPath(env)
+      validatePrivateWranglerConfig(workerConfigPath)
+      await uploadWorkerViaApi(env, workerConfigPath, send)
+      const deploy = await runWrangler(['deploy', '--config', workerConfigPath], env)
       {
-        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'), send, {
+        const check = await verifyWorkerDeployment(env, workerConfigPath, send, {
           deployOutput: deploy?.output || '',
           workerUrl: params?.workerUrl || '',
         })
@@ -560,7 +693,7 @@ async function runAction(action, params, env) {
       send('Building admin-panel...\n')
       await runProc(process.execPath, [viteBin, 'build', '--outDir', tempDist], { env: viteEnv, cwd: getAdminPanelDir() })
       send('Uploading to Cloudflare Pages...\n')
-      const projectName = 'tg-admin-panel'
+      const projectName = getPagesProjectName(env)
       const projectBeforeDeploy = await getPagesProject(env, projectName)
       if (!projectBeforeDeploy?.ok) {
         if (String(projectBeforeDeploy.reason || '').includes('8000007')) {
@@ -573,6 +706,8 @@ async function runAction(action, params, env) {
         } else {
           throw new Error(`Pages project precheck failed: ${projectBeforeDeploy.reason || 'unknown'}`)
         }
+      } else {
+        send(`Pages project exists, uploading overwrite: ${projectName}`)
       }
 
       const deployArgs = ['pages', 'deploy', tempDist, '--project-name', projectName]
@@ -594,7 +729,7 @@ async function runAction(action, params, env) {
       const deployedPanelUrl = subdomain ? normalizeHttpUrl(`https://${subdomain}`) : ''
       const effectivePanelUrl = panelUrl || deployedPanelUrl
       if (workerUrl || effectivePanelUrl) {
-        const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl)
+        const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env)
         if (updatedVars.length > 0) {
           send(`Updated wrangler.local.toml vars: ${updatedVars.join(', ')}`)
           await runScript('merge-wrangler-config.mjs', [], env)
@@ -619,7 +754,7 @@ async function runAction(action, params, env) {
       send('Step 1/4: Merging config...')
       await runScript('merge-wrangler-config.mjs', [], env)
 
-      const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl)
+      const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env)
       if (updatedVars.length > 0) {
         send(`Updated wrangler.local.toml vars: ${updatedVars.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
@@ -627,13 +762,15 @@ async function runAction(action, params, env) {
 
       send('Step 2/4: Initializing KV and D1...')
       await runScript('setup-kv.mjs', [], env)
-      await runScript('setup-d1.mjs', [], env)
+      await runScript('setup-d1.mjs', ['--remote'], env)
       await runScript('merge-wrangler-config.mjs', [], env)
       send('Step 3/4: Deploying Worker...')
-      validatePrivateWranglerConfig(path.join(getRepoRoot(), '.wrangler.private.toml'))
-      const deploy = await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
+      const workerConfigPath = getPrivateWranglerPath(env)
+      validatePrivateWranglerConfig(workerConfigPath)
+      await uploadWorkerViaApi(env, workerConfigPath, send)
+      const deploy = await runWrangler(['deploy', '--config', workerConfigPath], env)
       {
-        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'), send, {
+        const check = await verifyWorkerDeployment(env, workerConfigPath, send, {
           deployOutput: deploy?.output || '',
           workerUrl,
         })
@@ -686,9 +823,18 @@ ipcMain.handle('accounts:add', (_, account) => {
   return accounts
 })
 ipcMain.handle('accounts:delete', (_, id) => {
-  const accounts = loadAccounts().filter(a => a.id !== id)
+  const before = loadAccounts()
+  const removed = before.find(a => a.id === id)
+  const accounts = before.filter(a => a.id !== id)
   saveAccounts(accounts)
-  if (activeAccountId === id) activeAccountId = accounts[0]?.id || null
+  if (removed?.accountId && !accounts.some((item) => item.accountId === removed.accountId)) {
+    try { fs.rmSync(getAccountConfigDir(removed), { recursive: true, force: true }) } catch {}
+  }
+  if (activeAccountId === id) {
+    activeAccountId = accounts[0]?.id || null
+    if (activeAccountId) fs.writeFileSync(activeFile(), activeAccountId)
+    else try { fs.rmSync(activeFile(), { force: true }) } catch {}
+  }
   return accounts
 })
 ipcMain.handle('accounts:setActive', (_, id) => {
@@ -704,6 +850,7 @@ ipcMain.handle('data:clear', () => {
   const dir = app.getPath('userData')
   try { fs.rmSync(path.join(dir, 'accounts.json'), { force: true }) } catch {}
   try { fs.rmSync(path.join(dir, 'active-account.txt'), { force: true }) } catch {}
+  try { fs.rmSync(path.join(dir, 'cf-accounts'), { recursive: true, force: true }) } catch {}
   activeAccountId = null
 })
 ipcMain.handle('get-repo-root', () => getRepoRoot())

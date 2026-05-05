@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 
 const cwd = process.cwd();
 const wranglerPath = resolve(cwd, 'wrangler.toml');
-const localWranglerPath = resolve(cwd, 'wrangler.local.toml');
+const localWranglerPath = resolve(cwd, process.env.TG_BOT_LOCAL_WRANGLER || 'wrangler.local.toml');
 
 function parseArgs(argv) {
   const args = {
