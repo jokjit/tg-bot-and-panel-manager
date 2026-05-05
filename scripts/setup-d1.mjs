@@ -168,11 +168,32 @@ function parseDatabaseId(output) {
   }
 }
 
-function findExistingDatabase(databaseName) {
-  const result = runCommand('npx', ['wrangler', 'd1', 'list', '--json'], { capture: true });
-  const list = JSON.parse(result.stdout || '[]');
-  if (!Array.isArray(list)) return null;
-  return list.find((item) => item?.name === databaseName) || null;
+async function cfApiRequest(path, method = 'GET', body) {
+  const token = process.env.CLOUDFLARE_API_TOKEN;
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  if (!token || !accountId) throw new Error('缺少 CLOUDFLARE_API_TOKEN 或 CLOUDFLARE_ACCOUNT_ID');
+  const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}${path}`, {
+    method,
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return res.json();
+}
+
+async function findExistingDatabase(databaseName) {
+  const data = await cfApiRequest('/d1/database?per_page=100');
+  if (!data.success) return null;
+  return data.result?.find(db => db.name === databaseName) || null;
+}
+
+async function createOrGetDatabase(databaseName) {
+  const data = await cfApiRequest('/d1/database', 'POST', { name: databaseName });
+  if (data.success) return data.result.uuid;
+  if (data.errors?.some(e => String(e.message).includes('already exists'))) {
+    const existing = await findExistingDatabase(databaseName);
+    return existing?.uuid || null;
+  }
+  throw new Error(data.errors?.map(e => e.message).join(', ') || 'D1 创建失败');
 }
 
 function upsertD1Binding(content, binding, databaseName, databaseId) {
@@ -218,12 +239,10 @@ async function main() {
 
   if (!args.dryRun) {
     try {
-      runCommand('npx', ['wrangler', 'd1', 'create', args.databaseName]);
+      databaseId = await createOrGetDatabase(args.databaseName);
     } catch (error) {
-      if (!String(error.message || '').includes('already exists')) throw error;
+      throw new Error(`D1 创建失败：${error.message}`);
     }
-    const existing = findExistingDatabase(args.databaseName);
-    databaseId = existing?.uuid || existing?.id || '';
     if (databaseId) console.log(`D1 database_id: ${databaseId}`);
 
     if (!databaseId) {
