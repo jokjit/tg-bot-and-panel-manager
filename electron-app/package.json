@@ -1,0 +1,37 @@
+{
+  "name": "tg-bot-deploy",
+  "version": "2.0.0",
+  "description": "TG Bot Cloudflare 部署工具",
+  "main": "main.js",
+  "scripts": {
+    "start": "node start.js",
+    "build": "electron-builder --win --x64"
+  },
+  "dependencies": {
+    "wrangler": "^3.114.4"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.tgbot.deploy",
+    "productName": "TG Bot 部署工具",
+    "directories": { "output": "dist" },
+    "files": ["main.js", "preload.js", "index.html"],
+    "extraResources": [
+      { "from": "../scripts", "to": "scripts" },
+      { "from": "node_modules/wrangler", "to": "node_modules/wrangler" },
+      { "from": "node_modules/.bin", "to": "node_modules/.bin" },
+      { "from": "../admin-panel", "to": "admin-panel", "filter": ["**", "!dist/**", "!.env*", "!node_modules/.cache/**", "!node_modules/.vite/**"] }
+    ],
+    "asarUnpack": ["node_modules/wrangler/**", "node_modules/.bin/wrangler*", "admin-panel/node_modules/**"],
+    "win": {
+      "target": "portable",
+      "icon": null
+    },
+    "portable": {
+      "artifactName": "tg-bot-deploy.exe"
+    }
+  }
+}

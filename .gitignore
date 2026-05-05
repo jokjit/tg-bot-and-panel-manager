@@ -5,6 +5,8 @@ Thumbs.db
 node_modules/
 admin-panel/node_modules/
 admin-panel/dist/
+electron-app/node_modules/
+electron-app/dist/
 npm-debug.log*
 
 # Wrangler / Cloudflare

@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>TG Bot 部署工具</title>
+<style>
+:root {
+  --accent: #0066FF;
+  --accent-light: #E8F0FF;
+  --bg: #F5F7FA;
+  --surface: #FFFFFF;
+  --border: #E5E7EB;
+  --text: #1A1A2E;
+  --text-2: #6B7280;
+  --radius: 16px;
+  --shadow: 0 2px 12px rgba(0,0,0,0.08);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif; background: var(--bg); color: var(--text); display: flex; height: 100vh; overflow: hidden; }
+
+/* sidebar */
+.sidebar {
+  width: 240px; min-width: 240px; background: var(--surface);
+  border-right: 1px solid var(--border); display: flex; flex-direction: column;
+  padding: 20px 12px;
+}
+.sidebar-title { font-size: 11px; font-weight: 600; color: var(--text-2); letter-spacing: .08em; text-transform: uppercase; padding: 0 8px; margin-bottom: 8px; }
+.account-item {
+  display: flex; align-items: center; gap: 10px; padding: 10px 8px;
+  border-radius: 12px; cursor: pointer; transition: background .15s; position: relative;
+}
+.account-item:hover { background: var(--bg); }
+.account-item.active { background: var(--accent-light); }
+.account-item.active::before { content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 3px; height: 24px; background: var(--accent); border-radius: 2px; }
+.account-avatar {
+  width: 36px; height: 36px; border-radius: 50%; background: var(--accent);
+  display: flex; align-items: center; justify-content: center; color: #fff; font-size: 14px; font-weight: 600; flex-shrink: 0;
+}
+.account-info { flex: 1; min-width: 0; }
+.account-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.account-id { font-size: 11px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.account-del { opacity: 0; font-size: 16px; color: var(--text-2); padding: 2px 4px; border-radius: 6px; cursor: pointer; }
+.account-item:hover .account-del { opacity: 1; }
+.account-del:hover { color: #EF4444; background: #FEE2E2; }
+.add-account-btn {
+  margin-top: 8px; padding: 10px 8px; border-radius: 12px; border: 2px dashed var(--accent);
+  color: var(--accent); font-size: 13px; font-weight: 500; cursor: pointer;
+  display: flex; align-items: center; gap: 6px; transition: background .15s;
+}
+.add-account-btn:hover { background: var(--accent-light); }
+.sidebar-footer { margin-top: auto; padding: 8px; font-size: 11px; color: var(--text-2); }
+.repo-root { word-break: break-all; }
+
+/* main */
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 20px; gap: 16px; }
+.main-header { font-size: 18px; font-weight: 700; color: var(--text); }
+.no-account-tip { background: #FFF7ED; border: 1px solid #FED7AA; border-radius: 12px; padding: 10px 14px; font-size: 13px; color: #92400E; }
+
+/* cards */
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.card {
+  background: var(--surface); border-radius: var(--radius); padding: 16px;
+  cursor: pointer; transition: transform .15s, box-shadow .15s;
+  box-shadow: var(--shadow); border: 1px solid transparent; user-select: none;
+}
+.card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,102,255,.15); border-color: var(--accent-light); }
+.card:active { transform: translateY(0); }
+.card.disabled { opacity: .45; pointer-events: none; }
+.card-icon { font-size: 22px; margin-bottom: 8px; }
+.card-label { font-size: 13px; font-weight: 600; color: var(--text); }
+.card-desc { font-size: 11px; color: var(--text-2); margin-top: 3px; }
+.card.primary .card-label { color: var(--accent); }
+.card.danger .card-icon { filter: hue-rotate(200deg); }
+
+/* terminal */
+.terminal-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.terminal-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.terminal-bar span { font-size: 12px; color: var(--text-2); }
+.status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #10B981; margin-right: 5px; }
+.status-dot.running { background: var(--accent); animation: pulse 1s infinite; }
+.clear-btn { font-size: 12px; padding: 4px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); cursor: pointer; color: var(--text-2); }
+.clear-btn:hover { background: var(--bg); }
+#output {
+  flex: 1; background: #1A1A2E; border-radius: 12px; padding: 12px 14px;
+  overflow-y: auto; font-family: Consolas, 'Courier New', monospace; font-size: 12px;
+  color: #C8F7C5; white-space: pre-wrap; word-break: break-all; line-height: 1.6;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+/* modal */
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.overlay.hidden { display: none; }
+.modal { background: var(--surface); border-radius: 20px; padding: 24px; width: 420px; max-width: 90vw; box-shadow: 0 20px 60px rgba(0,0,0,.2); }
+.modal h2 { font-size: 16px; font-weight: 700; margin-bottom: 16px; }
+.field { margin-bottom: 14px; }
+.field label { display: block; font-size: 12px; font-weight: 500; color: var(--text-2); margin-bottom: 5px; }
+.field input {
+  width: 100%; padding: 10px 12px; border-radius: 10px; border: 1.5px solid var(--border);
+  font-size: 13px; outline: none; transition: border-color .15s; background: var(--bg);
+}
+.field input:focus { border-color: var(--accent); background: var(--surface); }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+.btn { padding: 9px 20px; border-radius: 10px; font-size: 13px; font-weight: 500; cursor: pointer; border: none; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: #0052CC; }
+.btn-ghost { background: var(--bg); color: var(--text-2); }
+.btn-ghost:hover { background: var(--border); }
+.wizard-step { font-size: 11px; color: var(--text-2); margin-bottom: 16px; }
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-title">Cloudflare 账号</div>
+  <div id="account-list"></div>
+  <div class="add-account-btn" id="open-add-account">
+    <span>+</span> 添加账号
+  </div>
+  <div class="sidebar-footer">
+    <div class="repo-root" id="repo-root-display"></div>
+  </div>
+</aside>
+
+<main class="main">
+  <div class="main-header">TG Bot 部署工具</div>
+  <div class="no-account-tip hidden" id="no-account-tip">请先在左侧添加 Cloudflare 账号（API Token 模式）</div>
+  <div class="cards" id="cards">
+    <div class="card primary" data-action="first-deploy">
+      <div class="card-icon">🚀</div>
+      <div class="card-label">首次部署向导</div>
+      <div class="card-desc">引导完成首次配置与部署</div>
+    </div>
+    <div class="card" data-action="show-config">
+      <div class="card-icon">📋</div>
+      <div class="card-label">查看当前配置</div>
+      <div class="card-desc">显示 wrangler 配置摘要</div>
+    </div>
+    <div class="card" data-action="merge-config">
+      <div class="card-icon">🔧</div>
+      <div class="card-label">生成私有配置</div>
+      <div class="card-desc">合并 wrangler 配置文件</div>
+    </div>
+    <div class="card" data-action="setup-d1">
+      <div class="card-icon">🗄️</div>
+      <div class="card-label">初始化 D1</div>
+      <div class="card-desc">创建并迁移 D1 数据库</div>
+    </div>
+    <div class="card" data-action="deploy-worker">
+      <div class="card-icon">⚡</div>
+      <div class="card-label">部署 Worker</div>
+      <div class="card-desc">部署 Worker 到 Cloudflare</div>
+    </div>
+    <div class="card" data-action="deploy-panel">
+      <div class="card-icon">🖥️</div>
+      <div class="card-label">部署面板</div>
+      <div class="card-desc">部署 Pages 后台面板</div>
+    </div>
+    <div class="card" data-action="deploy-all">
+      <div class="card-icon">✨</div>
+      <div class="card-label">一键部署全部</div>
+      <div class="card-desc">依次部署 Worker 与面板</div>
+    </div>
+    <div class="card danger" data-action="switch-account">
+      <div class="card-icon">🔄</div>
+      <div class="card-label">切换 CF 账户</div>
+      <div class="card-desc">在左侧点击账号切换</div>
+    </div>
+  </div>
+  <div class="terminal-wrap">
+    <div class="terminal-bar">
+      <span><span class="status-dot" id="status-dot"></span><span id="status-text">就绪</span></span>
+      <button class="clear-btn" id="clear-btn">清空</button>
+    </div>
+    <div id="output"></div>
+  </div>
+</main>
+
+<!-- Add Account Modal -->
+<div class="overlay hidden" id="add-account-modal">
+  <div class="modal">
+    <h2>添加 Cloudflare 账号</h2>
+    <div class="field"><label>账号名称</label><input id="f-name" placeholder="例：我的主账号" /></div>
+    <div class="field"><label>API Token</label><input id="f-token" type="password" placeholder="从 CF 控制台创建" /></div>
+    <div class="field"><label>Account ID</label><input id="f-account-id" placeholder="32位十六进制字符串" /></div>
+    <div class="field"><label>邮箱（可选）</label><input id="f-email" placeholder="用于显示" /></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="cancel-add">取消</button>
+      <button class="btn btn-primary" id="confirm-add">添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- First Deploy Wizard Modal -->
+<div class="overlay hidden" id="wizard-modal">
+  <div class="modal">
+    <h2>首次部署向导</h2>
+    <div class="wizard-step">填写以下信息后将自动完成全部部署步骤</div>
+    <div class="field"><label>BOT_TOKEN</label><input id="w-bot-token" type="password" placeholder="从 @BotFather 获取" /></div>
+    <div class="field"><label>ADMIN_CHAT_ID</label><input id="w-admin-chat-id" placeholder="管理员 Telegram ID" /></div>
+    <div class="field"><label>Worker 地址（可选）</label><input id="w-worker-url" placeholder="https://your-worker.example.com" /></div>
+    <div class="field"><label>面板地址（可选）</label><input id="w-panel-url" placeholder="自动填充为 Worker地址/admin" /></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="cancel-wizard">取消</button>
+      <button class="btn btn-primary" id="confirm-wizard">开始部署</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const output = document.getElementById('output')
+const statusDot = document.getElementById('status-dot')
+const statusText = document.getElementById('status-text')
+const cards = document.querySelectorAll('.card[data-action]')
+let running = false
+
+// output stream
+window.api.onOutput((data) => {
+  output.textContent += data
+  output.scrollTop = output.scrollHeight
+})
+
+document.getElementById('clear-btn').addEventListener('click', () => {
+  output.textContent = ''
+  setStatus('就绪', false)
+})
+
+function setStatus(text, isRunning) {
+  statusText.textContent = text
+  statusDot.className = 'status-dot' + (isRunning ? ' running' : '')
+  running = isRunning
+  cards.forEach(c => c.classList.toggle('disabled', isRunning))
+}
+
+async function execAction(action, params) {
+  output.textContent = ''
+  setStatus('执行中...', true)
+  try {
+    await window.api.runAction(action, params)
+    setStatus('完成', false)
+  } catch (e) {
+    output.textContent += '\n错误: ' + e.message
+    setStatus('失败', false)
+  }
+}
+
+// card clicks
+cards.forEach(card => {
+  card.addEventListener('click', () => {
+    if (running) return
+    const action = card.dataset.action
+    if (action === 'first-deploy') {
+      document.getElementById('wizard-modal').classList.remove('hidden')
+      return
+    }
+    if (action === 'switch-account') {
+      output.textContent = '请在左侧点击账号进行切换，或添加新账号。\n'
+      return
+    }
+    execAction(action)
+  })
+})
+
+// wizard modal
+document.getElementById('cancel-wizard').addEventListener('click', () => {
+  document.getElementById('wizard-modal').classList.add('hidden')
+})
+document.getElementById('confirm-wizard').addEventListener('click', () => {
+  const params = {
+    botToken: document.getElementById('w-bot-token').value.trim(),
+    adminChatId: document.getElementById('w-admin-chat-id').value.trim(),
+    workerUrl: document.getElementById('w-worker-url').value.trim(),
+    panelUrl: document.getElementById('w-panel-url').value.trim(),
+  }
+  if (!params.botToken || !params.adminChatId) {
+    alert('BOT_TOKEN 和 ADMIN_CHAT_ID 为必填项')
+    return
+  }
+  document.getElementById('wizard-modal').classList.add('hidden')
+  execAction('first-deploy', params)
+})
+
+// add account modal
+document.getElementById('open-add-account').addEventListener('click', () => {
+  document.getElementById('add-account-modal').classList.remove('hidden')
+})
+document.getElementById('cancel-add').addEventListener('click', () => {
+  document.getElementById('add-account-modal').classList.add('hidden')
+})
+document.getElementById('confirm-add').addEventListener('click', async () => {
+  const account = {
+    name: document.getElementById('f-name').value.trim(),
+    apiToken: document.getElementById('f-token').value.trim(),
+    accountId: document.getElementById('f-account-id').value.trim(),
+    email: document.getElementById('f-email').value.trim(),
+  }
+  if (!account.name || !account.apiToken || !account.accountId) {
+    alert('名称、API Token 和 Account ID 为必填项')
+    return
+  }
+  await window.api.accounts.add(account)
+  document.getElementById('add-account-modal').classList.add('hidden')
+  ;['f-name','f-token','f-account-id','f-email'].forEach(id => document.getElementById(id).value = '')
+  await renderAccounts()
+})
+
+// accounts
+async function renderAccounts() {
+  const [accounts, activeId] = await Promise.all([
+    window.api.accounts.list(),
+    window.api.accounts.getActive()
+  ])
+  const list = document.getElementById('account-list')
+  const tip = document.getElementById('no-account-tip')
+  tip.classList.toggle('hidden', accounts.length > 0)
+
+  list.innerHTML = accounts.map(a => `
+    <div class="account-item ${a.id === activeId ? 'active' : ''}" data-id="${a.id}">
+      <div class="account-avatar">${(a.name || '?')[0].toUpperCase()}</div>
+      <div class="account-info">
+        <div class="account-name">${a.name}</div>
+        <div class="account-id">${a.email || a.accountId.slice(0,8) + '...'}</div>
+      </div>
+      <span class="account-del" data-del="${a.id}" title="删除">×</span>
+    </div>
+  `).join('')
+
+  list.querySelectorAll('.account-item').forEach(el => {
+    el.addEventListener('click', async (e) => {
+      if (e.target.dataset.del) return
+      await window.api.accounts.setActive(el.dataset.id)
+      await renderAccounts()
+    })
+  })
+  list.querySelectorAll('[data-del]').forEach(el => {
+    el.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      if (!confirm('确认删除此账号？')) return
+      await window.api.accounts.delete(el.dataset.del)
+      await renderAccounts()
+    })
+  })
+}
+
+// repo root display
+window.api.getRepoRoot().then(root => {
+  document.getElementById('repo-root-display').textContent = '仓库: ' + root
+})
+
+renderAccounts()
+</script>
+</body>
+</html>

@@ -425,6 +425,29 @@ function Read-OptionalInput {
   return $value.Trim()
 }
 
+function Invoke-SwitchAccount {
+  param([object]$Config)
+
+  Write-Host ''
+  Write-Host '切换 Cloudflare 账户' -ForegroundColor Cyan
+  Write-Host ('当前账户：' + $(if ($Config.WranglerAccountEmail) { $Config.WranglerAccountEmail } else { '未知' }))
+
+  if (-not (Get-YesNo -Prompt '确认退出当前账户并重新登录？' -Default $true)) {
+    return
+  }
+
+  if ($DryRun) {
+    Write-Host '[DryRun] npx wrangler logout' -ForegroundColor DarkGray
+    Write-Host '[DryRun] npx wrangler login --browser' -ForegroundColor DarkGray
+    return
+  }
+
+  Invoke-RepoCommand -Title '退出当前账户' -FilePath 'npx' -Arguments @('wrangler', 'logout') -WorkingDirectory $Config.RepoRoot
+  Invoke-WranglerLogin -Config $Config
+  $refresh = Read-DeployConfig
+  Write-Host ('已切换到：' + $(if ($refresh.WranglerAccountEmail) { $refresh.WranglerAccountEmail } else { '未知' })) -ForegroundColor Green
+}
+
 function Invoke-WranglerLogin {
   param([object]$Config)
 
@@ -740,6 +763,7 @@ function Get-MenuItems {
     [pscustomobject]@{ Key = 'deploy-worker'; Label = '部署 Worker'; Description = '部署当前私有 Worker 配置到 Cloudflare' },
     [pscustomobject]@{ Key = 'deploy-panel'; Label = '部署面板'; Description = '部署 Pages 后台面板到 production 分支' },
     [pscustomobject]@{ Key = 'deploy-all'; Label = '一键部署全部'; Description = '依次部署 Worker 与 Pages 面板' },
+    [pscustomobject]@{ Key = 'switch-account'; Label = '切换 CF 账户'; Description = '退出当前 Cloudflare 账户并重新登录' },
     [pscustomobject]@{ Key = 'exit'; Label = '退出'; Description = '关闭脚本' }
   )
 }
@@ -807,6 +831,7 @@ function Invoke-SelectedAction {
     'deploy-worker' { Invoke-DeployWorker -Config $Config; return $true }
     'deploy-panel' { Invoke-DeployPanel -Config $Config; return $true }
     'deploy-all' { Invoke-DeployAll -Config $Config; return $true }
+    'switch-account' { Invoke-SwitchAccount -Config $Config; return $true }
     'exit' { return $false }
     default { throw ('未知操作：' + $Action) }
   }
