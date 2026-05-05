@@ -218,19 +218,13 @@ async function main() {
 
   if (!args.dryRun) {
     try {
-      const createResult = runCommand('npx', ['wrangler', 'd1', 'create', args.databaseName], { capture: true });
-      const output = `${createResult.stdout || ''}${createResult.stderr || ''}`;
-      console.log('D1 create raw output:', JSON.stringify(output.slice(0, 500)));
-      databaseId = parseDatabaseId(output);
+      runCommand('npx', ['wrangler', 'd1', 'create', args.databaseName]);
     } catch (error) {
-      if (String(error.message || '').includes('A database with that name already exists')) {
-        const existing = findExistingDatabase(args.databaseName);
-        databaseId = existing?.uuid || '';
-        console.log(`检测到同名数据库已存在，已复用：${args.databaseName}`);
-      } else {
-        throw error;
-      }
+      if (!String(error.message || '').includes('already exists')) throw error;
     }
+    const existing = findExistingDatabase(args.databaseName);
+    databaseId = existing?.uuid || existing?.id || '';
+    if (databaseId) console.log(`D1 database_id: ${databaseId}`);
 
     if (!databaseId) {
       throw new Error('无法解析或复用 D1 database_id。');
