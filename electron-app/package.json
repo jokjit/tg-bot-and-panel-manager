@@ -27,11 +27,17 @@
     ],
     "asarUnpack": ["node_modules/wrangler/**", "node_modules/.bin/wrangler*", "admin-panel/node_modules/**"],
     "win": {
-      "target": "portable",
+      "target": "nsis",
       "icon": null
     },
-    "portable": {
-      "artifactName": "tg-bot-deploy.exe"
+    "nsis": {
+      "oneClick": false,
+      "allowDirectorySelection": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": true,
+      "artifactName": "tg-bot-deploy-setup.exe"
     }
   }
 }
