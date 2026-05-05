@@ -59,10 +59,9 @@ function getFakeBinDir() {
   if (!fs.existsSync(_fakeBinDir)) fs.mkdirSync(_fakeBinDir, { recursive: true })
   // node.cmd → Electron binary in Node.js mode
   fs.writeFileSync(path.join(_fakeBinDir, 'node.cmd'),
-    `@echo off\nset ELECTRON_RUN_AS_NODE=1\n"${process.execPath}" %*\n`)
-  // npx.cmd → strip first arg (package name) and run the rest
+    `@echo off\r\n"${process.execPath}" %*\r\n`)
   fs.writeFileSync(path.join(_fakeBinDir, 'npx.cmd'),
-    '@echo off\nfor /f "tokens=1,*" %%a in ("%*") do %%b\n')
+    '@echo off\r\nfor /f "tokens=1,*" %%a in ("%*") do %%a %%b\r\n')
   return _fakeBinDir
 }
 
