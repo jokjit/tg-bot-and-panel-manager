@@ -272,16 +272,46 @@ async function getWorkerScript(env, workerName) {
   }
 }
 
-async function verifyWorkerDeployment(env, configPath) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isWorkerVerifyRetryable(reason) {
+  const text = String(reason || '')
+  return text.includes('10007') || text.startsWith('http_5') || text === 'http_429'
+}
+
+async function verifyWorkerDeployment(env, configPath, onProgress) {
   const workerName = getWorkerNameFromConfig(configPath)
   if (!workerName) {
     return { ok: false, workerName: '', reason: 'missing_worker_name_in_config' }
   }
-  const check = await getWorkerScript(env, workerName)
-  if (!check.ok) {
-    return { ok: false, workerName, reason: check.reason || 'unknown' }
+
+  const delays = [1200, 2200, 4000, 7000]
+  let lastReason = 'unknown'
+
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    const check = await getWorkerScript(env, workerName)
+    if (check.ok) {
+      return { ok: true, workerName }
+    }
+
+    lastReason = check.reason || 'unknown'
+    if (!isWorkerVerifyRetryable(lastReason) || attempt >= delays.length) {
+      break
+    }
+
+    const delayMs = delays[attempt]
+    onProgress?.(`Worker verification pending (${workerName}): ${lastReason}. Retrying in ${Math.round(delayMs / 1000)}s...`)
+    await sleep(delayMs)
   }
-  return { ok: true, workerName }
+
+  if (String(lastReason).includes('10007')) {
+    const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim() || 'unknown'
+    lastReason = `${lastReason}; worker script "${workerName}" still not found under account "${accountId}". Check token/account binding.`
+  }
+
+  return { ok: false, workerName, reason: lastReason }
 }
 
 // process runner
@@ -376,7 +406,7 @@ async function runAction(action, params, env) {
       await runScript('merge-wrangler-config.mjs', [], env)
       await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
       {
-        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'))
+        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'), send)
         if (!check.ok) {
           throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
         }
@@ -463,7 +493,7 @@ async function runAction(action, params, env) {
       send('Step 3/4: Deploying Worker...')
       await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
       {
-        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'))
+        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'), send)
         if (!check.ok) {
           throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
         }
