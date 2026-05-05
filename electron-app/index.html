@@ -1,5 +1,5 @@
 ﻿<!DOCTYPE html>
-<html lang="en">
+<html lang="zh">
 <head>
 <meta charset="UTF-8" />
 <title>TG Bot Deploy Tool</title>
@@ -12,6 +12,11 @@
   --border: #e5e7eb;
   --text: #1a1a2e;
   --text-2: #6b7280;
+  --terminal-bg: #1a1a2e;
+  --terminal-fg: #c8f7c5;
+  --warn-bg: #fff7ed;
+  --warn-border: #fed7aa;
+  --warn-text: #92400e;
   --radius: 16px;
   --shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
 }
@@ -23,6 +28,21 @@ body {
   display: flex;
   height: 100vh;
   overflow: hidden;
+}
+body[data-theme="dark"] {
+  --accent: #3b82f6;
+  --accent-light: #1d4ed833;
+  --bg: #0f172a;
+  --surface: #111827;
+  --border: #1f2937;
+  --text: #e5e7eb;
+  --text-2: #94a3b8;
+  --terminal-bg: #020617;
+  --terminal-fg: #86efac;
+  --warn-bg: #422006;
+  --warn-border: #7c2d12;
+  --warn-text: #fdba74;
+  --shadow: 0 2px 18px rgba(0, 0, 0, 0.35);
 }
 .hidden { display: none !important; }
 
@@ -139,18 +159,29 @@ body {
   padding: 20px;
   gap: 12px;
 }
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
 .main-header {
   font-size: 18px;
   font-weight: 700;
   color: var(--text);
 }
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .no-account-tip {
-  background: #fff7ed;
-  border: 1px solid #fed7aa;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
   border-radius: 12px;
   padding: 10px 14px;
   font-size: 13px;
-  color: #92400e;
+  color: var(--warn-text);
 }
 
 .cards {
@@ -263,13 +294,13 @@ body {
 .clear-btn:hover { background: var(--bg); }
 #output {
   flex: 1;
-  background: #1a1a2e;
+  background: var(--terminal-bg);
   border-radius: 12px;
   padding: 12px 14px;
   overflow-y: auto;
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
-  color: #c8f7c5;
+  color: var(--terminal-fg);
   white-space: pre-wrap;
   word-break: break-all;
   line-height: 1.6;
@@ -357,9 +388,9 @@ body {
 </head>
 <body>
 <aside class="sidebar">
-  <div class="sidebar-title">Cloudflare Accounts</div>
+  <div class="sidebar-title" id="sidebar-title">Cloudflare Accounts</div>
   <div id="account-list"></div>
-  <div class="add-account-btn" id="open-add-account"><span>+</span> Add Account</div>
+  <div class="add-account-btn" id="open-add-account"><span>+</span> <span id="open-add-account-text">Add Account</span></div>
   <div class="sidebar-footer">
     <div class="repo-root" id="repo-root-display"></div>
     <div id="clear-data-btn" style="margin-top:8px;padding:6px 8px;border-radius:8px;border:1px solid #FCA5A5;color:#EF4444;font-size:11px;cursor:pointer;text-align:center;">Clear Local Data</div>
@@ -367,36 +398,42 @@ body {
 </aside>
 
 <main class="main">
-  <div class="main-header">TG Bot Deploy Tool</div>
+  <div class="topbar">
+    <div class="main-header" id="main-header">TG Bot Deploy Tool</div>
+    <div class="topbar-actions">
+      <button class="clear-btn" id="lang-toggle-btn" type="button">中文</button>
+      <button class="clear-btn" id="theme-toggle-btn" type="button">Dark</button>
+    </div>
+  </div>
   <div class="no-account-tip hidden" id="no-account-tip">Add a Cloudflare account first (API Token mode).</div>
 
   <div class="cards" id="cards">
     <div class="card primary" data-action="first-deploy">
       <div class="card-icon">01</div>
-      <div class="card-label">First Deploy</div>
-      <div class="card-desc">Run D1, Worker, Pages in one flow</div>
+      <div class="card-label" id="card-first-label">First Deploy</div>
+      <div class="card-desc" id="card-first-desc">Run D1, Worker, Pages in one flow</div>
     </div>
     <div class="card" data-action="deploy-worker">
       <div class="card-icon">02</div>
-      <div class="card-label">Update Worker</div>
-      <div class="card-desc">Use after backend code changes</div>
+      <div class="card-label" id="card-worker-label">Update Worker</div>
+      <div class="card-desc" id="card-worker-desc">Use after backend code changes</div>
     </div>
     <div class="card" data-action="deploy-panel">
       <div class="card-icon">03</div>
-      <div class="card-label">Update Panel</div>
-      <div class="card-desc">Use after frontend code changes</div>
+      <div class="card-label" id="card-panel-label">Update Panel</div>
+      <div class="card-desc" id="card-panel-desc">Use after frontend code changes</div>
     </div>
     <div class="card" data-action="open-panel">
       <div class="card-icon">04</div>
-      <div class="card-label">Open Panel</div>
-      <div class="card-desc">Open current account panel in app</div>
+      <div class="card-label" id="card-open-label">Open Panel</div>
+      <div class="card-desc" id="card-open-desc">Open current account panel in app</div>
     </div>
   </div>
 
   <div class="panel-embed hidden" id="embedded-panel-wrap">
     <div class="panel-toolbar">
       <div>
-        <div class="panel-title">Embedded Panel</div>
+        <div class="panel-title" id="panel-title">Embedded Panel</div>
         <div class="panel-sub" id="embedded-panel-account">No active account</div>
       </div>
       <div class="panel-actions">
@@ -420,11 +457,11 @@ body {
 
 <div class="overlay hidden" id="add-account-modal">
   <div class="modal">
-    <h2>Add Cloudflare Account</h2>
-    <div class="field"><label>Account Name</label><input id="f-name" placeholder="Example: Main Account" /></div>
-    <div class="field"><label>API Token</label><input id="f-token" type="password" placeholder="Create in Cloudflare dashboard" /></div>
-    <div class="field"><label>Account ID</label><input id="f-account-id" placeholder="32-char hex string" /></div>
-    <div class="field"><label>Email (Optional)</label><input id="f-email" placeholder="For display only" /></div>
+    <h2 id="add-modal-title">Add Cloudflare Account</h2>
+    <div class="field"><label id="f-name-label">Account Name</label><input id="f-name" placeholder="Example: Main Account" /></div>
+    <div class="field"><label id="f-token-label">API Token</label><input id="f-token" type="password" placeholder="Create in Cloudflare dashboard" /></div>
+    <div class="field"><label id="f-account-id-label">Account ID</label><input id="f-account-id" placeholder="32-char hex string" /></div>
+    <div class="field"><label id="f-email-label">Email (Optional)</label><input id="f-email" placeholder="For display only" /></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="cancel-add">Cancel</button>
       <button class="btn btn-primary" id="confirm-add">Add</button>
@@ -434,25 +471,25 @@ body {
 
 <div class="overlay hidden" id="wizard-modal">
   <div class="modal">
-    <h2>First Deploy</h2>
-    <div class="wizard-step">This runs D1 init, Worker deploy, and Pages deploy.</div>
-    <div class="field"><label>BOT_TOKEN</label><input id="w-bot-token" type="password" placeholder="Get from @BotFather" /></div>
-    <div class="field"><label>ADMIN_CHAT_ID</label><input id="w-admin-chat-id" placeholder="Admin user ID or group ID" /></div>
+    <h2 id="wizard-title">First Deploy</h2>
+    <div class="wizard-step" id="wizard-step">This runs D1 init, Worker deploy, and Pages deploy.</div>
+    <div class="field"><label id="w-bot-token-label">BOT_TOKEN</label><input id="w-bot-token" type="password" placeholder="Get from @BotFather" /></div>
+    <div class="field"><label id="w-admin-chat-id-label">ADMIN_CHAT_ID</label><input id="w-admin-chat-id" placeholder="Admin user ID or group ID" /></div>
 
     <details class="field">
-      <summary style="font-size:12px;color:var(--text-2);cursor:pointer;">Advanced (optional)</summary>
+      <summary id="wizard-advanced-summary" style="font-size:12px;color:var(--text-2);cursor:pointer;">Advanced (optional)</summary>
       <div style="margin-top:8px;">
-        <label style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Worker URL</label>
+        <label id="w-worker-url-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Worker URL</label>
         <input id="w-worker-url" placeholder="https://your-worker.example.com" />
       </div>
       <div style="margin-top:10px;">
-        <label style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Panel URL</label>
+        <label id="w-panel-url-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Panel URL</label>
         <input id="w-panel-url" placeholder="Leave blank to use returned pages.dev URL" />
       </div>
     </details>
 
     <div class="field">
-      <label class="field-inline"><input id="w-open-panel-in-client" type="checkbox" /> Open panel in app after deploy</label>
+      <label class="field-inline"><input id="w-open-panel-in-client" type="checkbox" /> <span id="w-open-panel-in-client-text">Open panel in app after deploy</span></label>
     </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="cancel-wizard">Cancel</button>
@@ -478,9 +515,228 @@ const panelAccount = document.getElementById("embedded-panel-account")
 const panelRefreshBtn = document.getElementById("panel-refresh-btn")
 const panelHideBtn = document.getElementById("panel-hide-btn")
 const panelOpenExternalBtn = document.getElementById("panel-open-external-btn")
+const langToggleBtn = document.getElementById("lang-toggle-btn")
+const themeToggleBtn = document.getElementById("theme-toggle-btn")
 
 let running = false
 let currentActiveAccount = null
+let currentLocale = "zh"
+let currentTheme = "light"
+let statusKey = "status_idle"
+let repoRootPath = ""
+
+const UI_LOCALE_KEY = "tg_bot_ui_locale"
+const UI_THEME_KEY = "tg_bot_ui_theme"
+
+const i18n = {
+  zh: {
+    app_title: "TG Bot 部署工具",
+    sidebar_title: "Cloudflare 账号",
+    add_account_btn: "添加账号",
+    clear_local_data: "清除本地数据",
+    no_account_tip: "请先在左侧添加 Cloudflare 账号（API Token 模式）。",
+    card_first_label: "首次部署",
+    card_first_desc: "一次完成 D1、Worker、Pages",
+    card_worker_label: "更新 Worker",
+    card_worker_desc: "后端改动后重新部署",
+    card_panel_label: "更新面板",
+    card_panel_desc: "前端改动后重新部署",
+    card_open_label: "打开面板",
+    card_open_desc: "在客户端内打开当前账号面板",
+    panel_title: "内嵌面板",
+    panel_refresh: "刷新",
+    panel_open_browser: "浏览器打开",
+    panel_hide: "收起",
+    panel_empty: "当前账号暂无面板地址。请先部署 Pages 或在首次部署中填写面板地址。",
+    clear_logs: "清空日志",
+    status_idle: "就绪",
+    status_running: "执行中...",
+    status_done: "完成",
+    status_failed: "失败",
+    add_modal_title: "添加 Cloudflare 账号",
+    f_name_label: "账号名称",
+    f_name_ph: "例如：主账号",
+    f_token_label: "API Token",
+    f_token_ph: "在 Cloudflare 控制台创建",
+    f_account_id_label: "Account ID",
+    f_account_id_ph: "32 位十六进制字符串",
+    f_email_label: "邮箱（可选）",
+    f_email_ph: "仅用于显示",
+    cancel: "取消",
+    add: "添加",
+    wizard_title: "首次部署",
+    wizard_step: "将执行 D1 初始化、Worker 部署、Pages 部署。",
+    w_bot_token_label: "BOT_TOKEN",
+    w_bot_token_ph: "从 @BotFather 获取",
+    w_admin_label: "ADMIN_CHAT_ID",
+    w_admin_ph: "管理员用户 ID 或群组 ID",
+    wizard_advanced: "高级选项（可选）",
+    w_worker_label: "Worker 地址",
+    w_panel_label: "面板地址",
+    w_panel_ph: "留空则使用部署返回的 pages.dev",
+    w_open_panel: "部署完成后在客户端打开面板",
+    start_deploy: "开始部署",
+    error_prefix: "错误",
+    no_panel_url_alert: "当前账号没有面板地址",
+    missing_required_alert: "BOT_TOKEN 和 ADMIN_CHAT_ID 为必填项",
+    add_required_alert: "账号名称、API Token、Account ID 为必填项",
+    delete_account_confirm: "确认删除这个账号？",
+    clear_data_confirm: "确认清除所有本地账号数据？该操作不可恢复。",
+    repo_prefix: "仓库",
+    data_cleared: "数据已清除",
+    unnamed_account: "(未命名账号)",
+    no_active_account: "未选择账号",
+    panel_url_missing: "暂无面板地址",
+    language_toggle: "English",
+    theme_toggle_dark: "深色",
+    theme_toggle_light: "浅色",
+    delete_title: "删除",
+    account_separator: " | ",
+  },
+  en: {
+    app_title: "TG Bot Deploy Tool",
+    sidebar_title: "Cloudflare Accounts",
+    add_account_btn: "Add Account",
+    clear_local_data: "Clear Local Data",
+    no_account_tip: "Add a Cloudflare account first (API Token mode).",
+    card_first_label: "First Deploy",
+    card_first_desc: "Run D1, Worker, Pages in one flow",
+    card_worker_label: "Update Worker",
+    card_worker_desc: "Use after backend code changes",
+    card_panel_label: "Update Panel",
+    card_panel_desc: "Use after frontend code changes",
+    card_open_label: "Open Panel",
+    card_open_desc: "Open current account panel in app",
+    panel_title: "Embedded Panel",
+    panel_refresh: "Refresh",
+    panel_open_browser: "Open in Browser",
+    panel_hide: "Hide",
+    panel_empty: "No panel URL for this account. Deploy Pages first or set panel URL in first deploy.",
+    clear_logs: "Clear Logs",
+    status_idle: "Idle",
+    status_running: "Running...",
+    status_done: "Done",
+    status_failed: "Failed",
+    add_modal_title: "Add Cloudflare Account",
+    f_name_label: "Account Name",
+    f_name_ph: "Example: Main Account",
+    f_token_label: "API Token",
+    f_token_ph: "Create in Cloudflare dashboard",
+    f_account_id_label: "Account ID",
+    f_account_id_ph: "32-char hex string",
+    f_email_label: "Email (Optional)",
+    f_email_ph: "For display only",
+    cancel: "Cancel",
+    add: "Add",
+    wizard_title: "First Deploy",
+    wizard_step: "This runs D1 init, Worker deploy, and Pages deploy.",
+    w_bot_token_label: "BOT_TOKEN",
+    w_bot_token_ph: "Get from @BotFather",
+    w_admin_label: "ADMIN_CHAT_ID",
+    w_admin_ph: "Admin user ID or group ID",
+    wizard_advanced: "Advanced (optional)",
+    w_worker_label: "Worker URL",
+    w_panel_label: "Panel URL",
+    w_panel_ph: "Leave blank to use returned pages.dev URL",
+    w_open_panel: "Open panel in app after deploy",
+    start_deploy: "Start Deploy",
+    error_prefix: "Error",
+    no_panel_url_alert: "No panel URL configured for this account",
+    missing_required_alert: "BOT_TOKEN and ADMIN_CHAT_ID are required",
+    add_required_alert: "Account Name, API Token, and Account ID are required",
+    delete_account_confirm: "Delete this account?",
+    clear_data_confirm: "Clear all local account data? This cannot be undone.",
+    repo_prefix: "Repo",
+    data_cleared: "Data cleared",
+    unnamed_account: "(unnamed account)",
+    no_active_account: "No active account",
+    panel_url_missing: "no panel URL",
+    language_toggle: "中文",
+    theme_toggle_dark: "Dark",
+    theme_toggle_light: "Light",
+    delete_title: "Delete",
+    account_separator: " | ",
+  },
+}
+
+function t(key) {
+  return i18n[currentLocale]?.[key] ?? i18n.en[key] ?? key
+}
+
+function setLocale(locale) {
+  currentLocale = locale === "en" ? "en" : "zh"
+  localStorage.setItem(UI_LOCALE_KEY, currentLocale)
+  applyLocale()
+}
+
+function setTheme(theme) {
+  currentTheme = theme === "dark" ? "dark" : "light"
+  document.body.dataset.theme = currentTheme
+  localStorage.setItem(UI_THEME_KEY, currentTheme)
+  themeToggleBtn.textContent = currentTheme === "dark" ? t("theme_toggle_light") : t("theme_toggle_dark")
+}
+
+function updateRepoRootLabel() {
+  document.getElementById("repo-root-display").textContent = repoRootPath ? `${t("repo_prefix")}: ${repoRootPath}` : ""
+}
+
+function applyLocale() {
+  document.documentElement.lang = currentLocale
+  document.title = t("app_title")
+  document.getElementById("main-header").textContent = t("app_title")
+  document.getElementById("sidebar-title").textContent = t("sidebar_title")
+  document.getElementById("open-add-account-text").textContent = t("add_account_btn")
+  document.getElementById("clear-data-btn").textContent = t("clear_local_data")
+  document.getElementById("no-account-tip").textContent = t("no_account_tip")
+  document.getElementById("card-first-label").textContent = t("card_first_label")
+  document.getElementById("card-first-desc").textContent = t("card_first_desc")
+  document.getElementById("card-worker-label").textContent = t("card_worker_label")
+  document.getElementById("card-worker-desc").textContent = t("card_worker_desc")
+  document.getElementById("card-panel-label").textContent = t("card_panel_label")
+  document.getElementById("card-panel-desc").textContent = t("card_panel_desc")
+  document.getElementById("card-open-label").textContent = t("card_open_label")
+  document.getElementById("card-open-desc").textContent = t("card_open_desc")
+  document.getElementById("panel-title").textContent = t("panel_title")
+  document.getElementById("panel-refresh-btn").textContent = t("panel_refresh")
+  document.getElementById("panel-open-external-btn").textContent = t("panel_open_browser")
+  document.getElementById("panel-hide-btn").textContent = t("panel_hide")
+  document.getElementById("embedded-panel-empty").textContent = t("panel_empty")
+  document.getElementById("clear-btn").textContent = t("clear_logs")
+  document.getElementById("add-modal-title").textContent = t("add_modal_title")
+  document.getElementById("f-name-label").textContent = t("f_name_label")
+  document.getElementById("f-token-label").textContent = t("f_token_label")
+  document.getElementById("f-account-id-label").textContent = t("f_account_id_label")
+  document.getElementById("f-email-label").textContent = t("f_email_label")
+  document.getElementById("cancel-add").textContent = t("cancel")
+  document.getElementById("confirm-add").textContent = t("add")
+  document.getElementById("wizard-title").textContent = t("wizard_title")
+  document.getElementById("wizard-step").textContent = t("wizard_step")
+  document.getElementById("w-bot-token-label").textContent = t("w_bot_token_label")
+  document.getElementById("w-admin-chat-id-label").textContent = t("w_admin_label")
+  document.getElementById("wizard-advanced-summary").textContent = t("wizard_advanced")
+  document.getElementById("w-worker-url-label").textContent = t("w_worker_label")
+  document.getElementById("w-panel-url-label").textContent = t("w_panel_label")
+  document.getElementById("w-open-panel-in-client-text").textContent = t("w_open_panel")
+  document.getElementById("cancel-wizard").textContent = t("cancel")
+  document.getElementById("confirm-wizard").textContent = t("start_deploy")
+
+  document.getElementById("f-name").placeholder = t("f_name_ph")
+  document.getElementById("f-token").placeholder = t("f_token_ph")
+  document.getElementById("f-account-id").placeholder = t("f_account_id_ph")
+  document.getElementById("f-email").placeholder = t("f_email_ph")
+  document.getElementById("w-bot-token").placeholder = t("w_bot_token_ph")
+  document.getElementById("w-admin-chat-id").placeholder = t("w_admin_ph")
+  document.getElementById("w-panel-url").placeholder = t("w_panel_ph")
+
+  langToggleBtn.textContent = t("language_toggle")
+  themeToggleBtn.textContent = currentTheme === "dark" ? t("theme_toggle_light") : t("theme_toggle_dark")
+  statusText.textContent = t(statusKey)
+  updateRepoRootLabel()
+  renderEmbeddedPanel(false)
+  if (currentActiveAccount) {
+    renderAccounts()
+  }
+}
 
 function normalizeHttpUrl(raw) {
   const text = String(raw || "").trim()
@@ -536,9 +792,11 @@ function getWizardParams() {
 }
 
 function renderEmbeddedPanel(forceReload = false) {
-  const accountName = currentActiveAccount?.name || "No active account"
+  const accountName = currentActiveAccount?.name || t("no_active_account")
   const panelUrl = getActivePanelUrl()
-  panelAccount.textContent = panelUrl ? `${accountName} | ${panelUrl}` : `${accountName} | no panel URL`
+  panelAccount.textContent = panelUrl
+    ? `${accountName}${t("account_separator")}${panelUrl}`
+    : `${accountName}${t("account_separator")}${t("panel_url_missing")}`
 
   if (!panelUrl) {
     panelEmpty.classList.remove("hidden")
@@ -563,7 +821,8 @@ function openEmbeddedPanel(forceReload = false) {
 }
 
 function setStatus(text, isRunning) {
-  statusText.textContent = text
+  statusKey = text
+  statusText.textContent = t(text)
   statusDot.className = "status-dot" + (isRunning ? " running" : "")
   running = isRunning
   cards.forEach((c) => c.classList.toggle("disabled", isRunning))
@@ -576,19 +835,27 @@ window.api.onOutput((data) => {
 
 document.getElementById("clear-btn").addEventListener("click", () => {
   output.textContent = ""
-  setStatus("Idle", false)
+  setStatus("status_idle", false)
+})
+
+langToggleBtn.addEventListener("click", () => {
+  setLocale(currentLocale === "zh" ? "en" : "zh")
+})
+
+themeToggleBtn.addEventListener("click", () => {
+  setTheme(currentTheme === "dark" ? "light" : "dark")
 })
 
 async function execAction(action, params) {
   output.textContent = ""
-  setStatus("Running...", true)
+  setStatus("status_running", true)
   try {
     const result = await window.api.runAction(action, params)
-    setStatus("Done", false)
+    setStatus("status_done", false)
     return result
   } catch (e) {
-    output.textContent += `\nError: ${e.message}`
-    setStatus("Failed", false)
+    output.textContent += `\n${t("error_prefix")}: ${e.message}`
+    setStatus("status_failed", false)
     throw e
   }
 }
@@ -654,7 +921,7 @@ panelRefreshBtn.addEventListener("click", () => {
 panelOpenExternalBtn.addEventListener("click", () => {
   const panelUrl = getActivePanelUrl()
   if (!panelUrl) {
-    alert("No panel URL configured for this account")
+    alert(t("no_panel_url_alert"))
     return
   }
   window.open(panelUrl)
@@ -669,7 +936,7 @@ document.getElementById("confirm-wizard").addEventListener("click", async () => 
   const params = getWizardParams()
 
   if (action === "first-deploy" && (!params.botToken || !params.adminChatId)) {
-    alert("BOT_TOKEN and ADMIN_CHAT_ID are required")
+    alert(t("missing_required_alert"))
     return
   }
 
@@ -721,7 +988,7 @@ document.getElementById("confirm-add").addEventListener("click", async () => {
   }
 
   if (!account.name || !account.apiToken || !account.accountId) {
-    alert("Account Name, API Token, and Account ID are required")
+    alert(t("add_required_alert"))
     return
   }
 
@@ -752,10 +1019,10 @@ async function renderAccounts() {
     <div class="account-item ${a.id === activeId ? "active" : ""}" data-id="${a.id}">
       <div class="account-avatar">${(a.name || "?")[0].toUpperCase()}</div>
       <div class="account-info">
-        <div class="account-name">${a.name || "(unnamed account)"}</div>
+        <div class="account-name">${a.name || t("unnamed_account")}</div>
         <div class="account-id">${a.email || shortId}</div>
       </div>
-      <span class="account-del" data-del="${a.id}" title="Delete">x</span>
+      <span class="account-del" data-del="${a.id}" title="${t("delete_title")}">x</span>
     </div>
   `
     })
@@ -772,7 +1039,7 @@ async function renderAccounts() {
   list.querySelectorAll("[data-del]").forEach((el) => {
     el.addEventListener("click", async (e) => {
       e.stopPropagation()
-      if (!confirm("Delete this account?")) return
+      if (!confirm(t("delete_account_confirm"))) return
       await window.api.accounts.delete(el.dataset.del)
       await renderAccounts()
     })
@@ -785,17 +1052,31 @@ async function renderAccounts() {
 }
 
 window.api.getRepoRoot().then((root) => {
-  document.getElementById("repo-root-display").textContent = root ? `Repo: ${root}` : ""
+  repoRootPath = root || ""
+  updateRepoRootLabel()
 })
 
 document.getElementById("clear-data-btn").addEventListener("click", async () => {
-  if (!confirm("Clear all local account data? This cannot be undone.")) return
+  if (!confirm(t("clear_data_confirm"))) return
   await window.api.clearData()
   await renderAccounts()
   output.textContent = ""
-  setStatus("Data cleared", false)
+  setStatus("status_idle", false)
+  output.textContent += `${t("data_cleared")}\n`
   panelWrap.classList.add("hidden")
 })
+
+const savedLocale = localStorage.getItem(UI_LOCALE_KEY)
+if (savedLocale === "en" || savedLocale === "zh") {
+  currentLocale = savedLocale
+}
+const savedTheme = localStorage.getItem(UI_THEME_KEY)
+if (savedTheme === "dark" || savedTheme === "light") {
+  currentTheme = savedTheme
+}
+setTheme(currentTheme)
+applyLocale()
+setStatus("status_idle", false)
 
 renderAccounts()
 </script>
