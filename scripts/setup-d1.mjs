@@ -220,6 +220,7 @@ async function main() {
     try {
       const createResult = runCommand('npx', ['wrangler', 'd1', 'create', args.databaseName], { capture: true });
       const output = `${createResult.stdout || ''}${createResult.stderr || ''}`;
+      console.log('D1 create raw output:', JSON.stringify(output.slice(0, 500)));
       databaseId = parseDatabaseId(output);
     } catch (error) {
       if (String(error.message || '').includes('A database with that name already exists')) {
