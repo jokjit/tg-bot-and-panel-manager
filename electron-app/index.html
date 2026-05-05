@@ -190,6 +190,7 @@ body { font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif; background: va
     <div class="field"><label>ADMIN_CHAT_ID</label><input id="w-admin-chat-id" placeholder="群聊 ID（如 -100xxx）或管理员个人 ID" /></div>
     <div class="field"><label>Worker 地址（可选）</label><input id="w-worker-url" placeholder="https://your-worker.example.com" /></div>
     <div class="field"><label>面板地址（可选）</label><input id="w-panel-url" placeholder="自动填充为 Worker地址/admin" /></div>
+    <div class="field"><label><input id="w-use-builtin-panel" type="checkbox" /> 使用 Worker 内置面板（跳过 Pages 部署）</label></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="cancel-wizard">取消</button>
       <button class="btn btn-primary" id="confirm-wizard">开始部署</button>
@@ -202,7 +203,52 @@ const output = document.getElementById('output')
 const statusDot = document.getElementById('status-dot')
 const statusText = document.getElementById('status-text')
 const cards = document.querySelectorAll('.card[data-action]')
+const wizardModal = document.getElementById('wizard-modal')
+const wizardUseBuiltin = document.getElementById('w-use-builtin-panel')
+const wizardWorkerUrl = document.getElementById('w-worker-url')
+const wizardPanelUrl = document.getElementById('w-panel-url')
 let running = false
+let currentActiveAccount = null
+
+function buildBuiltinPanelUrl(workerUrl) {
+  const raw = String(workerUrl || '').trim()
+  if (!raw) return ''
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`
+  return withProtocol.replace(/\/$/, '') + '/admin'
+}
+
+function syncBuiltinPanelState() {
+  const useBuiltin = Boolean(wizardUseBuiltin.checked)
+  wizardPanelUrl.disabled = useBuiltin
+  if (useBuiltin) {
+    const built = buildBuiltinPanelUrl(wizardWorkerUrl.value)
+    if (built) wizardPanelUrl.value = built
+  }
+}
+
+function applyWizardPrefsFromActiveAccount() {
+  const prefs = currentActiveAccount?.deployPrefs || {}
+  document.getElementById('w-bot-token').value = prefs.botToken || ''
+  document.getElementById('w-admin-chat-id').value = prefs.adminChatId || ''
+  wizardWorkerUrl.value = prefs.workerUrl || ''
+  wizardPanelUrl.value = prefs.panelUrl || ''
+  wizardUseBuiltin.checked = Boolean(prefs.useBuiltinPanel)
+  syncBuiltinPanelState()
+}
+
+function getWizardParams() {
+  const params = {
+    botToken: document.getElementById('w-bot-token').value.trim(),
+    adminChatId: document.getElementById('w-admin-chat-id').value.trim(),
+    workerUrl: wizardWorkerUrl.value.trim(),
+    panelUrl: wizardPanelUrl.value.trim(),
+    useBuiltinPanel: Boolean(wizardUseBuiltin.checked),
+  }
+  if (params.useBuiltinPanel && !params.panelUrl && params.workerUrl) {
+    params.panelUrl = buildBuiltinPanelUrl(params.workerUrl)
+  }
+  return params
+}
 
 // output stream
 window.api.onOutput((data) => {
@@ -213,6 +259,14 @@ window.api.onOutput((data) => {
 document.getElementById('clear-btn').addEventListener('click', () => {
   output.textContent = ''
   setStatus('就绪', false)
+})
+
+wizardUseBuiltin.addEventListener('change', syncBuiltinPanelState)
+wizardWorkerUrl.addEventListener('input', () => {
+  if (wizardUseBuiltin.checked) {
+    const built = buildBuiltinPanelUrl(wizardWorkerUrl.value)
+    if (built) wizardPanelUrl.value = built
+  }
 })
 
 function setStatus(text, isRunning) {
@@ -240,8 +294,9 @@ cards.forEach(card => {
     if (running) return
     const action = card.dataset.action
     if (action === 'first-deploy' || action === 'deploy-panel' || action === 'deploy-all') {
-      document.getElementById('wizard-modal').classList.remove('hidden')
-      document.getElementById('wizard-modal').dataset.action = action
+      applyWizardPrefsFromActiveAccount()
+      wizardModal.classList.remove('hidden')
+      wizardModal.dataset.action = action
       return
     }
     execAction(action)
@@ -250,22 +305,24 @@ cards.forEach(card => {
 
 // wizard modal
 document.getElementById('cancel-wizard').addEventListener('click', () => {
-  document.getElementById('wizard-modal').classList.add('hidden')
+  wizardModal.classList.add('hidden')
 })
-document.getElementById('confirm-wizard').addEventListener('click', () => {
-  const modal = document.getElementById('wizard-modal')
+document.getElementById('confirm-wizard').addEventListener('click', async () => {
+  const modal = wizardModal
   const action = modal.dataset.action || 'first-deploy'
-  const params = {
-    botToken: document.getElementById('w-bot-token').value.trim(),
-    adminChatId: document.getElementById('w-admin-chat-id').value.trim(),
-    workerUrl: document.getElementById('w-worker-url').value.trim(),
-    panelUrl: document.getElementById('w-panel-url').value.trim(),
-  }
+  const params = getWizardParams()
   if (action === 'first-deploy' && (!params.botToken || !params.adminChatId)) {
     alert('BOT_TOKEN 和 ADMIN_CHAT_ID 为必填项')
     return
   }
-  document.getElementById('wizard-modal').classList.add('hidden')
+
+  try {
+    await window.api.accounts.saveDeployPrefs(params)
+  } catch {
+    // ignore cache-save errors and continue deploy
+  }
+
+  wizardModal.classList.add('hidden')
   execAction(action, params)
 })
 
@@ -303,6 +360,8 @@ async function renderAccounts() {
   const tip = document.getElementById('no-account-tip')
   tip.classList.toggle('hidden', accounts.length > 0)
 
+  currentActiveAccount = accounts.find(a => a.id === activeId) || accounts[0] || null
+
   list.innerHTML = accounts.map(a => `
     <div class="account-item ${a.id === activeId ? 'active' : ''}" data-id="${a.id}">
       <div class="account-avatar">${(a.name || '?')[0].toUpperCase()}</div>
@@ -329,6 +388,8 @@ async function renderAccounts() {
       await renderAccounts()
     })
   })
+
+  applyWizardPrefsFromActiveAccount()
 }
 
 // repo root display

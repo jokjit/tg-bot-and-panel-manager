@@ -55,6 +55,17 @@ function getActiveAccount() {
   return accounts.find(a => a.id === activeAccountId) || accounts[0] || null
 }
 
+function normalizeDeployPrefs(input = {}) {
+  const asText = (value) => String(value ?? '').trim()
+  return {
+    botToken: asText(input.botToken),
+    adminChatId: asText(input.adminChatId),
+    workerUrl: asText(input.workerUrl),
+    panelUrl: asText(input.panelUrl),
+    useBuiltinPanel: Boolean(input.useBuiltinPanel),
+  }
+}
+
 // ── env injection ──────────────────────────────────────────────────────────
 let _fakeBinDir = null
 function getFakeBinDir() {
@@ -79,7 +90,8 @@ function buildEnv(account) {
     ...process.env,
     ELECTRON_RUN_AS_NODE: '1',
     NODE: process.execPath,
-    WRANGLER_JS: getWranglerCliJs(),
+    // setup-d1.mjs expects this wrapper to normalize argv in Electron node mode
+    WRANGLER_JS: getWranglerJs(),
     NODE_PATH: app.isPackaged ? path.join(process.resourcesPath, 'node_modules') : path.join(__dirname, '..', 'electron-app', 'node_modules')
   }
   if (account) {
@@ -423,11 +435,13 @@ async function runAction(action, params, env) {
       return
     case 'first-deploy': {
       const { botToken, adminChatId, workerUrl, panelUrl } = params || {}
-      const useBuiltinPanel = panelUrl && workerUrl && panelUrl === workerUrl.replace(/\/$/, '') + '/admin'
+      const useBuiltinPanel = Boolean(params?.useBuiltinPanel)
+      const builtinPanelUrl = workerUrl ? `${workerUrl.replace(/\/$/, '')}/admin` : ''
+      const effectivePanelUrl = useBuiltinPanel ? (panelUrl || builtinPanelUrl) : panelUrl
       send('步骤 1/4: 合并配置...')
       await runScript('merge-wrangler-config.mjs', [], env)
 
-      const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl)
+      const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl)
       if (updatedVars.length > 0) {
         send(`已将向导地址写入 wrangler.local.toml: ${updatedVars.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
@@ -447,10 +461,10 @@ async function runAction(action, params, env) {
       if (botToken) await runWranglerSecret('BOT_TOKEN', botToken, env)
       if (adminChatId) await runWranglerSecret('ADMIN_CHAT_ID', adminChatId, env)
       if (useBuiltinPanel) {
-        send('步骤 4/4: 使用 Worker 内置面板，跳过 Pages 部署。\n面板地址：' + panelUrl)
+        send('步骤 4/4: 使用 Worker 内置面板，跳过 Pages 部署。\n面板地址：' + (effectivePanelUrl || '/admin'))
       } else {
         send('步骤 4/4: 部署面板...')
-        await runAction('deploy-panel', { workerUrl, panelUrl }, env)
+        await runAction('deploy-panel', { workerUrl, panelUrl: effectivePanelUrl }, env)
       }
       send('\n首次部署完成！')
       return
@@ -479,7 +493,7 @@ ipcMain.handle('run-action', async (_, action, params) => {
 ipcMain.handle('accounts:list', () => loadAccounts())
 ipcMain.handle('accounts:add', (_, account) => {
   const accounts = loadAccounts()
-  const newAccount = { ...account, id: crypto.randomUUID() }
+  const newAccount = { ...account, id: crypto.randomUUID(), deployPrefs: normalizeDeployPrefs(account?.deployPrefs) }
   accounts.push(newAccount)
   saveAccounts(accounts)
   if (!activeAccountId) {
@@ -500,6 +514,15 @@ ipcMain.handle('accounts:setActive', (_, id) => {
   return id
 })
 ipcMain.handle('accounts:getActive', () => activeAccountId)
+ipcMain.handle('accounts:saveDeployPrefs', (_, prefs) => {
+  const accounts = loadAccounts()
+  const index = accounts.findIndex(a => a.id === activeAccountId)
+  if (index < 0) return null
+  const nextPrefs = normalizeDeployPrefs(prefs)
+  accounts[index] = { ...accounts[index], deployPrefs: nextPrefs }
+  saveAccounts(accounts)
+  return nextPrefs
+})
 ipcMain.handle('data:clear', () => {
   const dir = app.getPath('userData')
   try { fs.rmSync(path.join(dir, 'accounts.json'), { force: true }) } catch {}
