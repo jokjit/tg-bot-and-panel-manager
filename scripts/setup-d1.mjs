@@ -107,10 +107,11 @@ function runCommand(command, args, options = {}) {
     encoding: 'utf8',
   });
 
-  if (result.status !== 0) {
+  if (result.error || result.status !== 0) {
     const stderr = result.stderr || '';
     const stdout = result.stdout || '';
-    throw new Error(`命令执行失败：${rendered}\n${stdout}${stderr}`.trim());
+    const spawnErr = result.error ? `\n启动失败：${result.error.message}` : '';
+    throw new Error(`命令执行失败：${rendered}\n${stdout}${stderr}${spawnErr}`.trim());
   }
 
   return result;

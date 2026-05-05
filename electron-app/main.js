@@ -93,6 +93,7 @@ function runProc(bin, args, opts) {
     }
     proc.stdout?.on('data', send)
     proc.stderr?.on('data', send)
+    proc.on('error', (err) => { send('启动失败: ' + err.message + '\n'); resolve(1) })
     proc.on('close', (code) => resolve(code))
   })
 }
