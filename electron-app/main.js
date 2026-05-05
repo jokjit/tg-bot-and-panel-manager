@@ -57,9 +57,11 @@ function getFakeBinDir() {
   if (_fakeBinDir) return _fakeBinDir
   _fakeBinDir = path.join(os.tmpdir(), 'tg-bot-bin')
   if (!fs.existsSync(_fakeBinDir)) fs.mkdirSync(_fakeBinDir, { recursive: true })
-  // node.cmd → Electron binary in Node.js mode
+  // Copy Electron binary as node.exe (ASCII path, no spaces/Chinese chars)
+  const nodeExe = path.join(_fakeBinDir, 'node.exe')
+  if (!fs.existsSync(nodeExe)) fs.copyFileSync(process.execPath, nodeExe)
   fs.writeFileSync(path.join(_fakeBinDir, 'node.cmd'),
-    `@echo off\r\n"${process.execPath}" %*\r\n`)
+    '@echo off\r\n"%~dp0node.exe" %*\r\n')
   fs.writeFileSync(path.join(_fakeBinDir, 'npx.cmd'),
     '@echo off\r\nfor /f "tokens=1,*" %%a in ("%*") do %%a %%b\r\n')
   return _fakeBinDir
