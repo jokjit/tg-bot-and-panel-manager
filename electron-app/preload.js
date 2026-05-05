@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('api', {
   runAction: (action, params) => ipcRenderer.invoke('run-action', action, params),
   onOutput: (cb) => ipcRenderer.on('output', (_, data) => cb(data)),
   getRepoRoot: () => ipcRenderer.invoke('get-repo-root'),
+  clearData: () => ipcRenderer.invoke('data:clear'),
   accounts: {
     list: () => ipcRenderer.invoke('accounts:list'),
     add: (account) => ipcRenderer.invoke('accounts:add', account),

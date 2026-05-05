@@ -118,6 +118,7 @@ body { font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif; background: va
   </div>
   <div class="sidebar-footer">
     <div class="repo-root" id="repo-root-display"></div>
+    <div id="clear-data-btn" style="margin-top:8px;padding:6px 8px;border-radius:8px;border:1px solid #FCA5A5;color:#EF4444;font-size:11px;cursor:pointer;text-align:center;" title="删除所有账号数据">清除数据</div>
   </div>
 </aside>
 
@@ -344,6 +345,14 @@ async function renderAccounts() {
 // repo root display
 window.api.getRepoRoot().then(root => {
   document.getElementById('repo-root-display').textContent = '仓库: ' + root
+})
+
+document.getElementById('clear-data-btn').addEventListener('click', async () => {
+  if (!confirm('确认清除所有账号数据？此操作不可恢复。')) return
+  await window.api.clearData()
+  await renderAccounts()
+  output.textContent = ''
+  setStatus('数据已清除', false)
 })
 
 renderAccounts()

@@ -28,8 +28,15 @@ function getWranglerBin() {
 }
 
 // ── accounts ───────────────────────────────────────────────────────────────
-const accountsFile = () => path.join(app.getPath('userData'), 'accounts.json')
-const activeFile = () => path.join(app.getPath('userData'), 'active-account.txt')
+function getDataDir() {
+  const dir = app.isPackaged
+    ? path.join(path.dirname(process.execPath), 'data')
+    : path.join(__dirname, 'data')
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
+const accountsFile = () => path.join(getDataDir(), 'accounts.json')
+const activeFile = () => path.join(getDataDir(), 'active-account.txt')
 let activeAccountId = null
 
 function loadAccounts() {
@@ -198,6 +205,11 @@ ipcMain.handle('accounts:setActive', (_, id) => {
   return id
 })
 ipcMain.handle('accounts:getActive', () => activeAccountId)
+ipcMain.handle('data:clear', () => {
+  const dir = getDataDir()
+  fs.rmSync(dir, { recursive: true, force: true })
+  activeAccountId = null
+})
 ipcMain.handle('get-repo-root', () => getRepoRoot())
 
 app.whenReady().then(() => {
