@@ -20,6 +20,12 @@ function getWranglerJs() {
   return path.join(getScriptsDir(), 'wrangler-runner.cjs')
 }
 
+function getWranglerCliJs() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'node_modules', 'wrangler', 'wrangler-dist', 'cli.js')
+    : path.join(__dirname, '..', 'electron-app', 'node_modules', 'wrangler', 'wrangler-dist', 'cli.js')
+}
+
 // ── accounts ───────────────────────────────────────────────────────────────
 const accountsFile = () => path.join(app.getPath('userData'), 'accounts.json')
 const activeFile = () => path.join(app.getPath('userData'), 'active-account.txt')
@@ -73,7 +79,7 @@ function buildEnv(account) {
     ...process.env,
     ELECTRON_RUN_AS_NODE: '1',
     NODE: process.execPath,
-    WRANGLER_JS: getWranglerJs(),
+    WRANGLER_JS: getWranglerCliJs(),
     NODE_PATH: app.isPackaged ? path.join(process.resourcesPath, 'node_modules') : path.join(__dirname, '..', 'electron-app', 'node_modules')
   }
   if (account) {
@@ -293,14 +299,23 @@ function runScript(scriptName, args = [], env) {
 }
 
 function runWrangler(args, env) {
-  return runProc(process.execPath, [getWranglerJs(), ...args], {
+  const wranglerCli = getWranglerCliJs()
+  if (!fs.existsSync(wranglerCli)) {
+    throw new Error(`Wrangler CLI not found: ${wranglerCli}`)
+  }
+  return runProc(process.execPath, [wranglerCli, ...args], {
     env: { ...env, ELECTRON_RUN_AS_NODE: '1' }
   })
 }
 
 function runWranglerSecret(key, value, env) {
   return new Promise((resolve, reject) => {
-    const args = [getWranglerJs(), 'secret', 'put', key, '--config', '.wrangler.private.toml']
+    const wranglerCli = getWranglerCliJs()
+    if (!fs.existsSync(wranglerCli)) {
+      reject(new Error(`Wrangler CLI not found: ${wranglerCli}`))
+      return
+    }
+    const args = [wranglerCli, 'secret', 'put', key, '--config', '.wrangler.private.toml']
     const commandText = [process.execPath, ...args].join(' ')
     const proc = spawn(process.execPath, args, {
       cwd: getRepoRoot(), windowsHide: true,
@@ -385,9 +400,7 @@ async function runAction(action, params, env) {
 
       const deployArgs = ['pages', 'deploy', tempDist, '--project-name', projectName]
       if (params?.branch) deployArgs.push('--branch', params.branch)
-      await runProc(process.execPath, [getWranglerJs(), ...deployArgs], {
-        env: { ...env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'pipe']
-      })
+      await runWrangler(deployArgs, { ...env, ELECTRON_RUN_AS_NODE: '1' })
 
       const check = await getPagesProject(env, projectName)
       if (!check?.ok || !check.project) {
