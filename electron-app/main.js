@@ -88,7 +88,8 @@ function buildEnv(account) {
 
 // ── process runner ─────────────────────────────────────────────────────────
 function runProc(bin, args, opts) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    const commandText = [bin, ...args].join(' ')
     const proc = spawn(bin, args, { cwd: getRepoRoot(), windowsHide: true, ...opts })
     const send = (data) => {
       const text = data.toString()
@@ -97,11 +98,20 @@ function runProc(bin, args, opts) {
     }
     proc.stdout?.on('data', send)
     proc.stderr?.on('data', send)
-    proc.on('error', (err) => { send('启动失败: ' + err.message + '\n'); resolve(1) })
-    proc.on('close', (code) => { if (code !== 0) send(`\n[退出码 ${code}]\n`); resolve(code) })
+    proc.on('error', (err) => {
+      send('Start failed: ' + err.message + '\n')
+      reject(new Error(`Command start failed: ${commandText}\n${err.message}`))
+    })
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        send(`\n[Exit code ${code}]\n`)
+        reject(new Error(`Command failed (exit ${code}): ${commandText}`))
+        return
+      }
+      resolve(code ?? 0)
+    })
   })
 }
-
 function runScript(scriptName, args = [], env) {
   return runProc(process.execPath, [path.join(getScriptsDir(), scriptName), ...args], {
     env: { ...env, ELECTRON_RUN_AS_NODE: '1' }
@@ -115,8 +125,10 @@ function runWrangler(args, env) {
 }
 
 function runWranglerSecret(key, value, env) {
-  return new Promise((resolve) => {
-    const proc = spawn(process.execPath, [getWranglerJs(), 'secret', 'put', key, '--config', '.wrangler.private.toml'], {
+  return new Promise((resolve, reject) => {
+    const args = [getWranglerJs(), 'secret', 'put', key, '--config', '.wrangler.private.toml']
+    const commandText = [process.execPath, ...args].join(' ')
+    const proc = spawn(process.execPath, args, {
       cwd: getRepoRoot(), windowsHide: true,
       env: { ...env, ELECTRON_RUN_AS_NODE: '1' },
       stdio: ['pipe', 'pipe', 'pipe']
@@ -126,10 +138,20 @@ function runWranglerSecret(key, value, env) {
     proc.stderr?.on('data', send)
     proc.stdin.write(value + '\n')
     proc.stdin.end()
-    proc.on('close', resolve)
+    proc.on('error', (err) => {
+      send('Start failed: ' + err.message + '\n')
+      reject(new Error(`Command start failed: ${commandText}\n${err.message}`))
+    })
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        send(`\n[Exit code ${code}]\n`)
+        reject(new Error(`Command failed (exit ${code}): ${commandText}`))
+        return
+      }
+      resolve(code ?? 0)
+    })
   })
 }
-
 // ── actions ────────────────────────────────────────────────────────────────
 async function runAction(action, params, env) {
   const send = (msg) => BrowserWindow.getAllWindows()[0]?.webContents.send('output', msg + '\n')
@@ -255,3 +277,4 @@ app.whenReady().then(() => {
   createWindow()
 })
 app.on('window-all-closed', () => app.quit())
+
