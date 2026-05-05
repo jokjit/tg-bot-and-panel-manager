@@ -24,11 +24,10 @@
       { "from": "../worker.js", "to": "worker.js" },
       { "from": "../wrangler.toml", "to": "wrangler.toml" },
       { "from": "../migrations", "to": "migrations" },
-      { "from": "node_modules/wrangler", "to": "node_modules/wrangler" },
-      { "from": "node_modules/.bin", "to": "node_modules/.bin" },
+      { "from": "node_modules", "to": "node_modules", "filter": ["**", "!electron/**", "!electron-builder/**", "!.cache/**"] },
       { "from": "../admin-panel", "to": "admin-panel", "filter": ["**", "!dist/**", "!.env*", "!node_modules/.cache/**", "!node_modules/.vite/**"] }
     ],
-    "asarUnpack": ["node_modules/wrangler/**", "node_modules/.bin/wrangler*", "admin-panel/node_modules/**"],
+    "asarUnpack": ["node_modules/**", "admin-panel/node_modules/**"],
     "win": {
       "target": "nsis",
       "icon": null

@@ -70,7 +70,13 @@ function buildEnv(account) {
   const binDir = app.isPackaged
     ? path.join(process.resourcesPath, 'node_modules', '.bin')
     : null
-  const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE: process.execPath, WRANGLER_JS: getWranglerJs() }
+  const env = {
+    ...process.env,
+    ELECTRON_RUN_AS_NODE: '1',
+    NODE: process.execPath,
+    WRANGLER_JS: getWranglerJs(),
+    NODE_PATH: app.isPackaged ? path.join(process.resourcesPath, 'node_modules') : path.join(__dirname, '..', 'electron-app', 'node_modules')
+  }
   if (account) {
     if (account.apiToken) env.CLOUDFLARE_API_TOKEN = account.apiToken
     if (account.accountId) env.CLOUDFLARE_ACCOUNT_ID = account.accountId
