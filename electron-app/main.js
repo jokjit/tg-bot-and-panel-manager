@@ -77,8 +77,14 @@ function buildEnv(account) {
     NODE_PATH: app.isPackaged ? path.join(process.resourcesPath, 'node_modules') : path.join(__dirname, '..', 'electron-app', 'node_modules')
   }
   if (account) {
-    if (account.apiToken) env.CLOUDFLARE_API_TOKEN = account.apiToken
-    if (account.accountId) env.CLOUDFLARE_ACCOUNT_ID = account.accountId
+    if (account.apiToken) {
+      env.CLOUDFLARE_API_TOKEN = account.apiToken
+      env.CF_API_TOKEN = account.apiToken
+    }
+    if (account.accountId) {
+      env.CLOUDFLARE_ACCOUNT_ID = account.accountId
+      env.CF_ACCOUNT_ID = account.accountId
+    }
   }
   const fakeBin = getFakeBinDir()
   const dirs = [fakeBin, binDir].filter(Boolean)
@@ -157,8 +163,8 @@ function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl) {
 }
 
 async function getPagesProject(env, projectName) {
-  const token = String(env.CLOUDFLARE_API_TOKEN || '').trim()
-  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || '').trim()
+  const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
   if (!token || !accountId || !projectName) {
     return { ok: false, reason: 'missing_token_or_account_or_project' }
   }
@@ -179,8 +185,8 @@ async function getPagesProject(env, projectName) {
 }
 
 async function createPagesProject(env, projectName) {
-  const token = String(env.CLOUDFLARE_API_TOKEN || '').trim()
-  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || '').trim()
+  const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
   if (!token || !accountId || !projectName) {
     return { ok: false, reason: 'missing_token_or_account_or_project' }
   }
@@ -206,6 +212,51 @@ async function createPagesProject(env, projectName) {
     return { ok: false, reason }
   }
   return { ok: true, project: json.result || null }
+}
+
+function getWorkerNameFromConfig(configPath) {
+  if (!fs.existsSync(configPath)) return ''
+  const content = fs.readFileSync(configPath, 'utf8')
+  const match = content.match(/^\s*name\s*=\s*"([^"]+)"/m)
+  return match?.[1]?.trim() || ''
+}
+
+async function getWorkerScript(env, workerName) {
+  const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
+  if (!token || !accountId || !workerName) {
+    return { ok: false, reason: 'missing_token_or_account_or_worker_name' }
+  }
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${workerName}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+
+  if (response.ok) return { ok: true }
+
+  const text = await response.text().catch(() => '')
+  try {
+    const json = JSON.parse(text)
+    const errors = Array.isArray(json?.errors) ? json.errors : []
+    const reason = errors.length > 0
+      ? errors.map((item) => `${item.code || 'unknown'}:${item.message || 'unknown'}`).join('; ')
+      : `http_${response.status}`
+    return { ok: false, reason }
+  } catch {
+    return { ok: false, reason: `http_${response.status}` }
+  }
+}
+
+async function verifyWorkerDeployment(env, configPath) {
+  const workerName = getWorkerNameFromConfig(configPath)
+  if (!workerName) {
+    return { ok: false, workerName: '', reason: 'missing_worker_name_in_config' }
+  }
+  const check = await getWorkerScript(env, workerName)
+  if (!check.ok) {
+    return { ok: false, workerName, reason: check.reason || 'unknown' }
+  }
+  return { ok: true, workerName }
 }
 
 // ── process runner ─────────────────────────────────────────────────────────
@@ -299,6 +350,13 @@ async function runAction(action, params, env) {
     case 'deploy-worker':
       await runScript('merge-wrangler-config.mjs', [], env)
       await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
+      {
+        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'))
+        if (!check.ok) {
+          throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
+        }
+        send(`Worker 已确认：${check.workerName}`)
+      }
       return
     case 'deploy-panel': {
       const workerUrl = params?.workerUrl || ''
@@ -366,6 +424,13 @@ async function runAction(action, params, env) {
       await runScript('setup-d1.mjs', [], env)
       send('步骤 3/4: 部署 Worker...')
       await runWrangler(['deploy', '--config', '.wrangler.private.toml'], env)
+      {
+        const check = await verifyWorkerDeployment(env, path.join(getRepoRoot(), '.wrangler.private.toml'))
+        if (!check.ok) {
+          throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
+        }
+        send(`Worker 已确认：${check.workerName}`)
+      }
       if (botToken) await runWranglerSecret('BOT_TOKEN', botToken, env)
       if (adminChatId) await runWranglerSecret('ADMIN_CHAT_ID', adminChatId, env)
       if (useBuiltinPanel) {

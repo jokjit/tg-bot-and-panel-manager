@@ -5,6 +5,7 @@ const cwd = process.cwd();
 const basePath = resolve(cwd, 'wrangler.toml');
 const localPath = resolve(cwd, 'wrangler.local.toml');
 const outputPath = resolve(cwd, '.wrangler.private.toml');
+const accountId = String(process.env.CLOUDFLARE_ACCOUNT_ID || process.env.CF_ACCOUNT_ID || '').trim();
 
 if (!existsSync(basePath)) {
   throw new Error(`Missing base config: ${basePath}`);
@@ -55,6 +56,17 @@ if (existsSync(localPath)) {
         });
       }
     }
+  }
+}
+
+if (accountId) {
+  const line = `account_id = "${accountId}"`;
+  if (/^\s*account_id\s*=.*$/m.test(merged)) {
+    merged = merged.replace(/^\s*account_id\s*=.*$/m, line);
+  } else if (/^\s*name\s*=.*$/m.test(merged)) {
+    merged = merged.replace(/^\s*name\s*=.*$/m, (hit) => `${hit}\n${line}`);
+  } else {
+    merged = `${line}\n${merged}`;
   }
 }
 
