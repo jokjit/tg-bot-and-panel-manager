@@ -18,7 +18,7 @@ function getAdminPanelDir() { return _adminPanelDir || (_adminPanelDir = app.isP
 
 function getWranglerJs() {
   const base = app.isPackaged ? process.resourcesPath : path.join(__dirname, '..')
-  return path.join(base, 'node_modules', 'wrangler', 'bin', 'wrangler.js')
+  return path.join(base, 'node_modules', 'wrangler', 'wrangler-dist', 'cli.js')
 }
 
 // ── accounts ───────────────────────────────────────────────────────────────

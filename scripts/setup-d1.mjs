@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, isAbsolute } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const cwd = process.cwd();
@@ -107,7 +107,7 @@ function runCommand(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd || cwd,
     env: options.env || process.env,
-    shell: process.platform === 'win32' && !path.isAbsolute(command),
+    shell: process.platform === 'win32' && !isAbsolute(command),
     stdio: options.capture ? 'pipe' : 'inherit',
     encoding: 'utf8',
   });
