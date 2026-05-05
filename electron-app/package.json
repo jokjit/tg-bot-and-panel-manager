@@ -21,6 +21,9 @@
     "files": ["main.js", "preload.js", "index.html"],
     "extraResources": [
       { "from": "../scripts", "to": "scripts" },
+      { "from": "../worker.js", "to": "worker.js" },
+      { "from": "../wrangler.toml", "to": "wrangler.toml" },
+      { "from": "../migrations", "to": "migrations" },
       { "from": "node_modules/wrangler", "to": "node_modules/wrangler" },
       { "from": "node_modules/.bin", "to": "node_modules/.bin" },
       { "from": "../admin-panel", "to": "admin-panel", "filter": ["**", "!dist/**", "!.env*", "!node_modules/.cache/**", "!node_modules/.vite/**"] }

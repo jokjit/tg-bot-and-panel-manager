@@ -6,22 +6,9 @@ const { spawn } = require('child_process')
 const crypto = require('crypto')
 
 // ── paths ──────────────────────────────────────────────────────────────────
-const projectDirFile = () => path.join(app.getPath('userData'), 'project-dir.txt')
-
-function getSavedProjectDir() {
-  try { return fs.readFileSync(projectDirFile(), 'utf8').trim() } catch { return null }
-}
-
 function findRepoRoot() {
   if (!app.isPackaged) return path.join(__dirname, '..')
-  const saved = getSavedProjectDir()
-  if (saved && fs.existsSync(path.join(saved, 'wrangler.toml'))) return saved
-  let dir = path.dirname(process.execPath)
-  for (let i = 0; i < 6; i++) {
-    if (fs.existsSync(path.join(dir, 'wrangler.toml'))) return dir
-    dir = path.dirname(dir)
-  }
-  return null
+  return process.resourcesPath
 }
 
 let _repoRoot, _scriptsDir, _adminPanelDir
@@ -216,14 +203,6 @@ ipcMain.handle('data:clear', () => {
   activeAccountId = null
 })
 ipcMain.handle('get-repo-root', () => getRepoRoot())
-ipcMain.handle('select-project-dir', async () => {
-  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
-  if (result.canceled) return null
-  const dir = result.filePaths[0]
-  fs.writeFileSync(projectDirFile(), dir)
-  _repoRoot = null // reset cache
-  return dir
-})
 
 app.whenReady().then(() => {
   try { activeAccountId = fs.readFileSync(activeFile(), 'utf8').trim() } catch {}
