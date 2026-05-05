@@ -92,6 +92,11 @@ function printHelp() {
 }
 
 function runCommand(command, args, options = {}) {
+  // Allow overriding npx wrangler with direct wrangler binary via env
+  if (command === 'npx' && args[0] === 'wrangler' && process.env.WRANGLER_JS) {
+    command = process.execPath
+    args = [process.env.WRANGLER_JS, ...args.slice(1)]
+  }
   const rendered = [command, ...args].join(' ');
   console.log(`\n> ${rendered}`);
 

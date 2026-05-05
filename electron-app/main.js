@@ -16,10 +16,9 @@ function getRepoRoot() { return _repoRoot || (_repoRoot = findRepoRoot()) }
 function getScriptsDir() { return _scriptsDir || (_scriptsDir = app.isPackaged ? path.join(process.resourcesPath, 'scripts') : path.join(__dirname, '..', 'scripts')) }
 function getAdminPanelDir() { return _adminPanelDir || (_adminPanelDir = app.isPackaged ? path.join(process.resourcesPath, 'admin-panel') : path.join(__dirname, '..', 'admin-panel')) }
 
-function getWranglerBin() {
-  if (!app.isPackaged) return process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler'
-  return path.join(process.resourcesPath, 'node_modules', '.bin',
-    process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler')
+function getWranglerJs() {
+  const base = app.isPackaged ? process.resourcesPath : path.join(__dirname, '..')
+  return path.join(base, 'node_modules', 'wrangler', 'bin', 'wrangler.js')
 }
 
 // ── accounts ───────────────────────────────────────────────────────────────
@@ -71,7 +70,7 @@ function buildEnv(account) {
   const binDir = app.isPackaged
     ? path.join(process.resourcesPath, 'node_modules', '.bin')
     : null
-  const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE: process.execPath }
+  const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE: process.execPath, WRANGLER_JS: getWranglerJs() }
   if (account) {
     if (account.apiToken) env.CLOUDFLARE_API_TOKEN = account.apiToken
     if (account.accountId) env.CLOUDFLARE_ACCOUNT_ID = account.accountId
@@ -105,17 +104,17 @@ function runScript(scriptName, args = [], env) {
 }
 
 function runWrangler(args, env) {
-  const bin = getWranglerBin()
-  const quotedBin = bin.includes(' ') ? `"${bin}"` : bin
-  return runProc(quotedBin, args, { env, shell: process.platform === 'win32' })
+  return runProc(process.execPath, [getWranglerJs(), ...args], {
+    env: { ...env, ELECTRON_RUN_AS_NODE: '1' }
+  })
 }
 
 function runWranglerSecret(key, value, env) {
   return new Promise((resolve) => {
-    const bin = getWranglerBin()
-    const quotedBin = bin.includes(' ') ? `"${bin}"` : bin
-    const proc = spawn(quotedBin, ['secret', 'put', key, '--config', '.wrangler.private.toml'], {
-      cwd: getRepoRoot(), windowsHide: true, env, shell: true, stdio: ['pipe', 'pipe', 'pipe']
+    const proc = spawn(process.execPath, [getWranglerJs(), 'secret', 'put', key, '--config', '.wrangler.private.toml'], {
+      cwd: getRepoRoot(), windowsHide: true,
+      env: { ...env, ELECTRON_RUN_AS_NODE: '1' },
+      stdio: ['pipe', 'pipe', 'pipe']
     })
     const send = (data) => BrowserWindow.getAllWindows()[0]?.webContents.send('output', data.toString())
     proc.stdout?.on('data', send)
