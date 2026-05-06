@@ -11,6 +11,7 @@
           <div class="toolbar-chip">{{ t('app.limit') }}</div>
           <n-input-number v-model:value="limit" :min="1" :max="100" />
           <n-button type="primary" :loading="loading" @click="loadUsers">{{ t('users.refresh') }}</n-button>
+          <n-button secondary @click="replyModalVisible = true">{{ t('users.quickReply') }}</n-button>
           <n-tag round>{{ t('users.total', { count: users.length }) }}</n-tag>
         </div>
       </div>
@@ -196,38 +197,43 @@
         <n-empty v-else :description="t('app.noData')" class="panel-empty" />
       </n-card>
 
-      <n-card class="glass-card users-reply-card" :bordered="false">
-        <div class="panel-heading compact">
-          <div>
-            <h3>{{ t('users.quickReply') }}</h3>
-            <p>{{ t('users.desc') }}</p>
-          </div>
-        </div>
-
-        <n-form :model="replyForm" label-placement="top" class="panel-form">
-          <n-form-item :label="t('users.userId')">
-            <n-input v-model:value="replyForm.userId" :placeholder="t('users.inputUserId')" />
-          </n-form-item>
-          <n-form-item :label="t('users.send')">
-            <n-input
-              v-model:value="replyForm.text"
-              type="textarea"
-              :autosize="{ minRows: 4, maxRows: 8 }"
-              :placeholder="t('users.replyPlaceholder')"
-            />
-          </n-form-item>
-          <n-button block type="primary" :loading="sending" @click="sendToUser">
-            {{ t('users.sendAction') }}
-          </n-button>
-        </n-form>
-      </n-card>
     </div>
+
+    <n-modal
+      v-model:show="replyModalVisible"
+      preset="card"
+      class="users-reply-modal"
+      :title="t('users.quickReply')"
+      :mask-closable="!sending"
+      :closable="!sending"
+      :style="{ width: 'min(560px, calc(100vw - 24px))' }"
+    >
+      <div class="users-reply-modal__hint">
+        {{ t('users.userId') }}：{{ replyForm.userId || '-' }}
+      </div>
+      <n-form :model="replyForm" label-placement="top" class="panel-form">
+        <n-form-item :label="t('users.userId')">
+          <n-input v-model:value="replyForm.userId" :placeholder="t('users.inputUserId')" />
+        </n-form-item>
+        <n-form-item :label="t('users.send')">
+          <n-input
+            v-model:value="replyForm.text"
+            type="textarea"
+            :autosize="{ minRows: 4, maxRows: 8 }"
+            :placeholder="t('users.replyPlaceholder')"
+          />
+        </n-form-item>
+        <n-button block type="primary" :loading="sending" @click="sendToUser">
+          {{ t('users.sendAction') }}
+        </n-button>
+      </n-form>
+    </n-modal>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue';
-import { NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NTag, useMessage } from 'naive-ui';
+import { NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NModal, NTag, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchUsers, resolveProtectedMediaUrl, sendReply, updateUserAction } from '../services/api';
 
@@ -238,6 +244,7 @@ const sending = ref(false);
 const limit = ref(30);
 const users = ref([]);
 const actionLoading = reactive({});
+const replyModalVisible = ref(false);
 
 const replyForm = reactive({
   userId: '',
@@ -317,6 +324,7 @@ async function loadUsers() {
 
 function quickReply(row) {
   replyForm.userId = String(row.userId || '');
+  replyModalVisible.value = true;
 }
 
 async function handleUserAction(user, action) {
@@ -370,6 +378,7 @@ async function sendToUser() {
       text: replyForm.text,
     });
     message.success(t('users.sendSuccess'));
+    replyModalVisible.value = false;
     replyForm.text = '';
   } catch (error) {
     message.error(error.message || t('users.sendFailed'));
@@ -415,14 +424,9 @@ onMounted(loadUsers);
 
 .panel-split {
   display: grid;
-  grid-template-columns: minmax(0, 1.75fr) minmax(320px, 1fr);
+  grid-template-columns: 1fr;
   gap: 18px;
   align-items: start;
-}
-
-.users-reply-card {
-  position: sticky;
-  top: 10px;
 }
 
 .status-row {
@@ -432,14 +436,15 @@ onMounted(loadUsers);
   margin-top: 16px;
 }
 
-@media (max-width: 1180px) {
-  .panel-split {
-    grid-template-columns: 1fr;
-  }
+.users-reply-modal__hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
 
-  .users-reply-card {
-    position: static;
-  }
+.users-reply-modal :deep(.n-card__content) {
+  padding-top: 12px;
 }
 
 @media (max-width: 640px) {

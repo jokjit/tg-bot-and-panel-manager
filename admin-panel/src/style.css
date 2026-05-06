@@ -6,6 +6,7 @@ body,
   margin: 0;
   width: 100%;
   height: 100%;
+  min-height: 100%;
   overflow-x: hidden;
 }
 
@@ -15,6 +16,7 @@ body {
   background: var(--app-bg);
   transition: background 0.32s ease, color 0.26s ease;
   overflow-x: clip;
+  overflow-y: auto;
   --motion-fast: 0.16s;
   --motion-mid: 0.24s;
   --motion-slow: 0.36s;
@@ -110,7 +112,8 @@ body[data-theme='dark'] {
 
 #app {
   position: relative;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   max-width: 100vw;
 }
 
