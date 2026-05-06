@@ -1889,7 +1889,8 @@ async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
     usingCustomDomain: !new URL(publicBaseUrl).hostname.endsWith('.workers.dev'),
     webhookPath,
     webhookUrl: `${publicBaseUrl}${webhookPath}`,
-    adminPanel: buildAdminPanelUrl(env, publicBaseUrl),
+    adminPanel: getAdminPanelEntryUrl(env, publicBaseUrl) || buildAdminPanelUrl(env, publicBaseUrl),
+    adminPanelTarget: buildAdminPanelUrl(env, publicBaseUrl),
     botConfigReady: Boolean(env.BOT_TOKEN && env.ADMIN_CHAT_ID),
     adminMode: topicModeEnabled ? 'forum-topic' : 'reply-chain',
     topicModeEnabled,
@@ -2836,6 +2837,7 @@ async function ensureAdminPasswordState(env) {
       password: bootstrapPassword,
       mustChangePassword: true,
       bootstrapExpiresAt,
+      bootstrapNotifyError: String(config.ADMIN_BOOTSTRAP_NOTIFY_ERROR || '').trim() || null,
     };
   }
 
@@ -2861,8 +2863,16 @@ async function ensureAdminPasswordState(env) {
   };
 
   delete next.ADMIN_PANEL_PASSWORD;
+  delete next.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
   await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
-  await notifyBootstrapPassword(env, username, bootstrapGeneratedPassword, next.ADMIN_BOOTSTRAP_EXPIRES_AT);
+  let bootstrapNotifyError = null;
+  try {
+    await notifyBootstrapPassword(env, username, bootstrapGeneratedPassword, next.ADMIN_BOOTSTRAP_EXPIRES_AT);
+  } catch (error) {
+    bootstrapNotifyError = formatErrorMessage(error);
+    next.ADMIN_BOOTSTRAP_NOTIFY_ERROR = bootstrapNotifyError;
+    await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
+  }
 
   return {
     username,
@@ -2871,6 +2881,7 @@ async function ensureAdminPasswordState(env) {
     password: bootstrapGeneratedPassword,
     mustChangePassword: true,
     bootstrapExpiresAt: next.ADMIN_BOOTSTRAP_EXPIRES_AT,
+    bootstrapNotifyError,
   };
 }
 
@@ -2892,7 +2903,20 @@ async function resendBootstrapPassword(env) {
     };
   }
 
-  await notifyBootstrapPassword(env, state.username, state.password, state.bootstrapExpiresAt);
+  try {
+    await notifyBootstrapPassword(env, state.username, state.password, state.bootstrapExpiresAt);
+    const config = await getSystemConfig(env);
+    if (config.ADMIN_BOOTSTRAP_NOTIFY_ERROR) {
+      delete config.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
+      config.updatedAt = new Date().toISOString();
+      await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(config));
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      message: `临时密码已存在，但发送到 Telegram 失败：${formatErrorMessage(error)}`,
+    };
+  }
   return {
     ok: true,
     message: `当前有效的临时密码已重新发送到管理员会话。有效期至：${state.bootstrapExpiresAt}`,
@@ -2921,8 +2945,18 @@ async function resetBootstrapPassword(env) {
   };
 
   delete next.ADMIN_PANEL_PASSWORD;
+  delete next.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
   await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
-  await notifyBootstrapPassword(env, username, bootstrapGeneratedPassword, expiresAt);
+  try {
+    await notifyBootstrapPassword(env, username, bootstrapGeneratedPassword, expiresAt);
+  } catch (error) {
+    next.ADMIN_BOOTSTRAP_NOTIFY_ERROR = formatErrorMessage(error);
+    await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
+    return {
+      ok: false,
+      message: `新的临时密码已生成，但发送到 Telegram 失败：${next.ADMIN_BOOTSTRAP_NOTIFY_ERROR}`,
+    };
+  }
 
   return {
     ok: true,
@@ -2939,6 +2973,7 @@ function buildAdminAuthPayload(passwordState, authenticated = false) {
     passwordReady: Boolean(passwordState.passwordReady),
     passwordMode: passwordState.passwordMode || 'none',
     bootstrapExpiresAt: passwordState.bootstrapExpiresAt || null,
+    bootstrapNotifyError: passwordState.bootstrapNotifyError || null,
   };
 }
 
@@ -3040,28 +3075,28 @@ function createBootstrapPassword(length = 12) {
 }
 
 async function notifyBootstrapPassword(env, username, password, expiresAt) {
-  try {
-    const adminChatId = toChatId(env.ADMIN_CHAT_ID);
-    const panelUrl = await resolveAdminPanelUrl(env);
-    const lines = [
-      '你的管理面板首次临时密码已生成。',
-      `账号：${username || 'admin'}`,
-      `临时密码：${password}`,
-      `有效期至：${expiresAt}`,
-      '请尽快登录并修改为永久密码。',
-    ];
+  const adminChatId = toChatId(env.ADMIN_CHAT_ID);
+  const panelUrl = getAdminPanelEntryUrl(env) || await resolveAdminPanelUrl(env);
+  const lines = [
+    '你的管理面板首次临时密码已生成。',
+    `账号：${username || 'admin'}`,
+    `临时密码：${password}`,
+    `有效期至：${expiresAt}`,
+    '请尽快登录并修改为永久密码。',
+  ];
 
-    if (panelUrl) {
-      lines.splice(1, 0, `面板地址：${panelUrl}`);
-    }
-
-    await telegram(env, 'sendMessage', {
-      chat_id: adminChatId,
-      text: lines.join('\n'),
-    });
-  } catch (error) {
-    // ignore
+  if (panelUrl) {
+    lines.splice(1, 0, `面板入口：${panelUrl}`);
   }
+
+  await telegram(env, 'sendMessage', {
+    chat_id: adminChatId,
+    text: lines.join('\n'),
+  });
+}
+
+function formatErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function parseCookies(cookieHeader) {
@@ -3400,6 +3435,18 @@ function buildAdminPanelUrl(env, publicBaseUrl = '') {
     return `${origin}${ADMIN_PANEL_PATH}`;
   } catch (error) {
     return DEFAULT_ADMIN_PANEL_EXTERNAL_URL || ADMIN_PANEL_PATH;
+  }
+}
+
+function getAdminPanelEntryUrl(env, publicBaseUrl = '') {
+  const raw = String(publicBaseUrl || env.PUBLIC_BASE_URL || '').trim();
+  if (!raw) return '';
+
+  try {
+    const origin = new URL(raw).origin;
+    return `${origin}${ADMIN_PANEL_PATH}`;
+  } catch (error) {
+    return '';
   }
 }
 

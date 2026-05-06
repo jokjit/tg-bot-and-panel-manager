@@ -575,9 +575,9 @@ const i18n = {
     w_admin_label: "ADMIN_CHAT_ID",
     w_admin_ph: "管理员用户 ID 或群组 ID",
     wizard_advanced: "高级选项（可选）",
-    w_worker_label: "Worker 地址",
-    w_panel_label: "面板地址",
-    w_panel_ph: "留空则使用部署返回的 pages.dev",
+    w_worker_label: "Worker 地址（Webhook / 面板入口）",
+    w_panel_label: "Pages 面板地址（/admin 跳转目标）",
+    w_panel_ph: "留空则使用默认 pages.dev，不需要绑定 Pages 自定义域",
     w_open_panel: "部署完成后在客户端打开面板",
     start_deploy: "开始部署",
     error_prefix: "错误",
@@ -639,9 +639,9 @@ const i18n = {
     w_admin_label: "ADMIN_CHAT_ID",
     w_admin_ph: "Admin user ID or group ID",
     wizard_advanced: "Advanced (optional)",
-    w_worker_label: "Worker URL",
-    w_panel_label: "Panel URL",
-    w_panel_ph: "Leave blank to use returned pages.dev URL",
+    w_worker_label: "Worker URL (webhook / panel entry)",
+    w_panel_label: "Pages panel URL (/admin redirect target)",
+    w_panel_ph: "Leave blank to use default pages.dev; no Pages custom domain needed",
     w_open_panel: "Open panel in app after deploy",
     start_deploy: "Start Deploy",
     error_prefix: "Error",
@@ -764,8 +764,28 @@ function getDeployedPanelUrl(result) {
   return ""
 }
 
+function getDeployedPanelEntryUrl(result) {
+  if (!result) return ""
+  if (typeof result.panelEntryUrl === "string") return normalizeHttpUrl(result.panelEntryUrl)
+  if (result.panel && typeof result.panel.panelEntryUrl === "string") {
+    return normalizeHttpUrl(result.panel.panelEntryUrl)
+  }
+  return ""
+}
+
+function buildPanelEntryUrl(workerUrl) {
+  const worker = normalizeHttpUrl(workerUrl)
+  if (!worker) return ""
+  try {
+    return `${new URL(worker).origin}/admin`
+  } catch {
+    return ""
+  }
+}
+
 function getActivePanelUrl() {
-  return normalizeHttpUrl(currentActiveAccount?.deployPrefs?.panelUrl || "")
+  const prefs = currentActiveAccount?.deployPrefs || {}
+  return normalizeHttpUrl(prefs.panelEntryUrl || buildPanelEntryUrl(prefs.workerUrl) || prefs.panelUrl || "")
 }
 
 function getSavedDeployParams() {
@@ -773,6 +793,7 @@ function getSavedDeployParams() {
   return {
     workerUrl: String(prefs.workerUrl || "").trim(),
     panelUrl: String(prefs.panelUrl || "").trim(),
+    panelEntryUrl: String(prefs.panelEntryUrl || "").trim(),
   }
 }
 
@@ -891,9 +912,13 @@ cards.forEach((card) => {
       }
 
       const deployedPanelUrl = getDeployedPanelUrl(result)
+      const deployedPanelEntryUrl = getDeployedPanelEntryUrl(result)
       if (deployedPanelUrl) {
         try {
-          await window.api.accounts.saveDeployPrefs({ panelUrl: deployedPanelUrl })
+          await window.api.accounts.saveDeployPrefs({
+            panelUrl: deployedPanelUrl,
+            panelEntryUrl: deployedPanelEntryUrl || buildPanelEntryUrl(params.workerUrl) || deployedPanelUrl,
+          })
           await renderAccounts()
         } catch {
           // ignore cache-save errors
@@ -960,8 +985,13 @@ document.getElementById("confirm-wizard").addEventListener("click", async () => 
   }
 
   const deployedPanelUrl = getDeployedPanelUrl(result)
+  const deployedPanelEntryUrl = getDeployedPanelEntryUrl(result)
   if (deployedPanelUrl) {
-    const mergedPrefs = { ...params, panelUrl: deployedPanelUrl }
+    const mergedPrefs = {
+      ...params,
+      panelUrl: deployedPanelUrl,
+      panelEntryUrl: deployedPanelEntryUrl || buildPanelEntryUrl(params.workerUrl) || deployedPanelUrl,
+    }
     try {
       await window.api.accounts.saveDeployPrefs(mergedPrefs)
       await renderAccounts()

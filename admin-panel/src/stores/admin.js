@@ -10,6 +10,7 @@ export const adminStore = reactive({
   passwordReady: false,
   passwordMode: 'none',
   bootstrapExpiresAt: null,
+  bootstrapNotifyError: null,
 });
 
 export function setAuthState(payload = {}) {
@@ -21,6 +22,7 @@ export function setAuthState(payload = {}) {
   adminStore.passwordReady = payload.passwordReady !== false;
   adminStore.passwordMode = payload.passwordMode || (authenticated ? 'permanent' : 'none');
   adminStore.bootstrapExpiresAt = payload.bootstrapExpiresAt || null;
+  adminStore.bootstrapNotifyError = payload.bootstrapNotifyError || null;
 
   if (!authenticated) {
     adminStore.statusData = null;
@@ -37,6 +39,7 @@ export function clearAuthState() {
   adminStore.passwordReady = false;
   adminStore.passwordMode = 'none';
   adminStore.bootstrapExpiresAt = null;
+  adminStore.bootstrapNotifyError = null;
 }
 
 export function setLoginState(loggedIn, username = '') {
@@ -48,6 +51,7 @@ export function setLoginState(loggedIn, username = '') {
     adminStore.mustChangePassword = false;
     adminStore.passwordMode = 'none';
     adminStore.bootstrapExpiresAt = null;
+    adminStore.bootstrapNotifyError = null;
   }
 }
 
@@ -55,6 +59,7 @@ export function setPasswordChallenge(mustChangePassword, passwordMode = 'none', 
   adminStore.mustChangePassword = Boolean(mustChangePassword);
   adminStore.passwordMode = passwordMode || 'none';
   adminStore.bootstrapExpiresAt = bootstrapExpiresAt || null;
+  adminStore.bootstrapNotifyError = null;
 }
 
 export function setStatusData(data) {

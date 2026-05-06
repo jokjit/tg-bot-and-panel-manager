@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.1.18'
+const DEPLOY_TOOL_VERSION = 'v1.1.19'
 
 // paths
 function findRepoRoot() {
@@ -75,11 +75,14 @@ function getActiveAccount() {
 function normalizeDeployPrefs(input = {}) {
   const asText = (value) => String(value ?? '').trim()
   const openPanelInClient = Boolean(input.openPanelInClient ?? input.useBuiltinPanel)
+  const workerUrl = asText(input.workerUrl)
+  const panelUrl = asText(input.panelUrl)
   return {
     botToken: asText(input.botToken),
     adminChatId: asText(input.adminChatId),
-    workerUrl: asText(input.workerUrl),
-    panelUrl: asText(input.panelUrl),
+    workerUrl,
+    panelUrl,
+    panelEntryUrl: asText(input.panelEntryUrl) || buildAdminPanelEntryUrl(workerUrl) || panelUrl,
     openPanelInClient,
   }
 }
@@ -156,6 +159,26 @@ function normalizeHttpUrl(raw) {
   } catch {
     return ''
   }
+}
+
+function getUrlOrigin(raw) {
+  const normalized = normalizeHttpUrl(raw)
+  if (!normalized) return ''
+  try {
+    return new URL(normalized).origin.replace(/\/$/, '')
+  } catch {
+    return ''
+  }
+}
+
+function buildAdminPanelEntryUrl(workerUrl) {
+  const origin = getUrlOrigin(workerUrl)
+  return origin ? `${origin}/admin` : ''
+}
+
+function normalizeWebhookPath(value) {
+  const text = String(value || '/webhook').trim() || '/webhook'
+  return text.startsWith('/') ? text : `/${text}`
 }
 
 function ensureLocalWranglerFile(env = {}) {
@@ -949,6 +972,103 @@ async function checkWorkerHealth(rawUrl) {
   }
 }
 
+async function waitForWorkerHealth(rawUrl, onProgress, label = 'Worker custom domain') {
+  const normalized = normalizeHttpUrl(rawUrl)
+  if (!normalized) return { ok: false, reason: 'missing_worker_url' }
+
+  const delays = [1200, 2500, 5000, 8000, 12000]
+  let lastReason = 'unknown'
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    const health = await checkWorkerHealth(normalized)
+    if (health.ok) {
+      onProgress?.(`${label} ready: ${health.url}`)
+      return health
+    }
+    lastReason = health.reason || 'unknown'
+    if (attempt < delays.length) {
+      const delayMs = delays[attempt]
+      onProgress?.(`${label} not ready yet (${lastReason}). Retrying in ${Math.round(delayMs / 1000)}s...`)
+      await sleep(delayMs)
+    }
+  }
+  return { ok: false, reason: lastReason }
+}
+
+async function setTelegramWebhookFromDeploy(botToken, workerUrl, env = {}, onProgress) {
+  const token = String(botToken || '').trim()
+  const origin = getUrlOrigin(workerUrl)
+  if (!token || !origin) return { ok: false, reason: 'missing_bot_token_or_worker_url' }
+
+  let webhookPath = '/webhook'
+  try {
+    const privateConfigPath = getPrivateWranglerPath(env)
+    if (fs.existsSync(privateConfigPath)) {
+      webhookPath = parseVarsBlock(fs.readFileSync(privateConfigPath, 'utf8')).WEBHOOK_PATH || webhookPath
+    }
+  } catch {}
+
+  const webhookUrl = `${origin}${normalizeWebhookPath(webhookPath)}`
+  const delays = [1200, 3000, 6000, 10000]
+  let lastReason = 'unknown'
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json; charset=UTF-8' },
+        body: JSON.stringify({ url: webhookUrl }),
+      })
+      const data = await response.json().catch(() => null)
+      if (response.ok && data?.ok) {
+        onProgress?.(`Telegram webhook set: ${webhookUrl}`)
+        return { ok: true, webhookUrl }
+      }
+      lastReason = data?.description || `http_${response.status}`
+    } catch (error) {
+      lastReason = error instanceof Error ? error.message : String(error)
+    }
+
+    if (attempt < delays.length) {
+      const delayMs = delays[attempt]
+      onProgress?.(`Telegram webhook not ready (${lastReason}). Retrying in ${Math.round(delayMs / 1000)}s...`)
+      await sleep(delayMs)
+    }
+  }
+  return { ok: false, reason: lastReason, webhookUrl }
+}
+
+async function triggerAdminPasswordBootstrap(workerUrl, onProgress) {
+  const origin = getUrlOrigin(workerUrl)
+  if (!origin) return { ok: false, reason: 'missing_worker_url' }
+
+  const authStateUrl = `${origin}/admin/api/auth/me`
+  const delays = [1200, 3000, 6000, 10000]
+  let lastReason = 'unknown'
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    try {
+      const response = await fetch(authStateUrl, { headers: { accept: 'application/json' } })
+      const data = await response.json().catch(() => null)
+      if (response.ok && data?.passwordReady) {
+        if (data.bootstrapNotifyError) {
+          onProgress?.(`Admin temporary password generated, but Telegram notification failed: ${data.bootstrapNotifyError}`)
+          return { ok: false, reason: data.bootstrapNotifyError }
+        }
+        onProgress?.('Admin temporary password generated and notification requested.')
+        return { ok: true }
+      }
+      lastReason = data?.error || data?.message || `password_not_ready:http_${response.status}`
+    } catch (error) {
+      lastReason = error instanceof Error ? error.message : String(error)
+    }
+
+    if (attempt < delays.length) {
+      const delayMs = delays[attempt]
+      onProgress?.(`Admin temporary password not ready (${lastReason}). Retrying in ${Math.round(delayMs / 1000)}s...`)
+      await sleep(delayMs)
+    }
+  }
+  return { ok: false, reason: lastReason }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -1210,6 +1330,7 @@ async function runAction(action, params, env) {
       }
 
       const effectivePanelUrl = panelUrl || deployedPanelUrl || deployment.url
+      const panelEntryUrl = buildAdminPanelEntryUrl(workerUrl) || effectivePanelUrl
       if (workerUrl || effectivePanelUrl) {
         const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env)
         if (updatedVars.length > 0) {
@@ -1220,10 +1341,14 @@ async function runAction(action, params, env) {
       saveActiveDeployPrefsPatch({
         workerUrl: workerUrl || undefined,
         panelUrl: effectivePanelUrl || undefined,
+        panelEntryUrl: panelEntryUrl || undefined,
       })
 
       try { fs.rmSync(tempDist, { recursive: true }) } catch {}
-      return { projectName, panelUrl: effectivePanelUrl, subdomain }
+      if (panelEntryUrl && panelEntryUrl !== effectivePanelUrl) {
+        send(`Panel entry URL: ${panelEntryUrl}`)
+      }
+      return { projectName, panelUrl: effectivePanelUrl, panelEntryUrl, subdomain }
     }
     case 'deploy-all': {
       const workerResult = await runAction('deploy-worker', params, env)
@@ -1271,12 +1396,21 @@ async function runAction(action, params, env) {
       if (!effectiveWorkerUrl) {
         effectiveWorkerUrl = extractWorkerUrls(deploy?.output || '', getWorkerNameFromConfig(workerConfigPath))[0] || ''
       }
+      if (botToken) await runWranglerSecret('BOT_TOKEN', botToken, env)
+      if (adminChatId) await runWranglerSecret('ADMIN_CHAT_ID', adminChatId, env)
+      if (botToken || adminChatId) {
+        send('Worker secrets updated: BOT_TOKEN / ADMIN_CHAT_ID')
+      }
       send('Step 4/4: Deploying Pages panel...')
       const panelResult = await runAction('deploy-panel', { workerUrl: effectiveWorkerUrl, panelUrl: effectivePanelUrl }, env)
       if (panelResult?.panelUrl) {
-        send(`Panel URL: ${panelResult.panelUrl}`)
+        send(`Pages panel URL: ${panelResult.panelUrl}`)
+      }
+      if (panelResult?.panelEntryUrl) {
+        send(`Panel entry URL: ${panelResult.panelEntryUrl}`)
       }
       const finalPanelUrl = panelResult?.panelUrl || effectivePanelUrl
+      const finalPanelEntryUrl = panelResult?.panelEntryUrl || buildAdminPanelEntryUrl(effectiveWorkerUrl) || finalPanelUrl
       const finalRuntimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, finalPanelUrl, env)
       if (finalRuntimeUpdates.length > 0) {
         send(`Updating Worker runtime vars after Pages deployment: ${finalRuntimeUpdates.join(', ')}`)
@@ -1291,10 +1425,31 @@ async function runAction(action, params, env) {
         }
         send(`Worker runtime URLs updated: ${finalCheck.workerName}`)
       }
-      if (botToken) await runWranglerSecret('BOT_TOKEN', botToken, env)
-      if (adminChatId) await runWranglerSecret('ADMIN_CHAT_ID', adminChatId, env)
+      if (effectiveWorkerUrl) {
+        await waitForWorkerHealth(effectiveWorkerUrl, send, 'Worker entry')
+      }
+      if (botToken && effectiveWorkerUrl) {
+        const webhook = await setTelegramWebhookFromDeploy(botToken, effectiveWorkerUrl, env, send)
+        if (!webhook.ok) {
+          send(`Telegram webhook warning: ${webhook.reason || 'unknown'}`)
+        }
+      }
+      if (effectiveWorkerUrl) {
+        const bootstrap = await triggerAdminPasswordBootstrap(effectiveWorkerUrl, send)
+        if (!bootstrap.ok) {
+          send(`Admin temporary password warning: ${bootstrap.reason || 'unknown'}`)
+        }
+      }
+      saveActiveDeployPrefsPatch({
+        botToken: botToken || undefined,
+        adminChatId: adminChatId || undefined,
+        workerUrl: effectiveWorkerUrl || undefined,
+        panelUrl: finalPanelUrl || undefined,
+        panelEntryUrl: finalPanelEntryUrl || undefined,
+        openPanelInClient: Boolean(params?.openPanelInClient),
+      })
       send('\nFirst deployment completed.')
-      return { panelUrl: finalPanelUrl, workerUrl: effectiveWorkerUrl }
+      return { panelUrl: finalPanelUrl, panelEntryUrl: finalPanelEntryUrl, workerUrl: effectiveWorkerUrl }
     }
   }
 }

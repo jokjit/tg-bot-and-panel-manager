@@ -26,6 +26,9 @@
       <n-alert v-if="!adminStore.passwordReady" type="warning" :show-icon="false" class="auth-alert">
         {{ t('auth.passwordNotReady') }}
       </n-alert>
+      <n-alert v-else-if="adminStore.bootstrapNotifyError" type="error" :show-icon="false" class="auth-alert">
+        {{ t('auth.bootstrapNotifyError', { error: adminStore.bootstrapNotifyError }) }}
+      </n-alert>
       <n-alert
         v-else-if="adminStore.passwordMode === 'bootstrap' && adminStore.bootstrapExpiresAt"
         type="info"
