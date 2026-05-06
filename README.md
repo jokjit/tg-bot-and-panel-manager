@@ -67,6 +67,9 @@ npm run build
 | `ADMIN_PANEL_URL` | 否 | Cloudflare Pages 面板地址 |
 
 ## 首次登录后台
+cloudflare api设置
+<img width="1108" height="517" alt="image" src="https://github.com/user-attachments/assets/ec8a1aa4-40e9-40c7-8f3e-72a4910fd427" />
+
 
 部署完成后，Worker 会通过 Telegram API 设置 Webhook，并向 `ADMIN_CHAT_ID` 发送后台临时密码。临时密码 1 小时有效。
 
