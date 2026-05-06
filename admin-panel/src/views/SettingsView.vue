@@ -107,6 +107,17 @@
                     style="width: 100%"
                   />
                 </n-form-item>
+
+                <n-form-item :label="t('settings.verifyMaxFailures')">
+                  <n-input-number
+                    v-model:value="form.VERIFY_MAX_FAILURES"
+                    :min="1"
+                    :max="10"
+                    :step="1"
+                    clearable
+                    style="width: 100%"
+                  />
+                </n-form-item>
               </div>
 
               <div class="switch-stack compact-stack">
@@ -154,6 +165,7 @@ import { fetchSystemConfig, saveSystemConfig } from '../services/api';
 const DEFAULT_VERIFY_EXPIRE_MS = 15 * 60 * 1000;
 const DEFAULT_VERIFY_FAIL_BLOCK_MS = 60 * 1000;
 const DEFAULT_VERIFY_TIMEOUT_BLOCK_MS = 60 * 1000;
+const DEFAULT_VERIFY_MAX_FAILURES = 2;
 
 const message = useMessage();
 const { t } = useI18n();
@@ -171,6 +183,7 @@ const form = reactive({
   VERIFY_EXPIRE_MINUTES: 15,
   VERIFY_FAIL_BLOCK_SECONDS: 60,
   VERIFY_TIMEOUT_BLOCK_SECONDS: 60,
+  VERIFY_MAX_FAILURES: DEFAULT_VERIFY_MAX_FAILURES,
 });
 
 function toPositiveNumber(value, fallback) {
@@ -196,6 +209,7 @@ function assignConfig(cfg = {}) {
   form.VERIFY_EXPIRE_MINUTES = msToMinutes(cfg.VERIFY_EXPIRE_MS, DEFAULT_VERIFY_EXPIRE_MS);
   form.VERIFY_FAIL_BLOCK_SECONDS = msToSeconds(cfg.VERIFY_FAIL_BLOCK_MS, DEFAULT_VERIFY_FAIL_BLOCK_MS);
   form.VERIFY_TIMEOUT_BLOCK_SECONDS = msToSeconds(cfg.VERIFY_TIMEOUT_BLOCK_MS, DEFAULT_VERIFY_TIMEOUT_BLOCK_MS);
+  form.VERIFY_MAX_FAILURES = toPositiveNumber(cfg.VERIFY_MAX_FAILURES, DEFAULT_VERIFY_MAX_FAILURES);
   form.BOT_TOKEN = '';
 }
 
@@ -224,6 +238,7 @@ async function save() {
       VERIFY_EXPIRE_MS: String(Math.max(1, Number(form.VERIFY_EXPIRE_MINUTES) || 15) * 60 * 1000),
       VERIFY_FAIL_BLOCK_MS: String(Math.max(1, Number(form.VERIFY_FAIL_BLOCK_SECONDS) || 60) * 1000),
       VERIFY_TIMEOUT_BLOCK_MS: String(Math.max(1, Number(form.VERIFY_TIMEOUT_BLOCK_SECONDS) || 60) * 1000),
+      VERIFY_MAX_FAILURES: String(Math.max(1, Number(form.VERIFY_MAX_FAILURES) || DEFAULT_VERIFY_MAX_FAILURES)),
     };
 
     if (form.BOT_TOKEN) payload.BOT_TOKEN = form.BOT_TOKEN;

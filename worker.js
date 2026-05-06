@@ -11,12 +11,15 @@ const MAX_SCAN_KEYS = 500;
 const VERIFY_EXPIRE_MS = 15 * 60 * 1000;
 const VERIFY_FAIL_BLOCK_MS = 60 * 1000;
 const VERIFY_TIMEOUT_BLOCK_MS = 60 * 1000;
+const VERIFY_MAX_FAILURES = 2;
 const SYSTEM_CONFIG_KEY = 'sys:config';
 const ADMIN_SESSION_PREFIX = 'admin:session:';
 const ADMIN_SESSION_TTL_SECONDS = 12 * 60 * 60;
 const ADMIN_BOOTSTRAP_TTL_MS = 1 * 60 * 60 * 1000;
 const PROFILE_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_ADMIN_PANEL_EXTERNAL_URL = '';
+const LAST_WEBHOOK_ERROR_KEY = 'sys:last_webhook_error';
+const VERIFY_IMAGE_PATH = '/verify-image';
 
 export default {
   async fetch(request, env) {
@@ -39,6 +42,10 @@ export default {
 
       if (request.method === 'GET' && url.pathname === '/health') {
         return json({ ok: true, now: new Date().toISOString() }, 200, {}, request);
+      }
+
+      if (request.method === 'GET' && url.pathname === VERIFY_IMAGE_PATH) {
+        return serveVerificationImage(url, request);
       }
 
       if (request.method === 'POST' && url.pathname === '/deploy/bootstrap') {
@@ -326,7 +333,12 @@ export default {
         }
 
         const update = await request.json();
-        await handleUpdate(update, runtimeEnv, publicBaseUrl);
+        try {
+          await handleUpdate(update, runtimeEnv, publicBaseUrl);
+        } catch (error) {
+          await recordWebhookError(runtimeEnv, error, update);
+          await notifyWebhookError(runtimeEnv, error, update);
+        }
         return new Response('ok', { headers: corsHeaders(request) });
       }
 
@@ -355,7 +367,7 @@ class AppError extends Error {
 
 async function handleUpdate(update, env, publicBaseUrl = '') {
   if (update.callback_query) {
-    await handleCallbackQuery(update.callback_query, env);
+    await handleCallbackQuery(update.callback_query, env, publicBaseUrl);
     return;
   }
 
@@ -392,7 +404,7 @@ async function handleUpdate(update, env, publicBaseUrl = '') {
   }
 
   if (isUserPrivateCommand(message)) {
-    await handleUserPrivateCommand(message, env);
+    await handleUserPrivateCommand(message, env, publicBaseUrl);
     return;
   }
 
@@ -413,7 +425,7 @@ async function handleUpdate(update, env, publicBaseUrl = '') {
     return;
   }
 
-  const verified = await ensureUserVerifiedOrPrompt(message, env);
+  const verified = await ensureUserVerifiedOrPrompt(message, env, publicBaseUrl);
   if (!verified) {
     return;
   }
@@ -421,7 +433,7 @@ async function handleUpdate(update, env, publicBaseUrl = '') {
   await handleUserMessage(message, env, adminChatId);
 }
 
-async function handleCallbackQuery(callbackQuery, env) {
+async function handleCallbackQuery(callbackQuery, env, publicBaseUrl = '') {
   const data = String(callbackQuery.data || '');
   if (!data) {
     await answerCallback(env, callbackQuery.id, '未识别的操作');
@@ -429,7 +441,7 @@ async function handleCallbackQuery(callbackQuery, env) {
   }
 
   if (data.startsWith('verify:')) {
-    await handleUserVerificationCallback(callbackQuery, env);
+    await handleUserVerificationCallback(callbackQuery, env, publicBaseUrl);
     return;
   }
 
@@ -472,27 +484,57 @@ async function handleUserMessage(message, env, adminChatId) {
 
   let forwarded;
   try {
-    forwarded = await telegram(env, 'forwardMessage', {
+    forwarded = await telegramWithThreadFallback(env, 'forwardMessage', {
       chat_id: adminChatId,
       from_chat_id: message.chat.id,
       message_id: message.message_id,
       message_thread_id: messageThreadId || undefined,
     });
   } catch (error) {
-    forwarded = await telegram(env, 'sendMessage', {
-      chat_id: adminChatId,
-      text: buildFallbackText(message, sender),
-      message_thread_id: messageThreadId || undefined,
-    });
+    try {
+      forwarded = await telegramWithThreadFallback(env, 'sendMessage', {
+        chat_id: adminChatId,
+        text: buildFallbackText(message, sender),
+        message_thread_id: messageThreadId || undefined,
+      });
+    } catch (fallbackError) {
+      await notifyUserAdminDeliveryFailed(env, message, fallbackError);
+      await saveMessageHistory(env, {
+        userId: Number(message.chat.id),
+        chatType: message.chat?.type || 'private',
+        topicId: messageThreadId || null,
+        telegramMessageId: Number(message.message_id) || null,
+        direction: 'user_to_admin',
+        senderRole: 'user',
+        messageType: detectMessageType(message),
+        textContent: extractMessageText(message),
+        mediaFileId: extractPrimaryMediaFileId(message),
+        rawPayload: message,
+      });
+      return;
+    }
   }
 
-  await telegram(env, 'sendMessage', {
-    chat_id: adminChatId,
-    text: metaText,
-    message_thread_id: messageThreadId || undefined,
-    reply_to_message_id: forwarded.message_id,
-    reply_markup: buildAdminActionKeyboard(message.chat.id),
-  });
+  try {
+    await telegramWithThreadFallback(env, 'sendMessage', {
+      chat_id: adminChatId,
+      text: metaText,
+      message_thread_id: messageThreadId || undefined,
+      reply_to_message_id: forwarded.message_id,
+      reply_markup: buildAdminActionKeyboard(message.chat.id),
+    });
+  } catch (error) {
+    try {
+      await telegram(env, 'sendMessage', {
+        chat_id: adminChatId,
+        text: `${metaText}\n\n提示：元信息消息降级发送，原错误：${trimText(formatErrorMessage(error), 300)}`,
+        reply_markup: buildAdminActionKeyboard(message.chat.id),
+      });
+    } catch (fallbackError) {
+      await notifyUserAdminDeliveryFailed(env, message, fallbackError);
+      return;
+    }
+  }
 
   if (typeof message.text === 'string' && message.text.startsWith('/start')) {
     await telegram(env, 'sendMessage', {
@@ -575,10 +617,15 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = fal
       return;
     }
 
-    await telegram(env, 'sendMessage', {
-      chat_id: targetUserId,
-      text,
-    });
+    try {
+      await telegram(env, 'sendMessage', {
+        chat_id: targetUserId,
+        text,
+      });
+    } catch (error) {
+      await sendAdminNotice(env, message, `发送给用户失败：${trimText(formatErrorMessage(error), 500)}`);
+      return;
+    }
 
     await saveMessageHistory(env, {
       userId: Number(targetUserId),
@@ -596,10 +643,22 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = fal
   }
 
   if (!defaultTargetUserId) {
+    if (chatId === adminChatId && message.chat.type !== 'private') {
+      await sendAdminNotice(
+        env,
+        message,
+        '未识别到目标用户。请在对应用户话题内直接回复，或回复带 #UID 的提示消息，或使用 /reply 用户ID 内容。',
+      );
+    }
     return;
   }
 
-  await relayAdminMessageToUser(message, env, defaultTargetUserId);
+  try {
+    await relayAdminMessageToUser(message, env, defaultTargetUserId);
+  } catch (error) {
+    await sendAdminNotice(env, message, `发送给用户失败：${trimText(formatErrorMessage(error), 500)}`);
+    return;
+  }
 
   await saveMessageHistory(env, {
     userId: Number(defaultTargetUserId),
@@ -968,7 +1027,7 @@ async function handleAdminActionCallback(callbackQuery, env) {
   await answerCallback(env, callbackQuery.id, '未识别的管理员操作');
 }
 
-async function handleUserVerificationCallback(callbackQuery, env) {
+async function handleUserVerificationCallback(callbackQuery, env, publicBaseUrl = '') {
   const parts = String(callbackQuery.data || '').split(':');
   const userId = Number(parts[1]);
   const token = parts[2];
@@ -984,16 +1043,7 @@ async function handleUserVerificationCallback(callbackQuery, env) {
   const result = await processUserVerificationAnswer(env, userId, answer, { expectedToken: token });
 
   if (result.status === 'verified') {
-    try {
-      await telegram(env, 'editMessageCaption', {
-        chat_id: userId,
-        message_id: callbackQuery.message.message_id,
-        caption: '✅ 验证通过，已解除限制。',
-        reply_markup: { inline_keyboard: [] },
-      });
-    } catch (error) {
-      // ignore
-    }
+    await clearVerificationPromptMessage(env, userId, callbackQuery.message?.message_id, '✅ 验证通过，已解除限制。');
 
     await telegram(env, 'sendMessage', {
       chat_id: userId,
@@ -1016,26 +1066,17 @@ async function handleUserVerificationCallback(callbackQuery, env) {
 
   if (result.status === 'token-mismatch') {
     const refreshed = await createOrRefreshUserVerification(env, userId, true);
-    await updateVerificationPromptMessage(env, callbackQuery.message, refreshed);
+    await updateVerificationPromptMessage(env, callbackQuery.message, refreshed, publicBaseUrl);
     await answerCallback(env, callbackQuery.id, '题目已刷新，请重新验证。', true);
     return;
   }
 
   if (result.status === 'expired') {
-    try {
-      await telegram(env, 'editMessageCaption', {
-        chat_id: userId,
-        message_id: callbackQuery.message.message_id,
-        caption: [
-          '⏰ 验证已过期',
-          '本次验证题目已失效。',
-          '请等待 1 分钟后重新发送消息获取新题目。',
-        ].join('\n'),
-        reply_markup: { inline_keyboard: [] },
-      });
-    } catch (error) {
-      // ignore
-    }
+    await clearVerificationPromptMessage(env, userId, callbackQuery.message?.message_id, [
+      '⏰ 验证已过期',
+      '本次验证题目已失效。',
+      '请等待 1 分钟后重新发送消息获取新题目。',
+    ].join('\n'));
 
     await answerCallback(env, callbackQuery.id, '验证已过期，请 1 分钟后重试。', true);
     return;
@@ -1046,22 +1087,24 @@ async function handleUserVerificationCallback(callbackQuery, env) {
     return;
   }
 
+  if (result.status === 'banned') {
+    await clearVerificationPromptMessage(env, userId, callbackQuery.message?.message_id, [
+      '🚫 验证失败次数过多',
+      `连续失败次数：${result.failureCount}/${result.maxFailures}`,
+      '你已被自动加入黑名单，请等待管理员处理。',
+    ].join('\n'));
+    await answerCallback(env, callbackQuery.id, '验证失败次数过多，已限制联系。', true);
+    return;
+  }
+
   if (result.status === 'incorrect') {
-    try {
-      await telegram(env, 'editMessageCaption', {
-        chat_id: userId,
-        message_id: callbackQuery.message.message_id,
-        caption: [
-          '❌ 验证失败',
-          `你的答案：${answer}，正确答案：${result.correctAnswer}`,
-          '请等待 1 分钟后重新发送消息获取新题目。',
-          `解封时间：${result.blockedUntil}`,
-        ].join('\n'),
-        reply_markup: { inline_keyboard: [] },
-      });
-    } catch (error) {
-      // ignore
-    }
+    await clearVerificationPromptMessage(env, userId, callbackQuery.message?.message_id, [
+      '❌ 验证失败',
+      `你的答案：${answer}，正确答案：${result.correctAnswer}`,
+      `连续失败次数：${result.failureCount}/${result.maxFailures}`,
+      '请等待 1 分钟后重新发送消息获取新题目。',
+      `解封时间：${result.blockedUntil}`,
+    ].join('\n'));
 
     await answerCallback(env, callbackQuery.id, '验证失败，请 1 分钟后重试。', true);
     return;
@@ -1090,16 +1133,7 @@ async function tryHandleUserVerificationText(message, env) {
   if (result.status === 'verified') {
     const promptMessageId = Number(state.promptMessageId || 0);
     if (promptMessageId) {
-      try {
-        await telegram(env, 'editMessageCaption', {
-          chat_id: userId,
-          message_id: promptMessageId,
-          caption: '✅ 验证通过，已解除限制。',
-          reply_markup: { inline_keyboard: [] },
-        });
-      } catch (error) {
-        // ignore
-      }
+      await clearVerificationPromptMessage(env, userId, promptMessageId, '✅ 验证通过，已解除限制。');
     }
 
     await telegram(env, 'sendMessage', {
@@ -1120,20 +1154,11 @@ async function tryHandleUserVerificationText(message, env) {
   if (result.status === 'expired') {
     const promptMessageId = Number(state.promptMessageId || 0);
     if (promptMessageId) {
-      try {
-        await telegram(env, 'editMessageCaption', {
-          chat_id: userId,
-          message_id: promptMessageId,
-          caption: [
-            '⏰ 验证已过期',
-            '本次验证题目已失效。',
-            '请等待 1 分钟后重新发送消息获取新题目。',
-          ].join('\n'),
-          reply_markup: { inline_keyboard: [] },
-        });
-      } catch (error) {
-        // ignore
-      }
+      await clearVerificationPromptMessage(env, userId, promptMessageId, [
+        '⏰ 验证已过期',
+        '本次验证题目已失效。',
+        '请等待 1 分钟后重新发送消息获取新题目。',
+      ].join('\n'));
     }
 
     await telegram(env, 'sendMessage', {
@@ -1146,26 +1171,35 @@ async function tryHandleUserVerificationText(message, env) {
   if (result.status === 'incorrect') {
     const promptMessageId = Number(state.promptMessageId || 0);
     if (promptMessageId) {
-      try {
-        await telegram(env, 'editMessageCaption', {
-          chat_id: userId,
-          message_id: promptMessageId,
-          caption: [
-            '❌ 验证失败',
-            `你的答案：${answer}，正确答案：${result.correctAnswer}`,
-            '请等待 1 分钟后重新发送消息获取新题目。',
-            `解封时间：${result.blockedUntil}`,
-          ].join('\n'),
-          reply_markup: { inline_keyboard: [] },
-        });
-      } catch (error) {
-        // ignore
-      }
+      await clearVerificationPromptMessage(env, userId, promptMessageId, [
+        '❌ 验证失败',
+        `你的答案：${answer}，正确答案：${result.correctAnswer}`,
+        `连续失败次数：${result.failureCount}/${result.maxFailures}`,
+        '请等待 1 分钟后重新发送消息获取新题目。',
+        `解封时间：${result.blockedUntil}`,
+      ].join('\n'));
     }
 
     await telegram(env, 'sendMessage', {
       chat_id: userId,
       text: '验证失败，请等待 1 分钟后重新发送消息获取新题目。',
+    });
+    return true;
+  }
+
+  if (result.status === 'banned') {
+    const promptMessageId = Number(state.promptMessageId || 0);
+    if (promptMessageId) {
+      await clearVerificationPromptMessage(env, userId, promptMessageId, [
+        '🚫 验证失败次数过多',
+        `连续失败次数：${result.failureCount}/${result.maxFailures}`,
+        '你已被自动加入黑名单，请等待管理员处理。',
+      ].join('\n'));
+    }
+
+    await telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text: '验证失败次数过多，已限制联系。如有需要请等待管理员处理。',
     });
     return true;
   }
@@ -1210,6 +1244,7 @@ async function processUserVerificationAnswer(env, userId, answer, options = {}) 
       selectedAnswer: '',
       correctAnswer: String(state.challenge.correct || ''),
       blockMs: getVerificationTimeoutBlockMs(env),
+      countForBan: false,
     });
     return { status: 'expired' };
   }
@@ -1224,10 +1259,24 @@ async function processUserVerificationAnswer(env, userId, answer, options = {}) 
       correctAnswer: String(state.challenge.correct),
       blockMs: getVerificationFailBlockMs(env),
     });
+    const maxFailures = getVerificationMaxFailures(env);
+    if (failedState.failureCount >= maxFailures) {
+      const entry = await banUserForVerificationFailures(env, userId, failedState, maxFailures);
+      return {
+        status: 'banned',
+        correctAnswer: String(state.challenge.correct),
+        blockedUntil: failedState.blockedUntil,
+        failureCount: failedState.failureCount,
+        maxFailures,
+        blacklist: entry,
+      };
+    }
     return {
       status: 'incorrect',
       correctAnswer: String(state.challenge.correct),
       blockedUntil: failedState.blockedUntil,
+      failureCount: failedState.failureCount,
+      maxFailures,
     };
   }
 
@@ -1239,12 +1288,12 @@ function isUserPrivateCommand(message) {
   return typeof message?.text === 'string' && /^\/\S+/.test(String(message.text).trim());
 }
 
-async function handleUserPrivateCommand(message, env) {
+async function handleUserPrivateCommand(message, env, publicBaseUrl = '') {
   const raw = String(message.text || '').trim();
   const command = raw.split(/\s+/)[0].split('@')[0].toLowerCase();
 
   if (command === '/start') {
-    const verified = await ensureUserVerifiedOrPrompt(message, env);
+    const verified = await ensureUserVerifiedOrPrompt(message, env, publicBaseUrl);
     if (!verified) return;
 
     await telegram(env, 'sendMessage', {
@@ -1260,7 +1309,7 @@ async function handleUserPrivateCommand(message, env) {
   });
 }
 
-async function ensureUserVerifiedOrPrompt(message, env) {
+async function ensureUserVerifiedOrPrompt(message, env, publicBaseUrl = '') {
   if (!isUserVerificationEnabled(env)) {
     return true;
   }
@@ -1291,6 +1340,7 @@ async function ensureUserVerifiedOrPrompt(message, env) {
       selectedAnswer: '',
       correctAnswer: String(state.challenge.correct || ''),
       blockMs: getVerificationTimeoutBlockMs(env),
+      countForBan: false,
     });
     await telegram(env, 'sendMessage', {
       chat_id: userId,
@@ -1305,7 +1355,7 @@ async function ensureUserVerifiedOrPrompt(message, env) {
     !state?.challenge || Boolean(state?.answeredAt),
   );
 
-  await sendUserVerificationPrompt(env, userId, nextState);
+  await sendUserVerificationPrompt(env, userId, nextState, publicBaseUrl);
   return false;
 }
 
@@ -1675,8 +1725,8 @@ function buildAdminActionKeyboard(userId) {
   };
 }
 
-function buildUserVerificationText(challenge) {
-  const expireMs = getVerificationExpireMs(globalThis.__verificationEnv || {});
+function buildUserVerificationText(challenge, env = {}) {
+  const expireMs = getVerificationExpireMs(env);
   const modeText = challenge.mode === 'math' ? '10 以内算术题' : '图形验证码';
   const promptText = challenge.mode === 'math'
     ? '请从下方 4 个选项中选择正确答案，答错后需等待 1 分钟。'
@@ -1693,6 +1743,16 @@ function buildUserVerificationText(challenge) {
   ].join('\n');
 }
 
+function buildTextVerificationPrompt(challenge, env = {}) {
+  const lines = [buildUserVerificationText(challenge, env)];
+  if (challenge?.mode === 'captcha') {
+    lines.push('');
+    lines.push(`验证码：${challenge.correct}`);
+    lines.push('图片发送失败时显示此文本验证码，请点选下方对应选项。');
+  }
+  return lines.join('\n');
+}
+
 function buildUserVerificationKeyboard(userId, challenge) {
   const buttons = challenge.options.map((option) => ({
     text: String(option),
@@ -1704,23 +1764,317 @@ function buildUserVerificationKeyboard(userId, challenge) {
   };
 }
 
-function buildCaptchaImageUrl(challenge) {
-  const text = encodeURIComponent(String(challenge.correct));
-  const cacheBuster = encodeURIComponent(String(challenge.token || Date.now()));
-  return `https://dummyimage.com/360x120/1f2937/ffffff.png&text=${text}%20${cacheBuster.slice(0, 2)}`;
+function buildVerificationImageUrl(challenge, publicBaseUrl = '') {
+  const base = String(publicBaseUrl || '').trim().replace(/\/$/, '');
+  if (!base) return '';
+  const text = getVerificationImageText(challenge);
+  const params = new URLSearchParams({
+    text,
+    token: String(challenge?.token || ''),
+    mode: String(challenge?.mode || 'captcha'),
+  });
+  return `${base}${VERIFY_IMAGE_PATH}?${params.toString()}`;
 }
 
-function buildMathImageUrl(challenge) {
-  const text = encodeURIComponent(String(challenge.question || '1+1=?'));
-  const cacheBuster = encodeURIComponent(String(challenge.token || Date.now()));
-  return `https://dummyimage.com/720x200/1f2937/ffffff.png&text=${text}%20${cacheBuster.slice(0, 2)}`;
+function getVerificationImageText(challenge) {
+  const raw = String(challenge?.imageText || challenge?.question || challenge?.correct || 'VERIFY').trim();
+  return raw.replace(/[^\w+\-*/=? ]/g, ' ').replace(/\s+/g, ' ').slice(0, 24) || 'VERIFY';
 }
 
-function buildVerificationImageUrl(challenge) {
-  if (challenge?.mode === 'math') {
-    return buildMathImageUrl(challenge);
+function serveVerificationImage(url, request) {
+  const text = String(url.searchParams.get('text') || 'VERIFY')
+    .replace(/[^\w+\-*/=? ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 24)
+    .toUpperCase() || 'VERIFY';
+  const token = String(url.searchParams.get('token') || '').slice(0, 80);
+  const png = renderVerificationPng(text, token);
+  return new Response(png, {
+    headers: {
+      'content-type': 'image/png',
+      'cache-control': 'no-store, max-age=0',
+      ...corsHeaders(request),
+    },
+  });
+}
+
+function renderVerificationPng(text, token = '') {
+  const width = 420;
+  const height = 140;
+  const pixels = new Uint8Array(width * height * 3);
+  const rand = createSeededRandom(`${text}:${token}`);
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = (y * width + x) * 3;
+      const shade = 242 + Math.floor(rand() * 10);
+      pixels[idx] = shade;
+      pixels[idx + 1] = Math.min(255, shade + 2);
+      pixels[idx + 2] = 255;
+    }
   }
-  return buildCaptchaImageUrl(challenge);
+
+  for (let i = 0; i < 900; i += 1) {
+    const x = Math.floor(rand() * width);
+    const y = Math.floor(rand() * height);
+    const idx = (y * width + x) * 3;
+    const v = 160 + Math.floor(rand() * 70);
+    pixels[idx] = v;
+    pixels[idx + 1] = v;
+    pixels[idx + 2] = v + 15;
+  }
+
+  for (let i = 0; i < 8; i += 1) {
+    drawLine(
+      pixels,
+      width,
+      height,
+      Math.floor(rand() * width),
+      Math.floor(rand() * height),
+      Math.floor(rand() * width),
+      Math.floor(rand() * height),
+      [120 + Math.floor(rand() * 80), 130 + Math.floor(rand() * 70), 170 + Math.floor(rand() * 60)],
+    );
+  }
+
+  const chars = text.split('');
+  const scale = chars.length > 14 ? 6 : chars.length > 9 ? 7 : 8;
+  const gap = Math.max(3, Math.floor(scale * 0.75));
+  const totalWidth = chars.reduce((sum, ch) => sum + getFontWidth(ch, scale) + gap, -gap);
+  let x = Math.max(16, Math.floor((width - totalWidth) / 2));
+  const y = Math.floor((height - 7 * scale) / 2);
+  for (const ch of chars) {
+    const jitterY = Math.floor(rand() * 7) - 3;
+    const color = [20 + Math.floor(rand() * 40), 45 + Math.floor(rand() * 45), 90 + Math.floor(rand() * 70)];
+    drawChar(pixels, width, height, ch, x, y + jitterY, scale, color);
+    x += getFontWidth(ch, scale) + gap;
+  }
+
+  return encodePngRgb(width, height, pixels);
+}
+
+const FONT_5X7 = {
+  '0': ['01110', '10001', '10011', '10101', '11001', '10001', '01110'],
+  '1': ['00100', '01100', '00100', '00100', '00100', '00100', '01110'],
+  '2': ['01110', '10001', '00001', '00010', '00100', '01000', '11111'],
+  '3': ['11110', '00001', '00001', '01110', '00001', '00001', '11110'],
+  '4': ['00010', '00110', '01010', '10010', '11111', '00010', '00010'],
+  '5': ['11111', '10000', '10000', '11110', '00001', '00001', '11110'],
+  '6': ['01110', '10000', '10000', '11110', '10001', '10001', '01110'],
+  '7': ['11111', '00001', '00010', '00100', '01000', '01000', '01000'],
+  '8': ['01110', '10001', '10001', '01110', '10001', '10001', '01110'],
+  '9': ['01110', '10001', '10001', '01111', '00001', '00001', '01110'],
+  A: ['01110', '10001', '10001', '11111', '10001', '10001', '10001'],
+  B: ['11110', '10001', '10001', '11110', '10001', '10001', '11110'],
+  C: ['01111', '10000', '10000', '10000', '10000', '10000', '01111'],
+  D: ['11110', '10001', '10001', '10001', '10001', '10001', '11110'],
+  E: ['11111', '10000', '10000', '11110', '10000', '10000', '11111'],
+  F: ['11111', '10000', '10000', '11110', '10000', '10000', '10000'],
+  G: ['01111', '10000', '10000', '10011', '10001', '10001', '01111'],
+  H: ['10001', '10001', '10001', '11111', '10001', '10001', '10001'],
+  I: ['01110', '00100', '00100', '00100', '00100', '00100', '01110'],
+  J: ['00001', '00001', '00001', '00001', '10001', '10001', '01110'],
+  K: ['10001', '10010', '10100', '11000', '10100', '10010', '10001'],
+  L: ['10000', '10000', '10000', '10000', '10000', '10000', '11111'],
+  M: ['10001', '11011', '10101', '10101', '10001', '10001', '10001'],
+  N: ['10001', '11001', '10101', '10011', '10001', '10001', '10001'],
+  O: ['01110', '10001', '10001', '10001', '10001', '10001', '01110'],
+  P: ['11110', '10001', '10001', '11110', '10000', '10000', '10000'],
+  Q: ['01110', '10001', '10001', '10001', '10101', '10010', '01101'],
+  R: ['11110', '10001', '10001', '11110', '10100', '10010', '10001'],
+  S: ['01111', '10000', '10000', '01110', '00001', '00001', '11110'],
+  T: ['11111', '00100', '00100', '00100', '00100', '00100', '00100'],
+  U: ['10001', '10001', '10001', '10001', '10001', '10001', '01110'],
+  V: ['10001', '10001', '10001', '10001', '10001', '01010', '00100'],
+  W: ['10001', '10001', '10001', '10101', '10101', '10101', '01010'],
+  X: ['10001', '10001', '01010', '00100', '01010', '10001', '10001'],
+  Y: ['10001', '10001', '01010', '00100', '00100', '00100', '00100'],
+  Z: ['11111', '00001', '00010', '00100', '01000', '10000', '11111'],
+  '+': ['00000', '00100', '00100', '11111', '00100', '00100', '00000'],
+  '-': ['00000', '00000', '00000', '11111', '00000', '00000', '00000'],
+  '*': ['00000', '10101', '01110', '11111', '01110', '10101', '00000'],
+  '/': ['00001', '00010', '00010', '00100', '01000', '01000', '10000'],
+  '=': ['00000', '00000', '11111', '00000', '11111', '00000', '00000'],
+  '?': ['01110', '10001', '00001', '00010', '00100', '00000', '00100'],
+  ' ': ['00000', '00000', '00000', '00000', '00000', '00000', '00000'],
+};
+
+function getFontWidth(ch, scale) {
+  return (ch === ' ' ? 3 : 5) * scale;
+}
+
+function drawChar(pixels, width, height, ch, x, y, scale, color) {
+  const glyph = FONT_5X7[ch] || FONT_5X7['?'];
+  for (let gy = 0; gy < glyph.length; gy += 1) {
+    const row = glyph[gy];
+    for (let gx = 0; gx < row.length; gx += 1) {
+      if (row[gx] !== '1') continue;
+      for (let py = 0; py < scale; py += 1) {
+        for (let px = 0; px < scale; px += 1) {
+          setPixel(pixels, width, height, x + gx * scale + px, y + gy * scale + py, color);
+        }
+      }
+    }
+  }
+}
+
+function drawLine(pixels, width, height, x0, y0, x1, y1, color) {
+  let dx = Math.abs(x1 - x0);
+  let dy = -Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  while (true) {
+    setPixel(pixels, width, height, x0, y0, color);
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      x0 += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y0 += sy;
+    }
+  }
+}
+
+function setPixel(pixels, width, height, x, y, color) {
+  if (x < 0 || y < 0 || x >= width || y >= height) return;
+  const idx = (Math.floor(y) * width + Math.floor(x)) * 3;
+  pixels[idx] = color[0];
+  pixels[idx + 1] = color[1];
+  pixels[idx + 2] = color[2];
+}
+
+function createSeededRandom(seedText) {
+  let state = 2166136261;
+  for (let i = 0; i < seedText.length; i += 1) {
+    state ^= seedText.charCodeAt(i);
+    state = Math.imul(state, 16777619) >>> 0;
+  }
+  return () => {
+    state += 0x6d2b79f5;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function encodePngRgb(width, height, pixels) {
+  const raw = new Uint8Array((width * 3 + 1) * height);
+  let offset = 0;
+  for (let y = 0; y < height; y += 1) {
+    raw[offset] = 0;
+    offset += 1;
+    raw.set(pixels.subarray(y * width * 3, (y + 1) * width * 3), offset);
+    offset += width * 3;
+  }
+
+  const header = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = new Uint8Array(13);
+  writeUint32(ihdr, 0, width);
+  writeUint32(ihdr, 4, height);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+
+  return concatBytes([
+    header,
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', zlibStore(raw)),
+    pngChunk('IEND', new Uint8Array(0)),
+  ]);
+}
+
+function zlibStore(data) {
+  const parts = [new Uint8Array([0x78, 0x01])];
+  let offset = 0;
+  while (offset < data.length) {
+    const len = Math.min(65535, data.length - offset);
+    const final = offset + len >= data.length ? 1 : 0;
+    const block = new Uint8Array(5 + len);
+    block[0] = final;
+    block[1] = len & 0xff;
+    block[2] = (len >>> 8) & 0xff;
+    const nlen = (~len) & 0xffff;
+    block[3] = nlen & 0xff;
+    block[4] = (nlen >>> 8) & 0xff;
+    block.set(data.subarray(offset, offset + len), 5);
+    parts.push(block);
+    offset += len;
+  }
+
+  const adler = adler32(data);
+  const checksum = new Uint8Array(4);
+  writeUint32(checksum, 0, adler);
+  parts.push(checksum);
+  return concatBytes(parts);
+}
+
+function pngChunk(type, data) {
+  const typeBytes = new TextEncoder().encode(type);
+  const out = new Uint8Array(12 + data.length);
+  writeUint32(out, 0, data.length);
+  out.set(typeBytes, 4);
+  out.set(data, 8);
+  const crcInput = new Uint8Array(typeBytes.length + data.length);
+  crcInput.set(typeBytes, 0);
+  crcInput.set(data, typeBytes.length);
+  writeUint32(out, 8 + data.length, crc32(crcInput));
+  return out;
+}
+
+function adler32(data) {
+  let a = 1;
+  let b = 0;
+  for (const byte of data) {
+    a = (a + byte) % 65521;
+    b = (b + a) % 65521;
+  }
+  return (((b << 16) | a) >>> 0);
+}
+
+let crcTable = null;
+
+function crc32(data) {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n += 1) {
+      let c = n;
+      for (let k = 0; k < 8; k += 1) {
+        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      }
+      crcTable[n] = c >>> 0;
+    }
+  }
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function writeUint32(bytes, offset, value) {
+  bytes[offset] = (value >>> 24) & 0xff;
+  bytes[offset + 1] = (value >>> 16) & 0xff;
+  bytes[offset + 2] = (value >>> 8) & 0xff;
+  bytes[offset + 3] = value & 0xff;
+}
+
+function concatBytes(parts) {
+  const length = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
 }
 
 function generateCaptchaCode(length = 4) {
@@ -1794,6 +2148,7 @@ function generateCaptchaChallenge() {
     mode: 'captcha',
     token: createChallengeToken(),
     question: '请选择图片中正确的验证码',
+    imageText: correct,
     correct,
     options: shuffleArray(Array.from(options)).slice(0, 4),
     createdAt: new Date().toISOString(),
@@ -1811,14 +2166,14 @@ function generateMathChallenge() {
     mode: 'math',
     token: createChallengeToken(),
     question: `${left} ${displayOperator} ${right} = ?（答案范围 0~10）`,
+    imageText: `${left} ${displayOperator} ${right} = ?`,
     correct,
     options: generateMathOptions(correct),
     createdAt: new Date().toISOString(),
   };
 }
 
-function generateVerificationChallenge() {
-  const env = globalThis.__verificationEnv || {};
+function generateVerificationChallenge(env = {}) {
   const captchaEnabled = getVerificationCaptchaEnabled(env);
   const mathEnabled = getVerificationMathEnabled(env);
   if (captchaEnabled && mathEnabled) {
@@ -1833,41 +2188,50 @@ function isVerificationExpired(challenge, env = {}) {
   return Date.now() - new Date(challenge.createdAt).getTime() > getVerificationExpireMs(env);
 }
 
-async function updateVerificationPromptMessage(env, message, state) {
-  globalThis.__verificationEnv = env;
+async function updateVerificationPromptMessage(env, message, state, publicBaseUrl = '') {
+  const imageUrl = buildVerificationImageUrl(state.challenge, publicBaseUrl || env.PUBLIC_BASE_URL || '');
   try {
+    if (!imageUrl) throw new Error('verification_image_url_not_ready');
     await telegram(env, 'editMessageMedia', {
       chat_id: message.chat.id,
       message_id: message.message_id,
       media: {
         type: 'photo',
-        media: buildVerificationImageUrl(state.challenge),
-        caption: buildUserVerificationText(state.challenge),
+        media: imageUrl,
+        caption: buildUserVerificationText(state.challenge, env),
       },
       reply_markup: buildUserVerificationKeyboard(Number(message.chat.id), state.challenge),
     });
     await setVerificationPromptMessageId(env, Number(message.chat.id), message.message_id);
   } catch (error) {
-    const sent = await telegram(env, 'sendPhoto', {
-      chat_id: message.chat.id,
-      photo: buildVerificationImageUrl(state.challenge),
-      caption: buildUserVerificationText(state.challenge),
-      reply_markup: buildUserVerificationKeyboard(Number(message.chat.id), state.challenge),
-    });
+    const sent = await sendVerificationPromptMessage(env, Number(message.chat.id), state, publicBaseUrl);
     await setVerificationPromptMessageId(env, Number(message.chat.id), sent.message_id);
   }
 }
 
-async function sendUserVerificationPrompt(env, userId, state) {
-  globalThis.__verificationEnv = env;
-  const sent = await telegram(env, 'sendPhoto', {
-    chat_id: userId,
-    photo: buildVerificationImageUrl(state.challenge),
-    caption: buildUserVerificationText(state.challenge),
-    reply_markup: buildUserVerificationKeyboard(userId, state.challenge),
-  });
+async function sendUserVerificationPrompt(env, userId, state, publicBaseUrl = '') {
+  const sent = await sendVerificationPromptMessage(env, userId, state, publicBaseUrl);
 
   await setVerificationPromptMessageId(env, userId, sent.message_id);
+}
+
+async function sendVerificationPromptMessage(env, userId, state, publicBaseUrl = '') {
+  const imageUrl = buildVerificationImageUrl(state.challenge, publicBaseUrl || env.PUBLIC_BASE_URL || '');
+  try {
+    if (!imageUrl) throw new Error('verification_image_url_not_ready');
+    return await telegram(env, 'sendPhoto', {
+      chat_id: userId,
+      photo: imageUrl,
+      caption: buildUserVerificationText(state.challenge, env),
+      reply_markup: buildUserVerificationKeyboard(userId, state.challenge),
+    });
+  } catch (error) {
+    return telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text: buildTextVerificationPrompt(state.challenge, env),
+      reply_markup: buildUserVerificationKeyboard(userId, state.challenge),
+    });
+  }
 }
 
 async function answerCallback(env, callbackQueryId, text, showAlert = false) {
@@ -1882,11 +2246,38 @@ async function answerCallback(env, callbackQueryId, text, showAlert = false) {
   }
 }
 
+async function clearVerificationPromptMessage(env, chatId, messageId, text) {
+  if (!messageId) return;
+  try {
+    await telegram(env, 'editMessageCaption', {
+      chat_id: chatId,
+      message_id: messageId,
+      caption: text,
+      reply_markup: { inline_keyboard: [] },
+    });
+    return;
+  } catch (error) {
+    // Text fallback prompts have no caption.
+  }
+
+  try {
+    await telegram(env, 'editMessageText', {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      reply_markup: { inline_keyboard: [] },
+    });
+  } catch (error) {
+    // Ignore stale or already-deleted prompt messages.
+  }
+}
+
 async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
   const topicModeEnabled = isTopicModeEnabled(env);
   const userVerificationEnabled = isUserVerificationEnabled(env);
   let webhookInfo = null;
   let webhookError = null;
+  let lastWebhookError = null;
 
   if (env.BOT_TOKEN) {
     try {
@@ -1894,6 +2285,10 @@ async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
     } catch (error) {
       webhookError = error instanceof Error ? error.message : String(error);
     }
+  }
+
+  if (env.BOT_KV) {
+    lastWebhookError = await getJson(env.BOT_KV, LAST_WEBHOOK_ERROR_KEY);
   }
 
   return {
@@ -1920,7 +2315,49 @@ async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
     rootAdminIds: getRootAdminIds(env),
     webhookInfo,
     webhookError,
+    lastWebhookError,
   };
+}
+
+async function recordWebhookError(env, error, update) {
+  const message = update?.message || update?.edited_message || update?.callback_query?.message || null;
+  const record = {
+    at: new Date().toISOString(),
+    error: formatErrorMessage(error),
+    updateId: update?.update_id || null,
+    chatId: message?.chat?.id || null,
+    messageId: message?.message_id || null,
+    senderId: update?.callback_query?.from?.id || message?.from?.id || null,
+    messageType: message ? detectMessageType(message) : update?.callback_query ? 'callback_query' : 'unknown',
+  };
+  console.error('Telegram webhook update failed', record);
+  if (env.BOT_KV) {
+    try {
+      await env.BOT_KV.put(LAST_WEBHOOK_ERROR_KEY, JSON.stringify(record));
+    } catch (kvError) {
+      console.error('Failed to persist webhook error', formatErrorMessage(kvError));
+    }
+  }
+}
+
+async function notifyWebhookError(env, error, update) {
+  try {
+    if (!env.BOT_TOKEN || !env.ADMIN_CHAT_ID) return;
+    const adminChatId = toChatId(env.ADMIN_CHAT_ID);
+    const message = update?.message || update?.edited_message || update?.callback_query?.message || null;
+    await telegram(env, 'sendMessage', {
+      chat_id: adminChatId,
+      text: [
+        '⚠️ Webhook 入站处理异常，已自动吞掉 500，避免 Telegram 持续重试。',
+        `错误：${trimText(formatErrorMessage(error), 500)}`,
+        `Update：${update?.update_id || '未知'}`,
+        message?.chat?.id ? `来源会话：${message.chat.id}` : '',
+        message?.from?.id ? `发送者：${message.from.id}` : '',
+      ].filter(Boolean).join('\n'),
+    });
+  } catch (notifyError) {
+    console.error('Failed to notify webhook error', formatErrorMessage(notifyError));
+  }
 }
 
 async function upsertUserProfile(env, message) {
@@ -2354,7 +2791,7 @@ async function createOrRefreshUserVerification(env, userId, forceNew = false) {
   if (existing?.verified) {
     return existing;
   }
-  if (existing?.challenge && !forceNew && !isVerificationExpired(existing.challenge)) {
+  if (existing?.challenge && !forceNew && !isVerificationExpired(existing.challenge, env)) {
     return existing;
   }
 
@@ -2367,7 +2804,8 @@ async function createOrRefreshUserVerification(env, userId, forceNew = false) {
     blockedUntil: null,
     selectedAnswer: null,
     correctAnswer: null,
-    challenge: generateVerificationChallenge(),
+    failureCount: Number(existing?.failureCount || 0),
+    challenge: generateVerificationChallenge(env),
     updatedAt: new Date().toISOString(),
   };
 
@@ -2400,6 +2838,7 @@ async function markUserVerified(env, userId) {
     selectedAnswer: null,
     correctAnswer: null,
     challenge: null,
+    failureCount: 0,
     updatedAt: new Date().toISOString(),
   };
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
@@ -2412,6 +2851,8 @@ async function markUserVerificationFailed(env, userId, payload) {
   const blockMs = Number(payload?.blockMs || VERIFY_FAIL_BLOCK_MS);
   const now = Date.now();
   const blockedUntil = new Date(now + blockMs).toISOString();
+  const countForBan = payload?.countForBan !== false;
+  const failureCount = countForBan ? Number(existing?.failureCount || 0) + 1 : Number(existing?.failureCount || 0);
   const state = {
     ...(existing || {}),
     userId: Number(userId),
@@ -2422,10 +2863,43 @@ async function markUserVerificationFailed(env, userId, payload) {
     selectedAnswer: String(payload?.selectedAnswer || ''),
     correctAnswer: String(payload?.correctAnswer || ''),
     challenge: null,
+    failureCount,
+    lastFailureAt: new Date(now).toISOString(),
     updatedAt: new Date(now).toISOString(),
   };
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
   return state;
+}
+
+async function banUserForVerificationFailures(env, userId, failedState, maxFailures) {
+  const entry = await setBlacklistEntry(env, userId, {
+    reason: `首次私聊验证连续失败 ${failedState.failureCount}/${maxFailures} 次，系统自动拉黑`,
+    createdAt: new Date().toISOString(),
+    createdBy: 'verification-guard',
+  });
+  await reportVerificationAutoBan(env, userId, failedState, maxFailures, entry);
+  return entry;
+}
+
+async function reportVerificationAutoBan(env, userId, failedState, maxFailures, entry) {
+  try {
+    const adminChatId = toChatId(env.ADMIN_CHAT_ID);
+    const profile = await getUserProfile(env, userId);
+    await telegram(env, 'sendMessage', {
+      chat_id: adminChatId,
+      text: [
+        '🚫 用户验证失败次数过多，已自动拉黑',
+        `用户：${profile?.displayName || '未知'}${profile?.username ? ` @${profile.username}` : ''}`,
+        `ID：${userId}`,
+        `失败次数：${failedState.failureCount}/${maxFailures}`,
+        `最后选择：${failedState.selectedAnswer || '无'}`,
+        `正确答案：${failedState.correctAnswer || '未知'}`,
+        `原因：${entry.reason}`,
+      ].join('\n'),
+    });
+  } catch (error) {
+    // 自动拉黑已完成，管理员通知失败不应影响 webhook。
+  }
 }
 
 async function restartUserVerification(env, userId, operator = 'unknown') {
@@ -2441,6 +2915,7 @@ async function restartUserVerification(env, userId, operator = 'unknown') {
     selectedAnswer: null,
     correctAnswer: null,
     challenge: null,
+    failureCount: 0,
     updatedAt: new Date().toISOString(),
     restartedBy: operator,
   };
@@ -2559,6 +3034,10 @@ function getVerificationTimeoutBlockMs(env) {
   return parsePositiveInt(env.VERIFY_TIMEOUT_BLOCK_MS, VERIFY_TIMEOUT_BLOCK_MS);
 }
 
+function getVerificationMaxFailures(env) {
+  return parsePositiveInt(env.VERIFY_MAX_FAILURES, VERIFY_MAX_FAILURES);
+}
+
 function getVerificationMathEnabled(env) {
   return String(env.VERIFY_MATH_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
 }
@@ -2622,7 +3101,21 @@ async function sendAdminNotice(env, message, text) {
     payload.message_thread_id = message.message_thread_id;
   }
 
-  await telegram(env, 'sendMessage', payload);
+  await telegramWithThreadFallback(env, 'sendMessage', payload);
+}
+
+async function notifyUserAdminDeliveryFailed(env, message, error) {
+  try {
+    await telegram(env, 'sendMessage', {
+      chat_id: message.chat.id,
+      text: [
+        '消息暂未送达管理员，请稍后再试。',
+        `原因：${trimText(formatErrorMessage(error), 300)}`,
+      ].join('\n'),
+    });
+  } catch (notifyError) {
+    console.error('Failed to notify user delivery failure', formatErrorMessage(notifyError));
+  }
 }
 
 async function getRuntimeEnv(env) {
@@ -2636,6 +3129,7 @@ async function getRuntimeEnv(env) {
     'VERIFY_EXPIRE_MS',
     'VERIFY_FAIL_BLOCK_MS',
     'VERIFY_TIMEOUT_BLOCK_MS',
+    'VERIFY_MAX_FAILURES',
     'VERIFY_MATH_ENABLED',
     'VERIFY_CAPTCHA_ENABLED',
     'BOT_TOKEN',
@@ -3000,6 +3494,7 @@ async function updateSystemConfig(env, payload) {
     'VERIFY_EXPIRE_MS',
     'VERIFY_FAIL_BLOCK_MS',
     'VERIFY_TIMEOUT_BLOCK_MS',
+    'VERIFY_MAX_FAILURES',
     'VERIFY_MATH_ENABLED',
     'VERIFY_CAPTCHA_ENABLED',
     'BOT_TOKEN',
@@ -3047,6 +3542,7 @@ function buildSystemConfigView(config) {
     VERIFY_EXPIRE_MS: config.VERIFY_EXPIRE_MS || '',
     VERIFY_FAIL_BLOCK_MS: config.VERIFY_FAIL_BLOCK_MS || '',
     VERIFY_TIMEOUT_BLOCK_MS: config.VERIFY_TIMEOUT_BLOCK_MS || '',
+    VERIFY_MAX_FAILURES: config.VERIFY_MAX_FAILURES || '',
     VERIFY_MATH_ENABLED: config.VERIFY_MATH_ENABLED || '',
     VERIFY_CAPTCHA_ENABLED: config.VERIFY_CAPTCHA_ENABLED || '',
     WELCOME_TEXT: config.WELCOME_TEXT || '',
@@ -3630,6 +4126,17 @@ async function telegram(env, method, payload) {
     throw new Error(data.description || `Telegram API error: ${response.status}`);
   }
   return data.result;
+}
+
+async function telegramWithThreadFallback(env, method, payload) {
+  try {
+    return await telegram(env, method, payload);
+  } catch (error) {
+    if (!payload?.message_thread_id) throw error;
+    const fallbackPayload = { ...payload };
+    delete fallbackPayload.message_thread_id;
+    return telegram(env, method, fallbackPayload);
+  }
 }
 
 function ensureEnv(env, keys) {

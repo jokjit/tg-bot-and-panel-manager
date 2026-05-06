@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.2.0'
+const DEPLOY_TOOL_VERSION = 'v1.2.1'
 
 // paths
 function findRepoRoot() {

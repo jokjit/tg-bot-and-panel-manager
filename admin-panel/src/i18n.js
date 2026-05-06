@@ -240,6 +240,7 @@ const messages = {
       verifyExpireMinutes: '验证有效期（分钟）',
       verifyFailBlockSeconds: '答错后限制时长（秒）',
       verifyTimeoutBlockSeconds: '超时后限制时长（秒）',
+      verifyMaxFailures: '连续失败自动拉黑次数',
     },
     messages: {
       title: '消息文案',
@@ -587,6 +588,7 @@ const messages = {
       verifyExpireMinutes: 'Verification TTL (minutes)',
       verifyFailBlockSeconds: 'Wrong-answer cooldown (seconds)',
       verifyTimeoutBlockSeconds: 'Timeout cooldown (seconds)',
+      verifyMaxFailures: 'Auto-ban after failures',
     },
     messages: {
       title: 'Messages',
