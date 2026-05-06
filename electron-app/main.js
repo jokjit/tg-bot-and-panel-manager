@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.2.1'
+const DEPLOY_TOOL_VERSION = `v${app.getVersion()}`
 
 // paths
 function findRepoRoot() {
@@ -127,6 +127,8 @@ function buildEnv(account) {
     env.TG_BOT_ACCOUNT_CONFIG_DIR = configDir
     env.TG_BOT_LOCAL_WRANGLER = path.join(configDir, 'wrangler.local.toml')
     env.TG_BOT_PRIVATE_WRANGLER = path.join(configDir, '.wrangler.private.toml')
+    env.TG_BOT_ACCOUNT_NAME = String(account.name || '').trim()
+    env.TG_BOT_ACCOUNT_EMAIL = String(account.email || '').trim()
     if (account.apiToken) {
       env.CLOUDFLARE_API_TOKEN = account.apiToken
       env.CF_API_TOKEN = account.apiToken
@@ -446,6 +448,176 @@ async function putWorkerCustomDomainRecords(env, workerName, hostname, zoneId) {
       }],
     },
   })
+}
+
+function sanitizeWorkersSubdomain(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32)
+    .replace(/-+$/g, '')
+}
+
+function buildWorkersSubdomainCandidates(env = {}) {
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim().toLowerCase()
+  const emailLocal = String(env.TG_BOT_ACCOUNT_EMAIL || '').trim().split('@')[0] || ''
+  const accountName = String(env.TG_BOT_ACCOUNT_NAME || '').trim()
+  const accountSuffix = accountId.slice(0, 6) || 'acct'
+  const candidates = [
+    emailLocal,
+    accountName,
+    `${emailLocal}-${accountSuffix}`,
+    `${accountName}-${accountSuffix}`,
+    `cf-${accountSuffix}`,
+  ]
+    .map((value) => sanitizeWorkersSubdomain(value))
+    .filter((value) => value.length >= 3)
+  return [...new Set(candidates)]
+}
+
+function buildWorkersDevUrl(workerName, subdomain) {
+  const script = String(workerName || '').trim()
+  const accountSubdomain = String(subdomain || '').trim()
+  if (!script || !accountSubdomain) return ''
+  return normalizeHttpUrl(`https://${script}.${accountSubdomain}.workers.dev`)
+}
+
+async function getWorkersAccountSubdomain(env) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const response = await cfApiRequest(env, `/accounts/${accountId}/workers/subdomain`)
+  const subdomain = String(response.result?.subdomain || '').trim()
+  if (response.ok && subdomain) {
+    return { ok: true, subdomain }
+  }
+  return { ok: false, reason: response.reason || 'workers_subdomain_not_ready', subdomain }
+}
+
+async function createWorkersAccountSubdomain(env, subdomain) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const response = await cfApiRequest(env, `/accounts/${accountId}/workers/subdomain`, {
+    method: 'PUT',
+    body: { subdomain },
+  })
+  const created = String(response.result?.subdomain || '').trim()
+  if (response.ok && created) {
+    return { ok: true, subdomain: created }
+  }
+  return { ok: false, reason: response.reason || 'workers_subdomain_create_failed' }
+}
+
+async function ensureWorkersAccountSubdomain(env, onProgress) {
+  const current = await getWorkersAccountSubdomain(env)
+  if (current.ok && current.subdomain) {
+    return current
+  }
+
+  const failures = []
+  for (const candidate of buildWorkersSubdomainCandidates(env)) {
+    const created = await createWorkersAccountSubdomain(env, candidate)
+    if (created.ok && created.subdomain) {
+      onProgress?.(`Workers 子域已启用：${created.subdomain}.workers.dev`)
+      return created
+    }
+    failures.push(`${candidate}:${created.reason || 'unknown'}`)
+  }
+
+  return {
+    ok: false,
+    reason: current.reason || failures.join('; ') || 'workers_subdomain_unavailable',
+  }
+}
+
+async function getWorkerWorkersDevStatus(env, workerName) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const response = await cfApiRequest(env, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`)
+  const result = response.result || {}
+  if (response.ok) {
+    return {
+      ok: true,
+      enabled: Boolean(result.enabled),
+      previewsEnabled: Boolean(result.previews_enabled),
+    }
+  }
+  return { ok: false, reason: response.reason || 'workers_dev_status_failed' }
+}
+
+async function setWorkerWorkersDevStatus(env, workerName, enabled = true, previewsEnabled = true) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const response = await cfApiRequest(env, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`, {
+    method: 'POST',
+    body: {
+      enabled: Boolean(enabled),
+      previews_enabled: Boolean(previewsEnabled),
+    },
+  })
+  const result = response.result || {}
+  if (response.ok) {
+    return {
+      ok: true,
+      enabled: Boolean(result.enabled),
+      previewsEnabled: Boolean(result.previews_enabled),
+    }
+  }
+  return { ok: false, reason: response.reason || 'workers_dev_enable_failed' }
+}
+
+async function ensureWorkerWorkersDev(env, configPath, onProgress) {
+  const workerName = getWorkerNameFromConfig(configPath)
+  if (!workerName) {
+    throw new Error('Worker workers.dev binding failed: missing_worker_name_in_config')
+  }
+
+  const accountSubdomain = await ensureWorkersAccountSubdomain(env, onProgress)
+  if (!accountSubdomain.ok || !accountSubdomain.subdomain) {
+    throw new Error(`Worker workers.dev account subdomain failed: ${accountSubdomain.reason || 'unknown'}`)
+  }
+
+  const current = await getWorkerWorkersDevStatus(env, workerName)
+  if (current.ok && current.enabled) {
+    const workerUrl = buildWorkersDevUrl(workerName, accountSubdomain.subdomain)
+    onProgress?.(`Worker workers.dev 已启用：${workerUrl}`)
+    return {
+      ok: true,
+      workerName,
+      subdomain: accountSubdomain.subdomain,
+      workerUrl,
+      method: 'workers-dev-existing',
+    }
+  }
+
+  const updated = await setWorkerWorkersDevStatus(env, workerName, true, true)
+  if (!updated.ok || !updated.enabled) {
+    throw new Error(`Worker workers.dev 启用失败（${workerName}）：${updated.reason || 'unknown'}`)
+  }
+
+  const workerUrl = buildWorkersDevUrl(workerName, accountSubdomain.subdomain)
+  onProgress?.(`Worker workers.dev 已启用：${workerUrl}`)
+  return {
+    ok: true,
+    workerName,
+    subdomain: accountSubdomain.subdomain,
+    workerUrl,
+    method: 'workers-dev-enabled',
+  }
+}
+
+async function ensureWorkerPublicEndpoint(env, configPath, workerUrl, onProgress) {
+  const customHostname = getWorkerCustomDomainHost(workerUrl)
+  if (customHostname) {
+    const customDomain = await ensureWorkerCustomDomain(env, configPath, workerUrl, onProgress)
+    return {
+      ...customDomain,
+      workerUrl: normalizeHttpUrl(workerUrl),
+      endpointType: 'custom-domain',
+    }
+  }
+
+  return {
+    ...(await ensureWorkerWorkersDev(env, configPath, onProgress)),
+    endpointType: 'workers-dev',
+  }
 }
 
 async function putWorkerSecretViaApi(env, workerName, name, value) {
@@ -1627,34 +1799,49 @@ async function runAction(action, params, env) {
       await ensureKvBindingViaApi(env, {}, send)
       await runScript('merge-wrangler-config.mjs', [], env)
       return
-    case 'deploy-worker':
-      {
-        const runtimeUpdates = syncRuntimeUrlsToLocalConfig(params?.workerUrl || '', params?.panelUrl || '', env)
-        if (runtimeUpdates.length > 0) send(`已更新账号运行配置：${runtimeUpdates.join(', ')}`)
-      }
+    case 'deploy-worker': {
+      let effectiveWorkerUrl = normalizeHttpUrl(params?.workerUrl || '')
+      const effectivePanelUrl = normalizeHttpUrl(params?.panelUrl || '')
+      const runtimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+      if (runtimeUpdates.length > 0) send(`已更新账号运行配置：${runtimeUpdates.join(', ')}`)
       send('正在初始化 KV 和 D1...')
       await ensureKvBindingViaApi(env, {}, send)
       await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
-      {
-        const runtimeUpdates = syncRuntimeUrlsToLocalConfig(params?.workerUrl || '', params?.panelUrl || '', env)
-        if (runtimeUpdates.length > 0) send(`已更新账号运行配置：${runtimeUpdates.join(', ')}`)
-      }
+      const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+      if (postInitUpdates.length > 0) send(`已更新账号运行配置：${postInitUpdates.join(', ')}`)
       await runScript('merge-wrangler-config.mjs', [], env)
       const workerConfigPath = getPrivateWranglerPath(env)
       validatePrivateWranglerConfig(workerConfigPath)
       await uploadWorkerViaApi(env, workerConfigPath, send)
-      await ensureWorkerCustomDomain(env, workerConfigPath, params?.workerUrl || '', send)
-      {
-        const check = await verifyWorkerDeployment(env, workerConfigPath, send, {
-          deployOutput: '',
-          workerUrl: params?.workerUrl || '',
-        })
-        if (!check.ok) {
-          throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
+      const publicEndpoint = await ensureWorkerPublicEndpoint(env, workerConfigPath, effectiveWorkerUrl, send)
+      effectiveWorkerUrl = normalizeHttpUrl(publicEndpoint.workerUrl || effectiveWorkerUrl || '')
+      if (effectiveWorkerUrl) {
+        const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+        if (endpointUpdates.length > 0) {
+          await runScript('merge-wrangler-config.mjs', [], env)
         }
-        send(`Worker 已验证：${check.workerName}${check.method ? ` (${check.method})` : ''}`)
       }
-      return
+      const check = await verifyWorkerDeployment(env, workerConfigPath, send, {
+        deployOutput: '',
+        workerUrl: effectiveWorkerUrl,
+      })
+      if (!check.ok) {
+        throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
+      }
+      send(`Worker 已验证：${check.workerName}${check.method ? ` (${check.method})` : ''}`)
+      saveActiveDeployPrefsPatch({
+        workerUrl: effectiveWorkerUrl || undefined,
+        panelUrl: effectivePanelUrl || undefined,
+        panelEntryUrl: buildAdminPanelEntryUrl(effectiveWorkerUrl) || effectivePanelUrl || undefined,
+      })
+      return {
+        ok: true,
+        workerName: check.workerName,
+        workerUrl: effectiveWorkerUrl,
+        endpointType: publicEndpoint.endpointType || '',
+        method: check.method || publicEndpoint.method || '',
+      }
+    }
     case 'deploy-panel': {
       const workerUrl = normalizeHttpUrl(params?.workerUrl || '')
       const panelUrl = normalizeHttpUrl(params?.panelUrl || '')
@@ -1743,7 +1930,10 @@ async function runAction(action, params, env) {
     }
     case 'deploy-all': {
       const workerResult = await runAction('deploy-worker', params, env)
-      const panelResult = await runAction('deploy-panel', params, env)
+      const panelResult = await runAction('deploy-panel', {
+        ...(params || {}),
+        workerUrl: workerResult?.workerUrl || params?.workerUrl || '',
+      }, env)
       return { worker: workerResult || null, panel: panelResult || null }
     }
     case 'first-deploy': {
@@ -1779,7 +1969,14 @@ async function runAction(action, params, env) {
       const workerConfigPath = getPrivateWranglerPath(env)
       validatePrivateWranglerConfig(workerConfigPath)
       await uploadWorkerViaApi(env, workerConfigPath, send)
-      await ensureWorkerCustomDomain(env, workerConfigPath, effectiveWorkerUrl, send)
+      const publicEndpoint = await ensureWorkerPublicEndpoint(env, workerConfigPath, effectiveWorkerUrl, send)
+      effectiveWorkerUrl = normalizeHttpUrl(publicEndpoint.workerUrl || effectiveWorkerUrl || '')
+      if (effectiveWorkerUrl) {
+        const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+        if (endpointUpdates.length > 0) {
+          await runScript('merge-wrangler-config.mjs', [], env)
+        }
+      }
       {
         const check = await verifyWorkerDeployment(env, workerConfigPath, send, {
           deployOutput: '',
@@ -1822,7 +2019,14 @@ async function runAction(action, params, env) {
         send(`Pages 部署后正在更新 Worker 运行变量：${finalRuntimeUpdates.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
         await uploadWorkerViaApi(env, workerConfigPath, send)
-        await ensureWorkerCustomDomain(env, workerConfigPath, effectiveWorkerUrl, send)
+        const publicEndpoint = await ensureWorkerPublicEndpoint(env, workerConfigPath, effectiveWorkerUrl, send)
+        effectiveWorkerUrl = normalizeHttpUrl(publicEndpoint.workerUrl || effectiveWorkerUrl || '')
+        if (effectiveWorkerUrl) {
+          const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+          if (endpointUpdates.length > 0) {
+            await runScript('merge-wrangler-config.mjs', [], env)
+          }
+        }
         const finalCheck = await verifyWorkerDeployment(env, workerConfigPath, send, {
           deployOutput: '',
           workerUrl: effectiveWorkerUrl,
@@ -1934,4 +2138,3 @@ app.whenReady().then(() => {
   createWindow()
 })
 app.on('window-all-closed', () => app.quit())
-
