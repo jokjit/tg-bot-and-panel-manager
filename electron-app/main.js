@@ -1528,7 +1528,7 @@ async function checkWorkerHealth(rawUrl) {
   }
 
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 8000)
+  const timer = setTimeout(() => controller.abort(), 15000)
   try {
     const response = await fetch(healthUrl, { signal: controller.signal })
     if (response.ok) {
@@ -1542,11 +1542,25 @@ async function checkWorkerHealth(rawUrl) {
   }
 }
 
+async function waitForWorkerEndpointWarmup(endpointInfo, onProgress) {
+  const endpointType = String(endpointInfo?.endpointType || '').trim()
+  const endpointMethod = String(endpointInfo?.method || '').trim()
+  const workerUrl = normalizeHttpUrl(endpointInfo?.workerUrl || '')
+  if (!workerUrl || endpointType !== 'workers-dev' || endpointMethod !== 'workers-dev-enabled') {
+    return { ok: true, skipped: true }
+  }
+
+  const warmupMs = 20000
+  onProgress?.(`Worker workers.dev 刚启用，等待 ${Math.round(warmupMs / 1000)} 秒让入口生效：${workerUrl}`)
+  await sleep(warmupMs)
+  return { ok: true, warmed: true }
+}
+
 async function waitForWorkerHealth(rawUrl, onProgress, label = 'Worker custom domain') {
   const normalized = normalizeHttpUrl(rawUrl)
   if (!normalized) return { ok: false, reason: 'missing_worker_url' }
 
-  const delays = [1200, 2500, 5000, 8000, 12000]
+  const delays = [2000, 4000, 8000, 12000, 18000, 25000]
   let lastReason = 'unknown'
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
     const health = await checkWorkerHealth(normalized)
@@ -1569,7 +1583,7 @@ async function getWorkerRuntimeStatus(workerUrl) {
   if (!origin) return { ok: false, reason: 'missing_worker_url' }
 
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 8000)
+  const timer = setTimeout(() => controller.abort(), 15000)
   try {
     const response = await fetch(`${origin}/`, {
       headers: { accept: 'application/json' },
@@ -1592,7 +1606,7 @@ async function waitForWorkerBotConfig(workerUrl, expectedAdminChatId, onProgress
   if (!origin) return { ok: false, reason: 'missing_worker_url' }
 
   const expectedChatId = String(expectedAdminChatId || '').trim()
-  const delays = [1000, 2500, 5000, 8000, 12000, 15000]
+  const delays = [2000, 4000, 8000, 12000, 18000, 25000, 30000]
   let lastReason = 'unknown'
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
     const result = await getWorkerRuntimeStatus(origin)
@@ -1625,9 +1639,11 @@ async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress) {
   if (!origin || !token) return { ok: false, reason: 'missing_worker_url_or_bootstrap_token' }
 
   const bootstrapUrl = `${origin}/deploy/bootstrap`
-  const delays = [1200, 3000, 6000, 10000]
+  const delays = [2000, 4000, 8000, 12000, 18000, 25000]
   let lastReason = 'unknown'
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 20000)
     try {
       const response = await fetch(bootstrapUrl, {
         method: 'POST',
@@ -1637,6 +1653,7 @@ async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress) {
           'x-deploy-bootstrap-token': token,
         },
         body: JSON.stringify({}),
+        signal: controller.signal,
       })
       const data = await response.json().catch(() => null)
       if (response.ok && data?.ok) {
@@ -1655,6 +1672,8 @@ async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress) {
       }
     } catch (error) {
       lastReason = error instanceof Error ? error.message : String(error)
+    } finally {
+      clearTimeout(timer)
     }
 
     if (attempt < delays.length) {
@@ -1814,6 +1833,7 @@ async function runAction(action, params, env) {
       validatePrivateWranglerConfig(workerConfigPath)
       await uploadWorkerViaApi(env, workerConfigPath, send)
       const publicEndpoint = await ensureWorkerPublicEndpoint(env, workerConfigPath, effectiveWorkerUrl, send)
+      await waitForWorkerEndpointWarmup(publicEndpoint, send)
       effectiveWorkerUrl = normalizeHttpUrl(publicEndpoint.workerUrl || effectiveWorkerUrl || '')
       if (effectiveWorkerUrl) {
         const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
@@ -1970,6 +1990,7 @@ async function runAction(action, params, env) {
       validatePrivateWranglerConfig(workerConfigPath)
       await uploadWorkerViaApi(env, workerConfigPath, send)
       const publicEndpoint = await ensureWorkerPublicEndpoint(env, workerConfigPath, effectiveWorkerUrl, send)
+      await waitForWorkerEndpointWarmup(publicEndpoint, send)
       effectiveWorkerUrl = normalizeHttpUrl(publicEndpoint.workerUrl || effectiveWorkerUrl || '')
       if (effectiveWorkerUrl) {
         const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
@@ -2020,6 +2041,7 @@ async function runAction(action, params, env) {
         await runScript('merge-wrangler-config.mjs', [], env)
         await uploadWorkerViaApi(env, workerConfigPath, send)
         const publicEndpoint = await ensureWorkerPublicEndpoint(env, workerConfigPath, effectiveWorkerUrl, send)
+        await waitForWorkerEndpointWarmup(publicEndpoint, send)
         effectiveWorkerUrl = normalizeHttpUrl(publicEndpoint.workerUrl || effectiveWorkerUrl || '')
         if (effectiveWorkerUrl) {
           const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
