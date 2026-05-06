@@ -2,41 +2,8 @@
   "name": "telegram-private-chatbot",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "node -e \"console.log('Use TG Bot Deploy Tool for API-based deployment.')\"",
     "build:panel": "npm --prefix admin-panel run build"
   },
-  "devDependencies": {
-    "wrangler": "^4.45.0"
-  },
-  "cloudflare": {
-    "bindings": {
-      "BOT_KV": {
-        "description": "用于保存用户档案、话题映射、黑名单、信任名单、管理员授权和首次验证状态。若不绑定，请将 `TOPIC_MODE` 与 `USER_VERIFICATION` 设为 `false`。"
-      },
-      "DB": {
-        "description": "可选。Cloudflare D1 数据库，用于保存聊天历史、会话索引和后续检索能力。建议使用 `npm run setup:d1` 初始化。"
-      },
-      "BOT_TOKEN": {
-        "description": "Telegram 机器人 Token，可从 `@BotFather` 获取。属于机器人运行必要项，建议使用 `wrangler secret put BOT_TOKEN` 配置。"
-      },
-      "ADMIN_CHAT_ID": {
-        "description": "管理员接收消息的 Telegram Chat ID。属于机器人运行必要项。启用话题模式时，建议填已开启 Topics 的超级群组 ID，例如 `-1001234567890`。"
-      },
-      "ADMIN_IDS": {
-        "description": "可选。多个 Telegram 管理员用户 ID，使用英文逗号分隔，例如 `12345,67890`。"
-      },
-      "WEBHOOK_SECRET": {
-        "description": "可选但强烈建议配置。Telegram Webhook 自定义密钥，用于校验请求来源。"
-      },
-      "ADMIN_API_KEY": {
-        "description": "可选但强烈建议配置。后台 API 访问密钥，可配合浏览器后台或自动化脚本调用。"
-      },
-      "PUBLIC_BASE_URL": {
-        "description": "Worker 对外访问地址，例如 `https://your-worker.your-subdomain.workers.dev` 或自定义域名。"
-      },
-      "ADMIN_PANEL_URL": {
-        "description": "后台前端地址，例如 `https://tg-admin.example.com`。"
-      }
-    }
-  }
+  "devDependencies": {}
 }

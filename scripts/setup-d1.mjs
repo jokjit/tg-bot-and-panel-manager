@@ -1,6 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve, isAbsolute } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 
 const cwd = process.cwd();
 const wranglerPath = resolve(cwd, 'wrangler.toml');
@@ -13,7 +12,6 @@ function parseArgs(argv) {
     binding: process.env.D1_BINDING || 'DB',
     target: 'local',
     skipMigrate: false,
-    remote: false,
     dryRun: false,
     help: false,
   };
@@ -31,7 +29,7 @@ function parseArgs(argv) {
       continue;
     }
     if (current === '--remote') {
-      args.remote = true;
+      // Kept for backward compatibility. API flow is always remote.
       continue;
     }
     if (current === '--dry-run') {
@@ -53,173 +51,198 @@ function parseArgs(argv) {
       index += 1;
       continue;
     }
-
     if (current.startsWith('--')) {
-      throw new Error(`不支持的参数：${current}`);
+      throw new Error(`Unsupported option: ${current}`);
     }
   }
 
   if (!['local', 'public'].includes(args.target)) {
-    throw new Error(`--target 仅支持 local 或 public，当前值：${args.target}`);
+    throw new Error(`--target must be local or public. Received: ${args.target}`);
   }
-
+  if (!args.databaseName) {
+    throw new Error('databaseName must not be empty');
+  }
+  if (!args.binding) {
+    throw new Error('binding must not be empty');
+  }
   return args;
 }
 
 function printHelp() {
   console.log(`
-用法：
-  npm run setup:d1 -- [可选参数]
+Usage:
+  node scripts/setup-d1.mjs [options]
 
-示例：
-  npm run setup:d1 -- --database-name tg-bot-history --binding DB --remote
-  npm run setup:d1 -- --database-name tg-bot-history --binding DB --target public
+Examples:
+  node scripts/setup-d1.mjs --database-name tg-bot-history --binding DB
+  node scripts/setup-d1.mjs --target public --skip-migrate
 
-参数：
-  --database-name   D1 数据库名，默认：tg-bot-history
-  --binding         Wrangler 绑定名，默认：DB
-  --target          回填目标：local / public，默认：local
-  --remote          创建后立即应用远程迁移
-  --skip-migrate    只创建数据库并回填配置，不执行迁移
-  --dry-run         仅打印步骤，不真正执行
-  --help            查看帮助
-
-说明：
-  - 运行前请先完成 wrangler login，或已配置 Cloudflare 相关环境变量。
-  - 默认会把真实 D1 database_id 写入 wrangler.local.toml，避免泄露到公开仓库。
-  - 如果数据库已存在，脚本会自动复用并继续回填绑定。
+Options:
+  --database-name <name>  D1 database name (default: tg-bot-history)
+  --binding <name>        binding name (default: DB)
+  --target <local|public> write binding to wrangler.local.toml or wrangler.toml (default: local)
+  --skip-migrate          skip migrations apply
+  --remote                accepted for compatibility; ignored (API is remote)
+  --dry-run               print plan only
+  --help                  show help
 `);
-}
-
-function runCommand(command, args, options = {}) {
-  // Allow overriding npx wrangler with direct wrangler binary via env
-  if (command === 'npx' && args[0] === 'wrangler' && process.env.WRANGLER_JS) {
-    command = process.execPath
-    args = [process.env.WRANGLER_JS, ...args.slice(1)]
-  }
-  const rendered = [command, ...args].join(' ');
-  console.log(`\n> ${rendered}`);
-
-  if (options.dryRun) {
-    return { stdout: '', stderr: '' };
-  }
-
-  const result = spawnSync(command, args, {
-    cwd: options.cwd || cwd,
-    env: options.env || process.env,
-    shell: process.platform === 'win32' && !isAbsolute(command),
-    stdio: options.capture ? 'pipe' : 'inherit',
-    encoding: 'utf8',
-  });
-
-  if (result.error || result.status !== 0) {
-    const stderr = result.stderr || '';
-    const stdout = result.stdout || '';
-    const spawnErr = result.error ? `\n启动失败：${result.error.message}` : '';
-    throw new Error(`命令执行失败：${rendered}\n${stdout}${stderr}${spawnErr}`.trim());
-  }
-
-  return result;
-}
-
-function ensureMigrationsDir() {
-  if (!existsSync(migrationsDir)) {
-    mkdirSync(migrationsDir, { recursive: true });
-  }
 }
 
 function ensureWranglerFile() {
   if (!existsSync(wranglerPath)) {
-    throw new Error(`未找到 wrangler.toml：${wranglerPath}`);
+    throw new Error(`Missing wrangler.toml: ${wranglerPath}`);
   }
 }
 
 function ensureLocalWranglerFile() {
-  if (existsSync(localWranglerPath)) {
-    return;
-  }
-
+  if (existsSync(localWranglerPath)) return;
   mkdirSync(dirname(localWranglerPath), { recursive: true });
-  const template = [
-    '# 本地私有部署配置',
-    '# 该文件不会提交到 Git。',
-    '',
-    '[vars]',
-    'PUBLIC_BASE_URL = "https://your-worker.example.com"',
-    'ADMIN_PANEL_URL = "https://your-pages-panel.example.com"',
-    '',
-  ].join('\n');
-
-  writeFileSync(localWranglerPath, template, 'utf8');
+  writeFileSync(
+    localWranglerPath,
+    [
+      '# Local private deployment config',
+      '# This file is not committed to git.',
+      '',
+      '[vars]',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
 }
 
-function parseDatabaseId(output) {
-  const text = String(output || '');
-  const direct = text.match(/database_id\s*=\s*"([^"]+)"/i);
-  if (direct) return direct[1].trim();
-
-  const idLine = text.match(/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i);
-  if (idLine) return idLine[1].trim();
-
-  try {
-    const parsed = JSON.parse(text);
-    return parsed?.result?.uuid || parsed?.uuid || parsed?.database_id || '';
-  } catch {
-    return '';
+function getCfEnv() {
+  const token = String(process.env.CLOUDFLARE_API_TOKEN || process.env.CF_API_TOKEN || '').trim();
+  const accountId = String(process.env.CLOUDFLARE_ACCOUNT_ID || process.env.CF_ACCOUNT_ID || '').trim();
+  if (!token || !accountId) {
+    throw new Error('Missing CLOUDFLARE_API_TOKEN/CF_API_TOKEN or CLOUDFLARE_ACCOUNT_ID/CF_ACCOUNT_ID');
   }
+  return { token, accountId };
 }
 
 async function cfApiRequest(path, method = 'GET', body) {
-  const token = process.env.CLOUDFLARE_API_TOKEN;
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-  if (!token || !accountId) throw new Error('缺少 CLOUDFLARE_API_TOKEN 或 CLOUDFLARE_ACCOUNT_ID');
-  const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}${path}`, {
+  const { token, accountId } = getCfEnv();
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}${path}`, {
     method,
-    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
-  return res.json();
+  const json = await response.json().catch(() => null);
+  if (!json?.success) {
+    const errors = Array.isArray(json?.errors) ? json.errors : [];
+    const reason = errors.length > 0
+      ? errors.map((item) => `${item.code || 'unknown'}:${item.message || 'unknown'}`).join('; ')
+      : `http_${response.status}`;
+    throw new Error(reason);
+  }
+  return json;
 }
 
-async function findExistingDatabase(databaseName) {
-  const data = await cfApiRequest('/d1/database?per_page=100');
-  if (!data.success) return null;
-  return data.result?.find(db => db.name === databaseName) || null;
+async function listD1Databases() {
+  const all = [];
+  let totalPages = 1;
+  for (let page = 1; page <= totalPages && page <= 10; page += 1) {
+    const query = new URLSearchParams({ page: String(page), per_page: '100' });
+    const data = await cfApiRequest(`/d1/database?${query.toString()}`);
+    all.push(...(Array.isArray(data.result) ? data.result : []));
+    totalPages = Number(data.result_info?.total_pages || 1);
+  }
+  return all;
+}
+
+function getDatabaseId(item) {
+  return String(item?.uuid || item?.id || item?.database_id || '').trim();
 }
 
 async function createOrGetDatabase(databaseName) {
-  const existingBeforeCreate = await findExistingDatabase(databaseName);
-  if (existingBeforeCreate?.uuid) {
-    return existingBeforeCreate.uuid;
+  let databases = await listD1Databases();
+  let database = databases.find((item) => String(item.name || '') === databaseName);
+  if (getDatabaseId(database)) {
+    return getDatabaseId(database);
   }
 
-  const data = await cfApiRequest('/d1/database', 'POST', { name: databaseName });
-  if (data.success) return data.result.uuid;
-
-  const existingAfterCreate = await findExistingDatabase(databaseName);
-  if (existingAfterCreate?.uuid && data.errors?.some(e => /already exists|10014|7502/i.test(`${e.code || ''}:${e.message || ''}`))) {
-    return existingAfterCreate.uuid;
+  try {
+    const created = await cfApiRequest('/d1/database', 'POST', { name: databaseName });
+    database = created.result || null;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    if (!/already exists|10013|10014|7502/i.test(reason)) {
+      throw error;
+    }
+    databases = await listD1Databases();
+    database = databases.find((item) => String(item.name || '') === databaseName);
   }
 
-  throw new Error(data.errors?.map(e => e.message).join(', ') || 'D1 创建失败');
+  const id = getDatabaseId(database);
+  if (!id) throw new Error(`database_id not found for ${databaseName}`);
+  return id;
 }
 
 function upsertD1Binding(content, binding, databaseName, databaseId) {
   const block = `[[d1_databases]]\nbinding = "${binding}"\ndatabase_name = "${databaseName}"\ndatabase_id = "${databaseId}"`;
-  const existingBlock = /\[\[d1_databases\]\][\s\S]*?(?=\n\[\[|\n\[|$)/g;
-  const matches = [...content.matchAll(existingBlock)];
-
+  const pattern = /\[\[d1_databases\]\][\s\S]*?(?=\n\[\[|\n\[|$)/g;
+  const matches = [...String(content).matchAll(pattern)];
   for (const match of matches) {
-    if (match[0].includes(`binding = "${binding}"`)) {
-      return content.replace(match[0], block);
+    if (new RegExp(`^\\s*binding\\s*=\\s*"${binding.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\s*$`, 'm').test(match[0])) {
+      return String(content).replace(match[0], block);
     }
   }
+  const trimmed = String(content).replace(/\s+$/, '');
+  return trimmed ? `${trimmed}\n\n${block}\n` : `${block}\n`;
+}
 
-  const trimmed = content.replace(/\s+$/, '');
-  if (!trimmed) {
-    return `${block}\n`;
+function escapeSqlString(value) {
+  return String(value || '').replaceAll("'", "''");
+}
+
+async function executeD1Sql(databaseId, sql) {
+  const data = await cfApiRequest(`/d1/database/${encodeURIComponent(databaseId)}/query`, 'POST', { sql });
+  return data.result;
+}
+
+function readMigrationFiles() {
+  if (!existsSync(migrationsDir)) return [];
+  return readdirSync(migrationsDir)
+    .filter((name) => /\.sql$/i.test(name))
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function extractQueryRows(result) {
+  if (Array.isArray(result?.[0]?.results)) return result[0].results;
+  if (Array.isArray(result?.results)) return result.results;
+  return [];
+}
+
+async function applyMigrations(databaseId) {
+  await executeD1Sql(
+    databaseId,
+    `CREATE TABLE IF NOT EXISTS d1_migrations(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE,
+      applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+    );`,
+  );
+
+  const existingRows = extractQueryRows(await executeD1Sql(databaseId, 'SELECT name FROM d1_migrations ORDER BY id'));
+  const applied = new Set(existingRows.map((row) => String(row.name || '').trim()).filter(Boolean));
+  const files = readMigrationFiles();
+  const appliedNow = [];
+
+  for (const file of files) {
+    if (applied.has(file)) continue;
+    const sql = readFileSync(join(migrationsDir, file), 'utf8').trim();
+    if (!sql) continue;
+    const mergedSql = `${sql}\n\nINSERT INTO d1_migrations (name) VALUES ('${escapeSqlString(file)}');`;
+    await executeD1Sql(databaseId, mergedSql);
+    appliedNow.push(file);
+    console.log(`Applied migration: ${file}`);
   }
-  return `${trimmed}\n\n${block}\n`;
+
+  if (appliedNow.length === 0) {
+    console.log('No new migrations to apply.');
+  }
 }
 
 async function main() {
@@ -230,60 +253,36 @@ async function main() {
   }
 
   ensureWranglerFile();
-  if (args.target === 'local') {
-    ensureLocalWranglerFile();
-  }
-  ensureMigrationsDir();
-
-  console.log('开始初始化 D1...');
-  console.log(`数据库名：${args.databaseName}`);
-  console.log(`绑定名：${args.binding}`);
-  console.log(`回填目标：${args.target === 'local' ? 'wrangler.local.toml' : 'wrangler.toml'}`);
-  if (args.remote) console.log('迁移模式：远程');
-  if (args.dryRun) console.log('当前为 dry-run，不会真正执行命令。');
+  if (args.target === 'local') ensureLocalWranglerFile();
 
   const targetPath = args.target === 'public' ? wranglerPath : localWranglerPath;
-  let databaseId = '';
+  console.log('Initializing D1 via Cloudflare API...');
+  console.log(`Database: ${args.databaseName}`);
+  console.log(`Binding: ${args.binding}`);
+  console.log(`Target config: ${targetPath}`);
 
-  if (!args.dryRun) {
-    try {
-      databaseId = await createOrGetDatabase(args.databaseName);
-    } catch (error) {
-      throw new Error(`D1 创建失败：${error.message}`);
-    }
-    if (databaseId) console.log(`D1 database_id: ${databaseId}`);
-
-    if (!databaseId) {
-      throw new Error('无法解析或复用 D1 database_id。');
-    }
-
-    const targetContent = existsSync(targetPath) ? readFileSync(targetPath, 'utf8') : '';
-    const nextContent = upsertD1Binding(targetContent, args.binding, args.databaseName, databaseId);
-    writeFileSync(targetPath, nextContent, 'utf8');
-    console.log(`已写入 D1 绑定到：${targetPath}`);
-    console.log(`database_id：${databaseId}`);
-  } else {
-    console.log(`将会把 [[d1_databases]] 写入 ${targetPath}`);
-    console.log(`\n> npx wrangler d1 create ${args.databaseName}`);
+  if (args.dryRun) {
+    console.log('Dry run enabled.');
+    return;
   }
+
+  const databaseId = await createOrGetDatabase(args.databaseName);
+  const current = existsSync(targetPath) ? readFileSync(targetPath, 'utf8') : '';
+  const next = upsertD1Binding(current, args.binding, args.databaseName, databaseId);
+  writeFileSync(targetPath, next, 'utf8');
+
+  console.log(`D1 database_id: ${databaseId}`);
+  console.log(`D1 binding written to: ${targetPath}`);
 
   if (!args.skipMigrate) {
-    const migrateArgs = ['wrangler', 'd1', 'migrations', 'apply', args.databaseName];
-    if (args.remote) {
-      migrateArgs.push('--remote');
-    }
-
-    if (args.dryRun) {
-      console.log(`\n> npx ${migrateArgs.join(' ')}`);
-    } else {
-      runCommand('npx', migrateArgs);
-    }
+    await applyMigrations(databaseId);
   }
 
-  console.log('\nD1 初始化完成。');
+  console.log('D1 initialization complete.');
 }
 
 main().catch((error) => {
-  console.error(`\n初始化失败：${error.message}`);
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`D1 initialization failed: ${message}`);
   process.exit(1);
 });

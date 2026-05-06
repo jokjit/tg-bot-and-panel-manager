@@ -8,7 +8,7 @@
     "build": "electron-builder --win --x64"
   },
   "dependencies": {
-    "wrangler": "^4.45.0"
+    "blake3-wasm": "^2.1.5"
   },
   "devDependencies": {
     "electron": "^31.0.0",
@@ -17,17 +17,51 @@
   "build": {
     "appId": "com.tgbot.deploy",
     "productName": "TG Bot 部署工具",
-    "directories": { "output": "dist" },
-    "files": ["main.js", "preload.js", "index.html"],
-    "extraResources": [
-      { "from": "../scripts", "to": "scripts" },
-      { "from": "../worker.js", "to": "worker.js" },
-      { "from": "../wrangler.toml", "to": "wrangler.toml" },
-      { "from": "../migrations", "to": "migrations" },
-      { "from": "node_modules", "to": "node_modules", "filter": ["**", "!electron/**", "!electron-builder/**", "!.cache/**"] },
-      { "from": "../admin-panel", "to": "admin-panel", "filter": ["**", "!dist/**", "!.env*", "!node_modules/.cache/**", "!node_modules/.vite/**"] }
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html"
     ],
-    "asarUnpack": ["node_modules/**", "admin-panel/node_modules/**"],
+    "extraResources": [
+      {
+        "from": "../scripts",
+        "to": "scripts"
+      },
+      {
+        "from": "../worker.js",
+        "to": "worker.js"
+      },
+      {
+        "from": "../wrangler.toml",
+        "to": "wrangler.toml"
+      },
+      {
+        "from": "../migrations",
+        "to": "migrations"
+      },
+      {
+        "from": "node_modules/blake3-wasm",
+        "to": "node_modules/blake3-wasm"
+      },
+      {
+        "from": "../admin-panel",
+        "to": "admin-panel",
+        "filter": [
+          "**",
+          "!dist/**",
+          "!.env*",
+          "!node_modules/.cache/**",
+          "!node_modules/.vite/**"
+        ]
+      }
+    ],
+    "asarUnpack": [
+      "node_modules/blake3-wasm/**",
+      "admin-panel/node_modules/**"
+    ],
     "win": {
       "target": "nsis",
       "icon": null,

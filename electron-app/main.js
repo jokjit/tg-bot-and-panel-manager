@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.1.21'
+const DEPLOY_TOOL_VERSION = 'v1.1.22'
 
 // paths
 function findRepoRoot() {
@@ -17,10 +17,6 @@ let _repoRoot, _scriptsDir, _adminPanelDir
 function getRepoRoot() { return _repoRoot || (_repoRoot = findRepoRoot()) }
 function getScriptsDir() { return _scriptsDir || (_scriptsDir = app.isPackaged ? path.join(process.resourcesPath, 'scripts') : path.join(__dirname, '..', 'scripts')) }
 function getAdminPanelDir() { return _adminPanelDir || (_adminPanelDir = app.isPackaged ? path.join(process.resourcesPath, 'admin-panel') : path.join(__dirname, '..', 'admin-panel')) }
-
-function getWranglerJs() {
-  return path.join(getScriptsDir(), 'wrangler-runner.cjs')
-}
 
 function safePathSegment(value) {
   return String(value || 'default').replace(/[^a-z0-9._-]+/gi, '_').slice(0, 80) || 'default'
@@ -123,8 +119,6 @@ function buildEnv(account) {
     ...process.env,
     ELECTRON_RUN_AS_NODE: '1',
     NODE: process.execPath,
-    // setup-d1.mjs expects this wrapper to normalize argv in Electron node mode
-    WRANGLER_JS: getWranglerJs(),
     NODE_PATH: app.isPackaged ? path.join(process.resourcesPath, 'node_modules') : path.join(__dirname, '..', 'electron-app', 'node_modules')
   }
   if (account) {
@@ -504,7 +498,7 @@ async function updateWorkerSecretsViaApi(env, configPath, secrets, onProgress) {
     onProgress?.(`Worker secret list warning: ${listed.reason || 'unknown'}`)
   }
 
-  onProgress?.(`Worker secrets updated via API: ${entries.map(([name]) => name).join(', ')}`)
+  onProgress?.(`Worker Secrets 已通过 Cloudflare API 更新：${entries.map(([name]) => name).join(', ')}`)
   return { ok: true, names: entries.map(([name]) => name) }
 }
 
@@ -532,7 +526,7 @@ async function ensureKvBindingViaApi(env, options = {}, onProgress) {
     throw new Error('KV initialization failed: missing_namespace_title_or_binding')
   }
 
-  onProgress?.('Initializing KV via Cloudflare API...')
+  onProgress?.('正在通过 Cloudflare API 初始化 KV...')
   let namespaces = await listKvNamespacesViaApi(env)
   let namespace = namespaces.find((item) => String(item.title || '') === namespaceTitle)
   if (!namespace?.id) {
@@ -558,8 +552,8 @@ async function ensureKvBindingViaApi(env, options = {}, onProgress) {
   }
 
   const targetPath = upsertKvBindingInLocalConfig(binding, namespaceId, env)
-  onProgress?.(`KV ready: ${namespaceTitle} (${namespaceId}) -> ${binding}`)
-  onProgress?.(`KV binding written: ${targetPath}`)
+  onProgress?.(`KV 已就绪：${namespaceTitle} (${namespaceId}) -> ${binding}`)
+  onProgress?.(`KV 绑定已写入账号配置：${targetPath}`)
   return { ok: true, namespaceTitle, binding, namespaceId, targetPath }
 }
 
@@ -598,7 +592,7 @@ function escapeSqlString(value) {
 async function applyD1MigrationsViaApi(env, databaseId, onProgress) {
   const migrationsPath = path.join(getRepoRoot(), 'migrations')
   if (!fs.existsSync(migrationsPath)) {
-    onProgress?.('D1 migrations skipped: migrations directory not found.')
+    onProgress?.('D1 迁移已跳过：未找到 migrations 目录。')
     return { ok: true, applied: [], skipped: true }
   }
 
@@ -606,7 +600,7 @@ async function applyD1MigrationsViaApi(env, databaseId, onProgress) {
     .filter((name) => /\.sql$/i.test(name))
     .sort((a, b) => a.localeCompare(b))
   if (migrationFiles.length === 0) {
-    onProgress?.('D1 migrations skipped: no SQL migration files.')
+    onProgress?.('D1 迁移已跳过：没有 SQL 迁移文件。')
     return { ok: true, applied: [] }
   }
 
@@ -642,11 +636,11 @@ async function applyD1MigrationsViaApi(env, databaseId, onProgress) {
       throw new Error(`D1 migration failed (${filename}): ${migrated.reason || 'unknown'}`)
     }
     appliedNow.push(filename)
-    onProgress?.(`D1 migration applied: ${filename}`)
+    onProgress?.(`D1 迁移已执行：${filename}`)
   }
 
   if (appliedNow.length === 0) {
-    onProgress?.('D1 migrations already up to date.')
+    onProgress?.('D1 迁移已是最新。')
   }
   return { ok: true, applied: appliedNow }
 }
@@ -659,7 +653,7 @@ async function ensureD1BindingViaApi(env, options = {}, onProgress) {
     throw new Error('D1 initialization failed: missing_database_name_or_binding')
   }
 
-  onProgress?.('Initializing D1 via Cloudflare API...')
+  onProgress?.('正在通过 Cloudflare API 初始化 D1...')
   let databases = await listD1DatabasesViaApi(env)
   let database = databases.find((item) => String(item.name || '') === databaseName)
   if (!getD1DatabaseId(database)) {
@@ -685,8 +679,8 @@ async function ensureD1BindingViaApi(env, options = {}, onProgress) {
   }
 
   const targetPath = upsertD1BindingInLocalConfig(binding, databaseName, databaseId, env)
-  onProgress?.(`D1 ready: ${databaseName} (${databaseId}) -> ${binding}`)
-  onProgress?.(`D1 binding written: ${targetPath}`)
+  onProgress?.(`D1 已就绪：${databaseName} (${databaseId}) -> ${binding}`)
+  onProgress?.(`D1 绑定已写入账号配置：${targetPath}`)
 
   if (!options.skipMigrate) {
     await applyD1MigrationsViaApi(env, databaseId, onProgress)
@@ -713,14 +707,14 @@ async function ensureWorkerCustomDomain(env, configPath, workerUrl, onProgress) 
 
   const primary = await putWorkerCustomDomain(env, workerName, hostname, zone.zoneId)
   if (primary.ok) {
-    onProgress?.(`Worker custom domain ensured: ${hostname} -> ${workerName}`)
+    onProgress?.(`Worker 自定义域名已绑定：${hostname} -> ${workerName}`)
     return { ok: true, hostname, workerName, zoneId: zone.zoneId, method: 'workers-domains' }
   }
 
-  onProgress?.(`Worker custom domain primary API failed (${primary.reason || 'unknown'}). Trying override fallback...`)
+  onProgress?.(`Worker 自定义域名主接口失败（${primary.reason || 'unknown'}），尝试覆盖绑定接口...`)
   const fallback = await putWorkerCustomDomainRecords(env, workerName, hostname, zone.zoneId)
   if (fallback.ok) {
-    onProgress?.(`Worker custom domain ensured by override fallback: ${hostname} -> ${workerName}`)
+    onProgress?.(`Worker 自定义域名已通过覆盖接口绑定：${hostname} -> ${workerName}`)
     return { ok: true, hostname, workerName, zoneId: zone.zoneId, method: 'domains-records' }
   }
 
@@ -858,7 +852,7 @@ async function verifyPagesDeployment(env, projectName, previousIds = new Set(), 
 
     if (attempt < delays.length) {
       const delayMs = delays[attempt]
-      options.onProgress?.(`Pages deployment list not ready (${projectName}): ${lastReason}. Retrying in ${Math.round(delayMs / 1000)}s...`)
+      options.onProgress?.(`Pages 部署列表暂未就绪（${projectName}）：${lastReason}。${Math.round(delayMs / 1000)} 秒后重试...`)
       await sleep(delayMs)
     }
   }
@@ -1124,27 +1118,27 @@ async function deployPagesViaDirectUpload(tempDist, projectName, branch, env, on
     throw new Error('manifest_empty')
   }
 
-  onProgress?.(`Pages direct upload: collected ${fileCount} files.`)
+  onProgress?.(`Pages 直传：已收集 ${fileCount} 个文件。`)
   const missingHashes = await withFreshUploadToken((token) => checkMissingPagesAssets(token, hashes))
   const missingSet = new Set(missingHashes.map(String))
   const missingFiles = files.filter((file) => missingSet.has(file.hash))
-  onProgress?.(`Pages direct upload: uploading ${missingFiles.length} missing files (${fileCount - missingFiles.length} cached).`)
+  onProgress?.(`Pages 直传：需要上传 ${missingFiles.length} 个缺失文件（${fileCount - missingFiles.length} 个已缓存）。`)
 
   const batches = buildPagesUploadBatches(missingFiles)
   let uploaded = 0
   for (const batch of batches) {
     await withFreshUploadToken((token) => uploadPagesAssetBatch(token, batch))
     uploaded += batch.length
-    onProgress?.(`Pages direct upload: uploaded ${uploaded}/${missingFiles.length} missing files.`)
+    onProgress?.(`Pages 直传：已上传 ${uploaded}/${missingFiles.length} 个缺失文件。`)
   }
 
   try {
     await withFreshUploadToken((token) => upsertPagesAssetHashes(token, hashes))
   } catch (error) {
-    onProgress?.(`Pages direct upload warning: hash cache update failed: ${error instanceof Error ? error.message : String(error)}`)
+    onProgress?.(`Pages 直传警告：Hash 缓存更新失败：${error instanceof Error ? error.message : String(error)}`)
   }
 
-  onProgress?.(`Pages direct upload: creating deployment with ${fileCount} files.`)
+  onProgress?.(`Pages 直传：正在用 ${fileCount} 个文件创建部署。`)
   const deployment = await createPagesDeploymentFromManifest(env, projectName, manifest, branch || 'main')
   return {
     ok: true,
@@ -1261,8 +1255,8 @@ async function uploadWorkerViaApi(env, configPath, onProgress) {
     throw new Error(`Worker 列表检查失败：${existing.reason || 'unknown'}`)
   }
   onProgress?.(existing.names.includes(workerName)
-    ? `Worker exists, uploading overwrite: ${workerName}`
-    : `Worker not found, creating by upload: ${workerName}`)
+    ? `Worker 已存在，正在覆盖上传：${workerName}`
+    : `Worker 不存在，正在创建并上传：${workerName}`)
 
   const workerPath = path.join(getRepoRoot(), 'worker.js')
   if (!fs.existsSync(workerPath)) {
@@ -1288,7 +1282,7 @@ async function uploadWorkerViaApi(env, configPath, onProgress) {
     throw new Error(`Worker API 上传失败：${buildCfErrorReason(json, response.status)}`)
   }
 
-  onProgress?.(`Worker API upload completed: ${workerName}`)
+  onProgress?.(`Worker API 上传完成：${workerName}`)
   return { ok: true, workerName }
 }
 
@@ -1385,13 +1379,13 @@ async function waitForWorkerHealth(rawUrl, onProgress, label = 'Worker custom do
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
     const health = await checkWorkerHealth(normalized)
     if (health.ok) {
-      onProgress?.(`${label} ready: ${health.url}`)
+      onProgress?.(`${label} 已就绪：${health.url}`)
       return health
     }
     lastReason = health.reason || 'unknown'
     if (attempt < delays.length) {
       const delayMs = delays[attempt]
-      onProgress?.(`${label} not ready yet (${lastReason}). Retrying in ${Math.round(delayMs / 1000)}s...`)
+      onProgress?.(`${label} 暂未就绪（${lastReason}）。${Math.round(delayMs / 1000)} 秒后重试...`)
       await sleep(delayMs)
     }
   }
@@ -1436,7 +1430,7 @@ async function waitForWorkerBotConfig(workerUrl, expectedAdminChatId, onProgress
       const adminChatId = String(status.adminChatId || '').trim()
       const chatIdReady = !expectedChatId || adminChatId === expectedChatId
       if (hasToken && chatIdReady) {
-        onProgress?.(`Worker bot config ready: hasToken=true, adminChatId=${adminChatId || 'set'}`)
+        onProgress?.(`Worker 机器人配置已生效：hasToken=true，adminChatId=${adminChatId || '已设置'}`)
         return { ok: true, status }
       }
       lastReason = `hasToken=${hasToken}; adminChatId=${adminChatId || 'missing'}`
@@ -1446,7 +1440,7 @@ async function waitForWorkerBotConfig(workerUrl, expectedAdminChatId, onProgress
 
     if (attempt < delays.length) {
       const delayMs = delays[attempt]
-      onProgress?.(`Worker bot config not ready (${lastReason}). Retrying in ${Math.round(delayMs / 1000)}s...`)
+      onProgress?.(`Worker 机器人配置暂未生效（${lastReason}）。${Math.round(delayMs / 1000)} 秒后重试...`)
       await sleep(delayMs)
     }
   }
@@ -1474,7 +1468,7 @@ async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress) {
       })
       const data = await response.json().catch(() => null)
       if (response.ok && data?.ok) {
-        onProgress?.(`Worker deployment bootstrap completed: ${data.webhookUrl || `${origin}/webhook`}`)
+        onProgress?.(`Worker 部署引导已完成：${data.webhookUrl || `${origin}/webhook`}`)
         return { ok: true, data }
       }
 
@@ -1484,7 +1478,7 @@ async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress) {
         data?.commandsError ||
         `bootstrap_http_${response.status}`
       if (response.ok && data?.passwordReady && data?.bootstrapNotifyError) {
-        onProgress?.(`Admin temporary password generated, but Telegram notification failed: ${data.bootstrapNotifyError}`)
+        onProgress?.(`后台临时密码已生成，但 Telegram 通知失败：${data.bootstrapNotifyError}`)
         return { ok: false, reason: data.bootstrapNotifyError, data }
       }
     } catch (error) {
@@ -1493,7 +1487,7 @@ async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress) {
 
     if (attempt < delays.length) {
       const delayMs = delays[attempt]
-      onProgress?.(`Worker deployment bootstrap not ready (${lastReason}). Retrying in ${Math.round(delayMs / 1000)}s...`)
+      onProgress?.(`Worker 部署引导暂未就绪（${lastReason}）。${Math.round(delayMs / 1000)} 秒后重试...`)
       await sleep(delayMs)
     }
   }
@@ -1525,7 +1519,7 @@ async function verifyWorkerDeployment(env, configPath, onProgress, options = {})
     if (health.ok) {
       return { ok: true, workerName, method: 'health', url: health.url }
     }
-    onProgress?.(`Worker health check skipped/failed (${candidate}): ${health.reason}`)
+    onProgress?.(`Worker 健康检查未通过（${candidate}）：${health.reason}`)
   }
 
   const delays = [1200, 2200, 4000, 7000]
@@ -1553,7 +1547,7 @@ async function verifyWorkerDeployment(env, configPath, onProgress, options = {})
     }
 
     const delayMs = delays[attempt]
-    onProgress?.(`Worker verification pending (${workerName}): ${lastReason}. Retrying in ${Math.round(delayMs / 1000)}s...`)
+    onProgress?.(`Worker 验证等待中（${workerName}）：${lastReason}。${Math.round(delayMs / 1000)} 秒后重试...`)
     await sleep(delayMs)
   }
 
@@ -1605,7 +1599,7 @@ function runScript(scriptName, args = [], env) {
 // actions
 async function runAction(action, params, env) {
   const send = (msg) => BrowserWindow.getAllWindows()[0]?.webContents.send('output', msg + '\n')
-  send(`Deploy tool version: ${DEPLOY_TOOL_VERSION}`)
+  send(`部署工具版本：${DEPLOY_TOOL_VERSION}`)
 
   switch (action) {
     case 'show-config': {
@@ -1636,14 +1630,14 @@ async function runAction(action, params, env) {
     case 'deploy-worker':
       {
         const runtimeUpdates = syncRuntimeUrlsToLocalConfig(params?.workerUrl || '', params?.panelUrl || '', env)
-        if (runtimeUpdates.length > 0) send(`Updated wrangler.local.toml runtime config: ${runtimeUpdates.join(', ')}`)
+        if (runtimeUpdates.length > 0) send(`已更新账号运行配置：${runtimeUpdates.join(', ')}`)
       }
-      send('Initializing KV and D1...')
+      send('正在初始化 KV 和 D1...')
       await ensureKvBindingViaApi(env, {}, send)
       await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
       {
         const runtimeUpdates = syncRuntimeUrlsToLocalConfig(params?.workerUrl || '', params?.panelUrl || '', env)
-        if (runtimeUpdates.length > 0) send(`Updated wrangler.local.toml runtime config: ${runtimeUpdates.join(', ')}`)
+        if (runtimeUpdates.length > 0) send(`已更新账号运行配置：${runtimeUpdates.join(', ')}`)
       }
       await runScript('merge-wrangler-config.mjs', [], env)
       const workerConfigPath = getPrivateWranglerPath(env)
@@ -1658,7 +1652,7 @@ async function runAction(action, params, env) {
         if (!check.ok) {
           throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
         }
-        send(`Worker verified: ${check.workerName}${check.method ? ` (${check.method})` : ''}`)
+        send(`Worker 已验证：${check.workerName}${check.method ? ` (${check.method})` : ''}`)
       }
       return
     case 'deploy-panel': {
@@ -1668,36 +1662,36 @@ async function runAction(action, params, env) {
       const viteBin = path.join(getAdminPanelDir(), 'node_modules', 'vite', 'bin', 'vite.js')
       const viteEnv = { ...env, ELECTRON_RUN_AS_NODE: '1', VITE_WORKER_BASE_URL: workerUrl }
       try { if (panelUrl) viteEnv.VITE_CANONICAL_HOST = new URL(panelUrl).host } catch {}
-      send('Building admin-panel...\n')
+      send('正在构建 admin-panel...\n')
       await runProc(process.execPath, [viteBin, 'build', '--outDir', tempDist], { env: viteEnv, cwd: getAdminPanelDir() })
-      send('Uploading to Cloudflare Pages...\n')
+      send('正在上传到 Cloudflare Pages...\n')
       const projectName = getPagesProjectName(env)
       const projectBeforeDeploy = await getPagesProject(env, projectName)
       if (!projectBeforeDeploy?.ok) {
         if (String(projectBeforeDeploy.reason || '').includes('8000007')) {
-          send(`Pages project not found, creating automatically: ${projectName}`)
+          send(`Pages 项目不存在，正在自动创建：${projectName}`)
           const created = await createPagesProject(env, projectName)
           if (!created?.ok) {
-            throw new Error(`Failed to create Pages project ${projectName}: ${created?.reason || 'unknown'}`)
+            throw new Error(`创建 Pages 项目失败 ${projectName}: ${created?.reason || 'unknown'}`)
           }
-          send(`Pages project created: ${projectName}`)
+          send(`Pages 项目已创建：${projectName}`)
         } else {
-          throw new Error(`Pages project precheck failed: ${projectBeforeDeploy.reason || 'unknown'}`)
+          throw new Error(`Pages 项目前置检查失败：${projectBeforeDeploy.reason || 'unknown'}`)
         }
       } else {
-        send(`Pages project exists, uploading overwrite: ${projectName}`)
+        send(`Pages 项目已存在，正在覆盖上传：${projectName}`)
       }
 
       const check = await getPagesProject(env, projectName)
       if (!check?.ok || !check.project) {
-        throw new Error(`Pages project verification failed: ${check?.reason || 'unknown'}`)
+        throw new Error(`Pages 项目验证失败：${check?.reason || 'unknown'}`)
       }
       const project = check.project
       const subdomain = String(project.subdomain || '').trim()
       if (subdomain) {
-        send(`Pages project verified: ${projectName} -> https://${subdomain}`)
+        send(`Pages 项目已验证：${projectName} -> https://${subdomain}`)
       } else {
-        send(`Pages project verified: ${projectName}`)
+        send(`Pages 项目已验证：${projectName}`)
       }
 
       const deployedPanelUrl = subdomain ? normalizeHttpUrl(`https://${subdomain}`) : ''
@@ -1716,14 +1710,14 @@ async function runAction(action, params, env) {
           ? { ...directCheck, method, url: directCheck.url || directDeployment.url || deployedPanelUrl, id: directCheck.id || directDeployment.id }
           : { ...directDeployment, url: directDeployment.url || deployedPanelUrl, warning: directCheck.reason || 'direct_upload_created_but_list_not_ready' }
       } catch (error) {
-        throw new Error(`Pages direct upload failed: ${error instanceof Error ? error.message : String(error)}`)
+        throw new Error(`Pages 直传失败：${error instanceof Error ? error.message : String(error)}`)
       }
       if (!deployment.ok) {
-        throw new Error(`Pages deployment verification failed: ${deployment.reason || 'unknown'}`)
+        throw new Error(`Pages 部署验证失败：${deployment.reason || 'unknown'}`)
       }
-      send(`Pages deployment verified: ${deployment.id || projectName}${deployment.url ? ` -> ${deployment.url}` : ''}${deployment.method ? ` (${deployment.method})` : ''}`)
+      send(`Pages 部署已验证：${deployment.id || projectName}${deployment.url ? ` -> ${deployment.url}` : ''}${deployment.method ? ` (${deployment.method})` : ''}`)
       if (deployment.warning) {
-        send(`Pages deployment list warning: ${deployment.warning}`)
+        send(`Pages 部署列表警告：${deployment.warning}`)
       }
 
       const effectivePanelUrl = panelUrl || deployedPanelUrl || deployment.url
@@ -1731,7 +1725,7 @@ async function runAction(action, params, env) {
       if (workerUrl || effectivePanelUrl) {
         const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env)
         if (updatedVars.length > 0) {
-          send(`Updated wrangler.local.toml vars: ${updatedVars.join(', ')}`)
+          send(`已更新账号变量配置：${updatedVars.join(', ')}`)
           await runScript('merge-wrangler-config.mjs', [], env)
         }
       }
@@ -1743,7 +1737,7 @@ async function runAction(action, params, env) {
 
       try { fs.rmSync(tempDist, { recursive: true }) } catch {}
       if (panelEntryUrl && panelEntryUrl !== effectivePanelUrl) {
-        send(`Panel entry URL: ${panelEntryUrl}`)
+        send(`面板入口地址：${panelEntryUrl}`)
       }
       return { projectName, panelUrl: effectivePanelUrl, panelEntryUrl, subdomain }
     }
@@ -1762,26 +1756,26 @@ async function runAction(action, params, env) {
         ADMIN_CHAT_ID: adminChatId,
         DEPLOY_BOOTSTRAP_TOKEN: deployBootstrapToken,
       }
-      send('Step 1/4: Merging config...')
+      send('步骤 1/4：合并配置...')
       await runScript('merge-wrangler-config.mjs', [], env)
 
       const updatedVars = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
       if (updatedVars.length > 0) {
-        send(`Updated wrangler.local.toml runtime config: ${updatedVars.join(', ')}`)
+        send(`已更新账号运行配置：${updatedVars.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
       }
 
-      send('Step 2/4: Initializing KV and D1...')
+      send('步骤 2/4：初始化 KV 和 D1...')
       await ensureKvBindingViaApi(env, {}, send)
       await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
       {
         const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
         if (postInitUpdates.length > 0) {
-          send(`Updated wrangler.local.toml runtime config: ${postInitUpdates.join(', ')}`)
+          send(`已更新账号运行配置：${postInitUpdates.join(', ')}`)
         }
       }
       await runScript('merge-wrangler-config.mjs', [], env)
-      send('Step 3/4: Deploying Worker...')
+      send('步骤 3/4：部署 Worker...')
       const workerConfigPath = getPrivateWranglerPath(env)
       validatePrivateWranglerConfig(workerConfigPath)
       await uploadWorkerViaApi(env, workerConfigPath, send)
@@ -1794,7 +1788,7 @@ async function runAction(action, params, env) {
         if (!check.ok) {
           throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
         }
-        send(`Worker verified: ${check.workerName}${check.method ? ` (${check.method})` : ''}`)
+        send(`Worker 已验证：${check.workerName}${check.method ? ` (${check.method})` : ''}`)
       }
       if (!effectiveWorkerUrl) {
         try {
@@ -1807,25 +1801,25 @@ async function runAction(action, params, env) {
         if (effectiveWorkerUrl) {
           const configReady = await waitForWorkerBotConfig(effectiveWorkerUrl, adminChatId, send)
           if (!configReady.ok) {
-            send(`Worker bot config warning: ${configReady.reason || 'unknown'}`)
+            send(`Worker 机器人配置警告：${configReady.reason || 'unknown'}`)
           }
         } else {
-          send('Worker bot config warning: missing worker URL, skip runtime check.')
+          send('Worker 机器人配置警告：缺少 Worker URL，已跳过运行时检查。')
         }
       }
-      send('Step 4/4: Deploying Pages panel...')
+      send('步骤 4/4：部署 Pages 面板...')
       const panelResult = await runAction('deploy-panel', { workerUrl: effectiveWorkerUrl, panelUrl: effectivePanelUrl }, env)
       if (panelResult?.panelUrl) {
-        send(`Pages panel URL: ${panelResult.panelUrl}`)
+        send(`Pages 面板地址：${panelResult.panelUrl}`)
       }
       if (panelResult?.panelEntryUrl) {
-        send(`Panel entry URL: ${panelResult.panelEntryUrl}`)
+        send(`面板入口地址：${panelResult.panelEntryUrl}`)
       }
       const finalPanelUrl = panelResult?.panelUrl || effectivePanelUrl
       const finalPanelEntryUrl = panelResult?.panelEntryUrl || buildAdminPanelEntryUrl(effectiveWorkerUrl) || finalPanelUrl
       const finalRuntimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, finalPanelUrl, env)
       if (finalRuntimeUpdates.length > 0) {
-        send(`Updating Worker runtime vars after Pages deployment: ${finalRuntimeUpdates.join(', ')}`)
+        send(`Pages 部署后正在更新 Worker 运行变量：${finalRuntimeUpdates.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
         await uploadWorkerViaApi(env, workerConfigPath, send)
         await ensureWorkerCustomDomain(env, workerConfigPath, effectiveWorkerUrl, send)
@@ -1836,26 +1830,26 @@ async function runAction(action, params, env) {
         if (!finalCheck.ok) {
           throw new Error(`Worker final runtime URL update failed (${finalCheck.workerName || 'unknown'}): ${finalCheck.reason}`)
         }
-        send(`Worker runtime URLs updated: ${finalCheck.workerName}`)
+        send(`Worker 运行地址已更新：${finalCheck.workerName}`)
         if (botToken || adminChatId) {
           await updateWorkerSecretsViaApi(env, workerConfigPath, workerSecrets, send)
           if (effectiveWorkerUrl) {
             const configReady = await waitForWorkerBotConfig(effectiveWorkerUrl, adminChatId, send)
             if (!configReady.ok) {
-              send(`Worker bot config warning: ${configReady.reason || 'unknown'}`)
+              send(`Worker 机器人配置警告：${configReady.reason || 'unknown'}`)
             }
           } else {
-            send('Worker bot config warning: missing worker URL, skip runtime check.')
+            send('Worker 机器人配置警告：缺少 Worker URL，已跳过运行时检查。')
           }
         }
       }
       if (effectiveWorkerUrl) {
-        await waitForWorkerHealth(effectiveWorkerUrl, send, 'Worker entry')
+        await waitForWorkerHealth(effectiveWorkerUrl, send, 'Worker 入口')
       }
       if (botToken && effectiveWorkerUrl) {
         const bootstrap = await triggerDeployBootstrap(effectiveWorkerUrl, deployBootstrapToken, send)
         if (!bootstrap.ok) {
-          send(`Worker deployment bootstrap warning: ${bootstrap.reason || 'unknown'}`)
+          send(`Worker 部署引导警告：${bootstrap.reason || 'unknown'}`)
         }
       }
       saveActiveDeployPrefsPatch({
@@ -1866,7 +1860,7 @@ async function runAction(action, params, env) {
         panelEntryUrl: finalPanelEntryUrl || undefined,
         openPanelInClient: Boolean(params?.openPanelInClient),
       })
-      send('\nFirst deployment completed.')
+      send('\n首次部署完成。')
       return { panelUrl: finalPanelUrl, panelEntryUrl: finalPanelEntryUrl, workerUrl: effectiveWorkerUrl }
     }
   }

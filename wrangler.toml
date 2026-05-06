@@ -3,19 +3,17 @@ main = "worker.js"
 compatibility_date = "2026-04-16"
 workers_dev = true
 
-# 可选：完成基础部署后，再按需绑定自定义域名。
-# routes = [
-#   { pattern = "tg.example.com/*", zone_name = "example.com" }
-# ]
+# 这是部署配置模板。桌面部署工具会读取并合并本文件，然后通过 Cloudflare API 上传 Worker。
+# 文件名保留为 wrangler.toml 是为了兼容 Cloudflare Worker 配置格式，不代表会调用 Wrangler CLI。
 
 # BOT_KV 用于面板密码、用户资料、话题映射、黑白名单和验证状态。
-# 桌面部署工具会自动创建/复用 KV，并把真实 namespace id 写入 wrangler.local.toml。
-# 手动部署时请取消下面注释并填入真实 id，或者先运行部署工具完成回填。
+# 部署工具会按当前 Cloudflare Account 自动创建或复用 KV，并把真实 namespace id 写入账号独立配置。
 # [[kv_namespaces]]
 # binding = "BOT_KV"
 # id = "<YOUR_KV_NAMESPACE_ID>"
 
-# 可选：用于保存聊天历史。建议通过 `npm run setup:d1` 初始化并自动回填。
+# DB 用于保存聊天历史、会话索引和后续检索能力。
+# 部署工具会按当前 Cloudflare Account 自动创建或复用 D1，并执行 migrations/ 中的 SQL 迁移。
 # [[d1_databases]]
 # binding = "DB"
 # database_name = "tg-bot-history"
