@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.1.15'
+const DEPLOY_TOOL_VERSION = 'v1.1.16'
 
 // paths
 function findRepoRoot() {
@@ -347,25 +347,65 @@ async function listPagesDeployments(env, projectName) {
   return { ok: true, deployments: Array.isArray(json.result) ? json.result : [] }
 }
 
-async function verifyPagesDeployment(env, projectName, previousIds = new Set()) {
-  const list = await listPagesDeployments(env, projectName)
-  if (!list.ok) return { ok: false, reason: list.reason || 'deployment_list_failed' }
-  const latest = list.deployments.find((item) => !previousIds.has(String(item.id || ''))) || list.deployments[0]
-  if (!latest) return { ok: false, reason: 'no_pages_deployments_found' }
-  if (previousIds.size > 0 && previousIds.has(String(latest.id || ''))) {
-    return { ok: false, reason: 'no_new_pages_deployment_found' }
+function extractPagesDeployUrls(output) {
+  const urls = [...String(output || '').matchAll(/https?:\/\/[^\s"'<>]+/g)]
+    .map((match) => match[0].replace(/[),.;]+$/, ''))
+    .filter((url) => /\.pages\.dev\b/i.test(url))
+  return [...new Set(urls.map((url) => normalizeHttpUrl(url)).filter(Boolean))]
+}
+
+async function verifyPagesDeployment(env, projectName, previousIds = new Set(), options = {}) {
+  const outputUrls = extractPagesDeployUrls(options.deployOutput || '')
+  const fallbackUrl = normalizeHttpUrl(outputUrls[0] || options.projectUrl || '')
+  const delays = [1000, 2500, 5000, 8000, 12000]
+  let lastReason = 'unknown'
+
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    const list = await listPagesDeployments(env, projectName)
+    if (list.ok) {
+      const latest = list.deployments.find((item) => !previousIds.has(String(item.id || ''))) || list.deployments[0]
+      if (latest) {
+        const latestId = String(latest.id || '')
+        const stage = latest.latest_stage || {}
+        if (stage.name === 'deploy' && stage.status === 'failure') {
+          return { ok: false, reason: `latest_deployment_failed:${latestId || 'unknown'}` }
+        }
+        if (previousIds.size === 0 || !previousIds.has(latestId)) {
+          return {
+            ok: true,
+            id: latestId,
+            url: normalizeHttpUrl(latest.url || '') || fallbackUrl,
+            environment: latest.environment || '',
+            stage: stage.status || '',
+            method: 'deployments-list',
+          }
+        }
+        lastReason = `no_new_pages_deployment_found; latest=${latestId || 'unknown'}`
+      } else {
+        lastReason = 'no_pages_deployments_found'
+      }
+    } else {
+      lastReason = `deployment_list_failed:${list.reason || 'unknown'}`
+    }
+
+    if (attempt < delays.length) {
+      const delayMs = delays[attempt]
+      options.onProgress?.(`Pages deployment list not ready (${projectName}): ${lastReason}. Retrying in ${Math.round(delayMs / 1000)}s...`)
+      await sleep(delayMs)
+    }
   }
-  const stage = latest.latest_stage || {}
-  if (stage.name === 'deploy' && stage.status === 'failure') {
-    return { ok: false, reason: `latest_deployment_failed:${latest.id || 'unknown'}` }
+
+  if (fallbackUrl) {
+    return {
+      ok: true,
+      id: 'verified-by-wrangler-output',
+      url: fallbackUrl,
+      method: 'wrangler-output',
+      warning: lastReason,
+    }
   }
-  return {
-    ok: true,
-    id: latest.id || '',
-    url: normalizeHttpUrl(latest.url || ''),
-    environment: latest.environment || '',
-    stage: stage.status || '',
-  }
+
+  return { ok: false, reason: lastReason }
 }
 
 function getWorkerNameFromConfig(configPath) {
@@ -815,13 +855,7 @@ async function runAction(action, params, env) {
       const beforeDeployments = await listPagesDeployments(env, projectName)
       const beforeDeploymentIds = new Set((beforeDeployments.deployments || []).map((item) => String(item.id || '')).filter(Boolean))
       const deployArgs = ['pages', 'deploy', tempDist, '--project-name', projectName, '--branch', params?.branch || 'main']
-      await runWrangler(deployArgs, { ...env, ELECTRON_RUN_AS_NODE: '1' })
-
-      const deployment = await verifyPagesDeployment(env, projectName, beforeDeploymentIds)
-      if (!deployment.ok) {
-        throw new Error(`Pages upload command finished but deployment verification failed: ${deployment.reason || 'unknown'}`)
-      }
-      send(`Pages deployment verified: ${deployment.id || projectName}${deployment.url ? ` -> ${deployment.url}` : ''}`)
+      const pagesDeploy = await runWrangler(deployArgs, { ...env, ELECTRON_RUN_AS_NODE: '1' })
 
       const check = await getPagesProject(env, projectName)
       if (!check?.ok || !check.project) {
@@ -836,6 +870,19 @@ async function runAction(action, params, env) {
       }
 
       const deployedPanelUrl = subdomain ? normalizeHttpUrl(`https://${subdomain}`) : ''
+      const deployment = await verifyPagesDeployment(env, projectName, beforeDeploymentIds, {
+        deployOutput: pagesDeploy?.output || '',
+        projectUrl: deployedPanelUrl,
+        onProgress: send,
+      })
+      if (!deployment.ok) {
+        throw new Error(`Pages upload command finished but deployment verification failed: ${deployment.reason || 'unknown'}`)
+      }
+      send(`Pages deployment verified: ${deployment.id || projectName}${deployment.url ? ` -> ${deployment.url}` : ''}${deployment.method ? ` (${deployment.method})` : ''}`)
+      if (deployment.warning) {
+        send(`Pages deployment list warning: ${deployment.warning}`)
+      }
+
       const effectivePanelUrl = panelUrl || deployedPanelUrl || deployment.url
       if (workerUrl || effectivePanelUrl) {
         const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env)
