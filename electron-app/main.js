@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.1.16'
+const DEPLOY_TOOL_VERSION = 'v1.1.17'
 
 // paths
 function findRepoRoot() {
@@ -330,6 +330,47 @@ async function createPagesProject(env, projectName) {
   return { ok: true, project: json.result || null }
 }
 
+async function getPagesUploadToken(env, projectName) {
+  const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
+  if (!token || !accountId || !projectName) {
+    throw new Error('missing_token_or_account_or_project')
+  }
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects/${projectName}/upload-token`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const json = await response.json().catch(() => null)
+  if (!json?.success || !json.result?.jwt) {
+    throw new Error(buildCfErrorReason(json, response.status))
+  }
+  return json.result.jwt
+}
+
+async function createPagesDeploymentFromManifest(env, projectName, manifest, branch = 'main') {
+  const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
+  if (!token || !accountId || !projectName) {
+    throw new Error('missing_token_or_account_or_project')
+  }
+
+  const form = new FormData()
+  form.append('manifest', JSON.stringify(manifest || {}))
+  form.append('branch', branch || 'main')
+  form.append('commit_dirty', 'true')
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects/${projectName}/deployments`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  })
+  const json = await response.json().catch(() => null)
+  if (!json?.success) {
+    throw new Error(buildCfErrorReason(json, response.status))
+  }
+  return json.result || {}
+}
+
 async function listPagesDeployments(env, projectName) {
   const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
   const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
@@ -406,6 +447,39 @@ async function verifyPagesDeployment(env, projectName, previousIds = new Set(), 
   }
 
   return { ok: false, reason: lastReason }
+}
+
+async function deployPagesViaDirectUpload(tempDist, projectName, branch, env, onProgress) {
+  const uploadToken = await getPagesUploadToken(env, projectName)
+  const manifestPath = path.join(os.tmpdir(), `tg-bot-pages-manifest-${Date.now()}.json`)
+  try {
+    onProgress?.('Pages direct upload fallback: uploading assets...')
+    await runWrangler(['pages', 'project', 'upload', tempDist, '--output-manifest-path', manifestPath], {
+      ...env,
+      ELECTRON_RUN_AS_NODE: '1',
+      CF_PAGES_UPLOAD_JWT: uploadToken,
+    })
+
+    if (!fs.existsSync(manifestPath)) {
+      throw new Error(`manifest_not_created:${manifestPath}`)
+    }
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    const fileCount = Object.keys(manifest || {}).length
+    if (fileCount === 0) {
+      throw new Error('manifest_empty')
+    }
+
+    onProgress?.(`Pages direct upload fallback: creating deployment with ${fileCount} files...`)
+    const deployment = await createPagesDeploymentFromManifest(env, projectName, manifest, branch || 'main')
+    return {
+      ok: true,
+      id: String(deployment.id || ''),
+      url: normalizeHttpUrl(deployment.url || ''),
+      method: 'direct-upload',
+    }
+  } finally {
+    try { fs.rmSync(manifestPath, { force: true }) } catch {}
+  }
 }
 
 function getWorkerNameFromConfig(configPath) {
@@ -870,11 +944,27 @@ async function runAction(action, params, env) {
       }
 
       const deployedPanelUrl = subdomain ? normalizeHttpUrl(`https://${subdomain}`) : ''
-      const deployment = await verifyPagesDeployment(env, projectName, beforeDeploymentIds, {
+      let deployment = await verifyPagesDeployment(env, projectName, beforeDeploymentIds, {
         deployOutput: pagesDeploy?.output || '',
         projectUrl: deployedPanelUrl,
         onProgress: send,
       })
+      if (deployment.warning && String(deployment.warning).includes('no_pages_deployments_found')) {
+        send(`Pages deployment list is empty after Wrangler deploy; using direct upload fallback.`)
+        try {
+          const directDeployment = await deployPagesViaDirectUpload(tempDist, projectName, params?.branch || 'main', env, send)
+          const directCheck = await verifyPagesDeployment(env, projectName, beforeDeploymentIds, {
+            deployOutput: directDeployment.url || '',
+            projectUrl: directDeployment.url || deployedPanelUrl,
+            onProgress: send,
+          })
+          deployment = directCheck.ok
+            ? { ...directCheck, method: directCheck.method || directDeployment.method, url: directCheck.url || directDeployment.url, id: directCheck.id || directDeployment.id }
+            : { ...directDeployment, warning: directCheck.reason || 'direct_upload_created_but_list_not_ready' }
+        } catch (error) {
+          throw new Error(`Pages direct upload fallback failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       if (!deployment.ok) {
         throw new Error(`Pages upload command finished but deployment verification failed: ${deployment.reason || 'unknown'}`)
       }
