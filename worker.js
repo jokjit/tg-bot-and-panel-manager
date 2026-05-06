@@ -445,14 +445,25 @@ async function handleUserMessage(message, env, adminChatId) {
   const sender = message.from || {};
   const topicModeEnabled = isTopicModeEnabled(env);
   const profileLine = formatUserProfile(sender, message.chat);
-  const topicRecord = topicModeEnabled ? await ensureUserTopic(env, message, adminChatId) : null;
+  let topicRecord = null;
+  let topicError = '';
+  if (topicModeEnabled) {
+    try {
+      topicRecord = await ensureUserTopic(env, message, adminChatId);
+    } catch (error) {
+      topicError = formatErrorMessage(error);
+    }
+  }
   const messageThreadId = topicRecord?.threadId;
+  const topicModeActive = Boolean(messageThreadId);
   const metaText = [
     '📩 新的用户消息',
     `#UID:${message.chat.id}`,
     profileLine,
-    topicModeEnabled
+    topicModeActive
       ? '当前默认已启用话题模式：请在该用户专属话题中直接回复，也可使用下方按钮操作。'
+      : topicModeEnabled && topicError
+        ? `话题模式创建失败，已自动退回普通回复链模式。\n错误：${topicError}`
       : '当前为普通回复链模式：回复这条提示消息，或使用 /reply 用户ID 内容，即可回消息。',
     '建议使用按钮查看资料、拉黑/解封，降低回复错人的风险。',
   ]

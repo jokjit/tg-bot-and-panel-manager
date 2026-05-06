@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.1.22'
+const DEPLOY_TOOL_VERSION = 'v1.2.0'
 
 // paths
 function findRepoRoot() {
@@ -276,10 +276,10 @@ function upsertVarsBlock(content, updates) {
   }
 }
 
-function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl, env = {}) {
+function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl, env = {}, extraUpdates = {}) {
   const localPath = ensureLocalWranglerFile(env)
 
-  const updates = {}
+  const updates = { ...extraUpdates }
   const normalizedWorker = normalizeHttpUrl(workerUrl)
   const normalizedPanel = normalizeHttpUrl(panelUrl)
   if (normalizedWorker) updates.PUBLIC_BASE_URL = normalizedWorker
@@ -1759,7 +1759,7 @@ async function runAction(action, params, env) {
       send('步骤 1/4：合并配置...')
       await runScript('merge-wrangler-config.mjs', [], env)
 
-      const updatedVars = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+      const updatedVars = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, { TOPIC_MODE: 'true' })
       if (updatedVars.length > 0) {
         send(`已更新账号运行配置：${updatedVars.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)

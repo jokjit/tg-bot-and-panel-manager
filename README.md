@@ -59,7 +59,7 @@ npm run build
 |---|---|---|
 | `BOT_TOKEN` | 是 | Telegram Bot Token |
 | `ADMIN_CHAT_ID` | 是 | 管理员 Chat ID 或超级群 ID |
-| `TOPIC_MODE` | 否 | `true` 启用话题模式 |
+| `TOPIC_MODE` | 否 | 默认 `true`，启用管理员群话题模式 |
 | `USER_VERIFICATION` | 否 | `true` 启用首次验证 |
 | `WEBHOOK_SECRET` | 建议 | Telegram Webhook 安全密钥 |
 | `ADMIN_API_KEY` | 建议 | 后台 API 访问密钥 |
@@ -71,6 +71,12 @@ npm run build
 部署完成后，Worker 会通过 Telegram API 设置 Webhook，并向 `ADMIN_CHAT_ID` 发送后台临时密码。临时密码 1 小时有效。
 
 使用临时密码登录 `<worker_url>/admin` 后，系统会引导设置永久密码。若未收到临时密码，可在管理员 Telegram 会话中发送 `/panelpass` 重发。
+
+## 话题模式
+
+首次部署默认启用话题模式。`ADMIN_CHAT_ID` 建议填写已开启话题功能的 Telegram 超级群 ID，并确保机器人已加入该群且具备创建/管理话题权限。
+
+如果只想让机器人私聊管理员个人账号，可以在后台设置里关闭 `TOPIC_MODE` 后重新部署 Worker。
 
 ## 本地开发
 

@@ -21,7 +21,7 @@ workers_dev = true
 
 [vars]
 WEBHOOK_PATH = "/webhook"
-TOPIC_MODE = "false"
+TOPIC_MODE = "true"
 USER_VERIFICATION = "true"
 WELCOME_TEXT = "你好，欢迎使用私聊中转机器人。"
 BLOCKED_TEXT = "你已被管理员限制联系，如有需要请稍后再试。"

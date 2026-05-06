@@ -357,6 +357,11 @@ body[data-theme="dark"] {
   border-color: var(--accent);
   background: var(--surface);
 }
+.field input[readonly] {
+  cursor: default;
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--surface) 78%, var(--bg));
+}
 .field-inline {
   display: flex;
   align-items: center;
@@ -488,7 +493,7 @@ body[data-theme="dark"] {
       </div>
       <div style="margin-top:10px;">
         <label id="w-panel-url-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Panel URL</label>
-        <input id="w-panel-url" placeholder="Leave blank to use returned pages.dev URL" />
+        <input id="w-panel-url" placeholder="Cloudflare Pages default URL" readonly />
       </div>
     </details>
 
@@ -531,6 +536,7 @@ let repoRootPath = ""
 
 const UI_LOCALE_KEY = "tg_bot_ui_locale"
 const UI_THEME_KEY = "tg_bot_ui_theme"
+const DEFAULT_PAGES_PANEL_URL = "https://tg-admin-panel.pages.dev"
 
 const i18n = {
   zh: {
@@ -576,8 +582,8 @@ const i18n = {
     w_admin_ph: "管理员用户 ID 或群组 ID",
     wizard_advanced: "高级选项（可选）",
     w_worker_label: "Worker 地址（Webhook / 面板入口）",
-    w_panel_label: "Pages 面板地址（/admin 跳转目标）",
-    w_panel_ph: "留空则使用默认 pages.dev，不需要绑定 Pages 自定义域",
+    w_panel_label: "Pages 面板地址（只读，/admin 跳转目标）",
+    w_panel_ph: "默认使用 Cloudflare 分配的 pages.dev 地址",
     w_open_panel: "部署完成后在客户端打开面板",
     start_deploy: "开始部署",
     error_prefix: "错误",
@@ -640,8 +646,8 @@ const i18n = {
     w_admin_ph: "Admin user ID or group ID",
     wizard_advanced: "Advanced (optional)",
     w_worker_label: "Worker URL (webhook / panel entry)",
-    w_panel_label: "Pages panel URL (/admin redirect target)",
-    w_panel_ph: "Leave blank to use default pages.dev; no Pages custom domain needed",
+    w_panel_label: "Pages panel URL (read-only /admin target)",
+    w_panel_ph: "Use the default Cloudflare pages.dev URL",
     w_open_panel: "Open panel in app after deploy",
     start_deploy: "Start Deploy",
     error_prefix: "Error",
@@ -731,6 +737,7 @@ function applyLocale() {
   document.getElementById("w-bot-token").placeholder = t("w_bot_token_ph")
   document.getElementById("w-admin-chat-id").placeholder = t("w_admin_ph")
   document.getElementById("w-panel-url").placeholder = t("w_panel_ph")
+  document.getElementById("w-panel-url").value = wizardPanelUrl.value || DEFAULT_PAGES_PANEL_URL
 
   langToggleBtn.textContent = t("language_toggle")
   themeToggleBtn.textContent = currentTheme === "dark" ? t("theme_toggle_light") : t("theme_toggle_dark")
@@ -792,7 +799,7 @@ function getSavedDeployParams() {
   const prefs = currentActiveAccount?.deployPrefs || {}
   return {
     workerUrl: String(prefs.workerUrl || "").trim(),
-    panelUrl: String(prefs.panelUrl || "").trim(),
+    panelUrl: DEFAULT_PAGES_PANEL_URL,
     panelEntryUrl: String(prefs.panelEntryUrl || "").trim(),
   }
 }
@@ -802,7 +809,7 @@ function applyWizardPrefsFromActiveAccount() {
   document.getElementById("w-bot-token").value = prefs.botToken || ""
   document.getElementById("w-admin-chat-id").value = prefs.adminChatId || ""
   wizardWorkerUrl.value = prefs.workerUrl || ""
-  wizardPanelUrl.value = prefs.panelUrl || ""
+  wizardPanelUrl.value = DEFAULT_PAGES_PANEL_URL
   wizardOpenPanelInClient.checked = Boolean(prefs.openPanelInClient ?? prefs.useBuiltinPanel)
 }
 
@@ -811,7 +818,7 @@ function getWizardParams() {
     botToken: document.getElementById("w-bot-token").value.trim(),
     adminChatId: document.getElementById("w-admin-chat-id").value.trim(),
     workerUrl: wizardWorkerUrl.value.trim(),
-    panelUrl: wizardPanelUrl.value.trim(),
+    panelUrl: DEFAULT_PAGES_PANEL_URL,
     openPanelInClient: Boolean(wizardOpenPanelInClient.checked),
   }
 }
