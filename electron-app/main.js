@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.1.20'
+const DEPLOY_TOOL_VERSION = 'v1.1.21'
 
 // paths
 function findRepoRoot() {
@@ -204,6 +204,42 @@ function getWorkerCustomDomainHost(workerUrl) {
 
 function stripManagedWorkerRouteBlock(content) {
   return String(content || '').replace(/\n?# TG_BOT_WORKER_ROUTE_START[\s\S]*?# TG_BOT_WORKER_ROUTE_END\n?/m, '\n')
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function upsertTomlBindingBlock(content, tableName, binding, block) {
+  const current = String(content || '')
+  const blockPattern = new RegExp(`\\[\\[${escapeRegExp(tableName)}\\]\\][\\s\\S]*?(?=\\n\\[\\[|\\n\\[|$)`, 'g')
+  const matches = [...current.matchAll(blockPattern)]
+  for (const match of matches) {
+    if (new RegExp(`^[ \\t]*binding[ \\t]*=[ \\t]*"${escapeRegExp(binding)}"[ \\t]*$`, 'm').test(match[0])) {
+      return current.replace(match[0], block)
+    }
+  }
+
+  const prefix = current.replace(/\s+$/, '')
+  return prefix ? `${prefix}\n\n${block}\n` : `${block}\n`
+}
+
+function upsertKvBindingInLocalConfig(binding, namespaceId, env = {}) {
+  const localPath = ensureLocalWranglerFile(env)
+  const current = fs.readFileSync(localPath, 'utf8')
+  const block = `[[kv_namespaces]]\nbinding = "${binding}"\nid = "${namespaceId}"`
+  const next = upsertTomlBindingBlock(current, 'kv_namespaces', binding, block)
+  if (next !== current) fs.writeFileSync(localPath, next.replace(/\s+$/, '') + '\n', 'utf8')
+  return localPath
+}
+
+function upsertD1BindingInLocalConfig(binding, databaseName, databaseId, env = {}) {
+  const localPath = ensureLocalWranglerFile(env)
+  const current = fs.readFileSync(localPath, 'utf8')
+  const block = `[[d1_databases]]\nbinding = "${binding}"\ndatabase_name = "${databaseName}"\ndatabase_id = "${databaseId}"`
+  const next = upsertTomlBindingBlock(current, 'd1_databases', binding, block)
+  if (next !== current) fs.writeFileSync(localPath, next.replace(/\s+$/, '') + '\n', 'utf8')
+  return localPath
 }
 
 function upsertVarsBlock(content, updates) {
@@ -416,6 +452,247 @@ async function putWorkerCustomDomainRecords(env, workerName, hostname, zoneId) {
       }],
     },
   })
+}
+
+async function putWorkerSecretViaApi(env, workerName, name, value) {
+  const { accountId } = getCfTokenAndAccount(env)
+  return cfApiRequest(env, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/secrets`, {
+    method: 'PUT',
+    body: {
+      name,
+      text: String(value || ''),
+      type: 'secret_text',
+    },
+  })
+}
+
+async function listWorkerSecretsViaApi(env, workerName) {
+  const { accountId } = getCfTokenAndAccount(env)
+  return cfApiRequest(env, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/secrets`)
+}
+
+async function updateWorkerSecretsViaApi(env, configPath, secrets, onProgress) {
+  const workerName = getWorkerNameFromConfig(configPath)
+  if (!workerName) {
+    throw new Error('Worker secret update failed: missing_worker_name_in_config')
+  }
+
+  const entries = Object.entries(secrets || {})
+    .map(([name, value]) => [String(name || '').trim(), String(value || '').trim()])
+    .filter(([name, value]) => name && value)
+  if (entries.length === 0) {
+    return { ok: true, names: [] }
+  }
+
+  for (const [name, value] of entries) {
+    const updated = await putWorkerSecretViaApi(env, workerName, name, value)
+    if (!updated.ok) {
+      throw new Error(`Worker secret update failed (${name}): ${updated.reason || 'unknown'}`)
+    }
+  }
+
+  const listed = await listWorkerSecretsViaApi(env, workerName)
+  if (listed.ok) {
+    const visibleNames = (Array.isArray(listed.result) ? listed.result : [])
+      .map((item) => String(item.name || item.binding || item.id || '').trim())
+      .filter(Boolean)
+    const missing = entries.map(([name]) => name).filter((name) => !visibleNames.includes(name))
+    if (missing.length > 0) {
+      throw new Error(`Worker secret verification failed: missing ${missing.join(', ')}`)
+    }
+  } else {
+    onProgress?.(`Worker secret list warning: ${listed.reason || 'unknown'}`)
+  }
+
+  onProgress?.(`Worker secrets updated via API: ${entries.map(([name]) => name).join(', ')}`)
+  return { ok: true, names: entries.map(([name]) => name) }
+}
+
+async function listKvNamespacesViaApi(env) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const namespaces = []
+  let totalPages = 1
+  for (let page = 1; page <= totalPages && page <= 10; page += 1) {
+    const query = new URLSearchParams({ page: String(page), per_page: '100' })
+    const response = await cfApiRequest(env, `/accounts/${accountId}/storage/kv/namespaces?${query.toString()}`)
+    if (!response.ok) {
+      throw new Error(`KV namespace list failed: ${response.reason || 'unknown'}`)
+    }
+    namespaces.push(...(Array.isArray(response.result) ? response.result : []))
+    totalPages = Number(response.resultInfo?.total_pages || 1)
+  }
+  return namespaces
+}
+
+async function ensureKvBindingViaApi(env, options = {}, onProgress) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const namespaceTitle = String(options.namespaceTitle || env.KV_NAMESPACE_TITLE || env.KV_NAMESPACE_NAME || 'tg-bot-kv').trim()
+  const binding = String(options.binding || env.KV_BINDING || 'BOT_KV').trim()
+  if (!namespaceTitle || !binding) {
+    throw new Error('KV initialization failed: missing_namespace_title_or_binding')
+  }
+
+  onProgress?.('Initializing KV via Cloudflare API...')
+  let namespaces = await listKvNamespacesViaApi(env)
+  let namespace = namespaces.find((item) => String(item.title || '') === namespaceTitle)
+  if (!namespace?.id) {
+    const created = await cfApiRequest(env, `/accounts/${accountId}/storage/kv/namespaces`, {
+      method: 'POST',
+      body: { title: namespaceTitle },
+    })
+    if (!created.ok) {
+      const reason = String(created.reason || '')
+      if (!/already exists|10013|10014/i.test(reason)) {
+        throw new Error(`KV namespace create failed (${namespaceTitle}): ${reason || 'unknown'}`)
+      }
+      namespaces = await listKvNamespacesViaApi(env)
+      namespace = namespaces.find((item) => String(item.title || '') === namespaceTitle)
+    } else {
+      namespace = created.result || null
+    }
+  }
+
+  const namespaceId = String(namespace?.id || '').trim()
+  if (!namespaceId) {
+    throw new Error(`KV namespace id not found: ${namespaceTitle}`)
+  }
+
+  const targetPath = upsertKvBindingInLocalConfig(binding, namespaceId, env)
+  onProgress?.(`KV ready: ${namespaceTitle} (${namespaceId}) -> ${binding}`)
+  onProgress?.(`KV binding written: ${targetPath}`)
+  return { ok: true, namespaceTitle, binding, namespaceId, targetPath }
+}
+
+async function listD1DatabasesViaApi(env) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const databases = []
+  let totalPages = 1
+  for (let page = 1; page <= totalPages && page <= 10; page += 1) {
+    const query = new URLSearchParams({ page: String(page), per_page: '100' })
+    const response = await cfApiRequest(env, `/accounts/${accountId}/d1/database?${query.toString()}`)
+    if (!response.ok) {
+      throw new Error(`D1 database list failed: ${response.reason || 'unknown'}`)
+    }
+    databases.push(...(Array.isArray(response.result) ? response.result : []))
+    totalPages = Number(response.resultInfo?.total_pages || 1)
+  }
+  return databases
+}
+
+function getD1DatabaseId(database) {
+  return String(database?.uuid || database?.id || database?.database_id || '').trim()
+}
+
+async function executeD1SqlViaApi(env, databaseId, sql) {
+  const { accountId } = getCfTokenAndAccount(env)
+  return cfApiRequest(env, `/accounts/${accountId}/d1/database/${encodeURIComponent(databaseId)}/query`, {
+    method: 'POST',
+    body: { sql },
+  })
+}
+
+function escapeSqlString(value) {
+  return String(value || '').replaceAll("'", "''")
+}
+
+async function applyD1MigrationsViaApi(env, databaseId, onProgress) {
+  const migrationsPath = path.join(getRepoRoot(), 'migrations')
+  if (!fs.existsSync(migrationsPath)) {
+    onProgress?.('D1 migrations skipped: migrations directory not found.')
+    return { ok: true, applied: [], skipped: true }
+  }
+
+  const migrationFiles = fs.readdirSync(migrationsPath)
+    .filter((name) => /\.sql$/i.test(name))
+    .sort((a, b) => a.localeCompare(b))
+  if (migrationFiles.length === 0) {
+    onProgress?.('D1 migrations skipped: no SQL migration files.')
+    return { ok: true, applied: [] }
+  }
+
+  const migrationTableSql = `CREATE TABLE IF NOT EXISTS d1_migrations(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+  );`
+  const init = await executeD1SqlViaApi(env, databaseId, migrationTableSql)
+  if (!init.ok) {
+    throw new Error(`D1 migration table initialization failed: ${init.reason || 'unknown'}`)
+  }
+
+  const listed = await executeD1SqlViaApi(env, databaseId, 'SELECT name FROM d1_migrations ORDER BY id')
+  const rows = Array.isArray(listed.result?.[0]?.results)
+    ? listed.result[0].results
+    : Array.isArray(listed.result?.results)
+      ? listed.result.results
+      : []
+  const appliedNames = new Set(rows.map((row) => String(row.name || '').trim()).filter(Boolean))
+  const appliedNow = []
+
+  for (const filename of migrationFiles) {
+    if (appliedNames.has(filename)) continue
+
+    const filepath = path.join(migrationsPath, filename)
+    const sql = fs.readFileSync(filepath, 'utf8').trim()
+    if (!sql) continue
+
+    const migrationSql = `${sql.replace(/\s+$/, '')}\n\nINSERT INTO d1_migrations (name) VALUES ('${escapeSqlString(filename)}');`
+    const migrated = await executeD1SqlViaApi(env, databaseId, migrationSql)
+    if (!migrated.ok) {
+      throw new Error(`D1 migration failed (${filename}): ${migrated.reason || 'unknown'}`)
+    }
+    appliedNow.push(filename)
+    onProgress?.(`D1 migration applied: ${filename}`)
+  }
+
+  if (appliedNow.length === 0) {
+    onProgress?.('D1 migrations already up to date.')
+  }
+  return { ok: true, applied: appliedNow }
+}
+
+async function ensureD1BindingViaApi(env, options = {}, onProgress) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const databaseName = String(options.databaseName || env.D1_DATABASE_NAME || 'tg-bot-history').trim()
+  const binding = String(options.binding || env.D1_BINDING || 'DB').trim()
+  if (!databaseName || !binding) {
+    throw new Error('D1 initialization failed: missing_database_name_or_binding')
+  }
+
+  onProgress?.('Initializing D1 via Cloudflare API...')
+  let databases = await listD1DatabasesViaApi(env)
+  let database = databases.find((item) => String(item.name || '') === databaseName)
+  if (!getD1DatabaseId(database)) {
+    const created = await cfApiRequest(env, `/accounts/${accountId}/d1/database`, {
+      method: 'POST',
+      body: { name: databaseName },
+    })
+    if (!created.ok) {
+      const reason = String(created.reason || '')
+      if (!/already exists|10013|10014|7502/i.test(reason)) {
+        throw new Error(`D1 database create failed (${databaseName}): ${reason || 'unknown'}`)
+      }
+      databases = await listD1DatabasesViaApi(env)
+      database = databases.find((item) => String(item.name || '') === databaseName)
+    } else {
+      database = created.result || null
+    }
+  }
+
+  const databaseId = getD1DatabaseId(database)
+  if (!databaseId) {
+    throw new Error(`D1 database id not found: ${databaseName}`)
+  }
+
+  const targetPath = upsertD1BindingInLocalConfig(binding, databaseName, databaseId, env)
+  onProgress?.(`D1 ready: ${databaseName} (${databaseId}) -> ${binding}`)
+  onProgress?.(`D1 binding written: ${targetPath}`)
+
+  if (!options.skipMigrate) {
+    await applyD1MigrationsViaApi(env, databaseId, onProgress)
+  }
+
+  return { ok: true, databaseName, binding, databaseId, targetPath }
 }
 
 async function ensureWorkerCustomDomain(env, configPath, workerUrl, onProgress) {
@@ -1121,75 +1398,102 @@ async function waitForWorkerHealth(rawUrl, onProgress, label = 'Worker custom do
   return { ok: false, reason: lastReason }
 }
 
-async function setTelegramWebhookFromDeploy(botToken, workerUrl, env = {}, onProgress) {
-  const token = String(botToken || '').trim()
-  const origin = getUrlOrigin(workerUrl)
-  if (!token || !origin) return { ok: false, reason: 'missing_bot_token_or_worker_url' }
-
-  let webhookPath = '/webhook'
-  try {
-    const privateConfigPath = getPrivateWranglerPath(env)
-    if (fs.existsSync(privateConfigPath)) {
-      webhookPath = parseVarsBlock(fs.readFileSync(privateConfigPath, 'utf8')).WEBHOOK_PATH || webhookPath
-    }
-  } catch {}
-
-  const webhookUrl = `${origin}${normalizeWebhookPath(webhookPath)}`
-  const delays = [1200, 3000, 6000, 10000]
-  let lastReason = 'unknown'
-  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
-    try {
-      const response = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json; charset=UTF-8' },
-        body: JSON.stringify({ url: webhookUrl }),
-      })
-      const data = await response.json().catch(() => null)
-      if (response.ok && data?.ok) {
-        onProgress?.(`Telegram webhook set: ${webhookUrl}`)
-        return { ok: true, webhookUrl }
-      }
-      lastReason = data?.description || `http_${response.status}`
-    } catch (error) {
-      lastReason = error instanceof Error ? error.message : String(error)
-    }
-
-    if (attempt < delays.length) {
-      const delayMs = delays[attempt]
-      onProgress?.(`Telegram webhook not ready (${lastReason}). Retrying in ${Math.round(delayMs / 1000)}s...`)
-      await sleep(delayMs)
-    }
-  }
-  return { ok: false, reason: lastReason, webhookUrl }
-}
-
-async function triggerAdminPasswordBootstrap(workerUrl, onProgress) {
+async function getWorkerRuntimeStatus(workerUrl) {
   const origin = getUrlOrigin(workerUrl)
   if (!origin) return { ok: false, reason: 'missing_worker_url' }
 
-  const authStateUrl = `${origin}/admin/api/auth/me`
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const response = await fetch(`${origin}/`, {
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    })
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) {
+      return { ok: false, reason: data?.error || `status_http_${response.status}` }
+    }
+    return { ok: true, status: data }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function waitForWorkerBotConfig(workerUrl, expectedAdminChatId, onProgress) {
+  const origin = getUrlOrigin(workerUrl)
+  if (!origin) return { ok: false, reason: 'missing_worker_url' }
+
+  const expectedChatId = String(expectedAdminChatId || '').trim()
+  const delays = [1000, 2500, 5000, 8000, 12000, 15000]
+  let lastReason = 'unknown'
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    const result = await getWorkerRuntimeStatus(origin)
+    if (result.ok) {
+      const status = result.status || {}
+      const hasToken = Boolean(status.hasToken)
+      const adminChatId = String(status.adminChatId || '').trim()
+      const chatIdReady = !expectedChatId || adminChatId === expectedChatId
+      if (hasToken && chatIdReady) {
+        onProgress?.(`Worker bot config ready: hasToken=true, adminChatId=${adminChatId || 'set'}`)
+        return { ok: true, status }
+      }
+      lastReason = `hasToken=${hasToken}; adminChatId=${adminChatId || 'missing'}`
+    } else {
+      lastReason = result.reason || 'unknown'
+    }
+
+    if (attempt < delays.length) {
+      const delayMs = delays[attempt]
+      onProgress?.(`Worker bot config not ready (${lastReason}). Retrying in ${Math.round(delayMs / 1000)}s...`)
+      await sleep(delayMs)
+    }
+  }
+  return { ok: false, reason: lastReason }
+}
+
+async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress) {
+  const origin = getUrlOrigin(workerUrl)
+  const token = String(bootstrapToken || '').trim()
+  if (!origin || !token) return { ok: false, reason: 'missing_worker_url_or_bootstrap_token' }
+
+  const bootstrapUrl = `${origin}/deploy/bootstrap`
   const delays = [1200, 3000, 6000, 10000]
   let lastReason = 'unknown'
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
     try {
-      const response = await fetch(authStateUrl, { headers: { accept: 'application/json' } })
+      const response = await fetch(bootstrapUrl, {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json; charset=UTF-8',
+          'x-deploy-bootstrap-token': token,
+        },
+        body: JSON.stringify({}),
+      })
       const data = await response.json().catch(() => null)
-      if (response.ok && data?.passwordReady) {
-        if (data.bootstrapNotifyError) {
-          onProgress?.(`Admin temporary password generated, but Telegram notification failed: ${data.bootstrapNotifyError}`)
-          return { ok: false, reason: data.bootstrapNotifyError }
-        }
-        onProgress?.('Admin temporary password generated and notification requested.')
-        return { ok: true }
+      if (response.ok && data?.ok) {
+        onProgress?.(`Worker deployment bootstrap completed: ${data.webhookUrl || `${origin}/webhook`}`)
+        return { ok: true, data }
       }
-      lastReason = data?.error || data?.message || `password_not_ready:http_${response.status}`
+
+      lastReason = data?.error ||
+        data?.webhookError ||
+        data?.bootstrapNotifyError ||
+        data?.commandsError ||
+        `bootstrap_http_${response.status}`
+      if (response.ok && data?.passwordReady && data?.bootstrapNotifyError) {
+        onProgress?.(`Admin temporary password generated, but Telegram notification failed: ${data.bootstrapNotifyError}`)
+        return { ok: false, reason: data.bootstrapNotifyError, data }
+      }
     } catch (error) {
       lastReason = error instanceof Error ? error.message : String(error)
     }
 
     if (attempt < delays.length) {
       const delayMs = delays[attempt]
-      onProgress?.(`Admin temporary password not ready (${lastReason}). Retrying in ${Math.round(delayMs / 1000)}s...`)
+      onProgress?.(`Worker deployment bootstrap not ready (${lastReason}). Retrying in ${Math.round(delayMs / 1000)}s...`)
       await sleep(delayMs)
     }
   }
@@ -1298,41 +1602,6 @@ function runScript(scriptName, args = [], env) {
     env: { ...env, ELECTRON_RUN_AS_NODE: '1' }
   })
 }
-
-function runWrangler(args, env) {
-  return runProc(process.execPath, [getWranglerJs(), ...args], {
-    env: { ...env, ELECTRON_RUN_AS_NODE: '1' }
-  })
-}
-
-function runWranglerSecret(key, value, env) {
-  return new Promise((resolve, reject) => {
-    const args = [getWranglerJs(), 'secret', 'put', key, '--config', getPrivateWranglerPath(env)]
-    const commandText = [process.execPath, ...args].join(' ')
-    const proc = spawn(process.execPath, args, {
-      cwd: getRepoRoot(), windowsHide: true,
-      env: { ...env, ELECTRON_RUN_AS_NODE: '1' },
-      stdio: ['pipe', 'pipe', 'pipe']
-    })
-    const send = (data) => BrowserWindow.getAllWindows()[0]?.webContents.send('output', data.toString())
-    proc.stdout?.on('data', send)
-    proc.stderr?.on('data', send)
-    proc.stdin.write(value + '\n')
-    proc.stdin.end()
-    proc.on('error', (err) => {
-      send('Start failed: ' + err.message + '\n')
-      reject(new Error(`Command start failed: ${commandText}\n${err.message}`))
-    })
-    proc.on('close', (code) => {
-      if (code !== 0) {
-        send(`\n[Exit code ${code}]\n`)
-        reject(new Error(`Command failed (exit ${code}): ${commandText}`))
-        return
-      }
-      resolve(code ?? 0)
-    })
-  })
-}
 // actions
 async function runAction(action, params, env) {
   const send = (msg) => BrowserWindow.getAllWindows()[0]?.webContents.send('output', msg + '\n')
@@ -1357,11 +1626,11 @@ async function runAction(action, params, env) {
       await runScript('merge-wrangler-config.mjs', [], env)
       return
     case 'setup-d1':
-      await runScript('setup-d1.mjs', ['--remote'], env)
+      await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
       await runScript('merge-wrangler-config.mjs', [], env)
       return
     case 'setup-kv':
-      await runScript('setup-kv.mjs', [], env)
+      await ensureKvBindingViaApi(env, {}, send)
       await runScript('merge-wrangler-config.mjs', [], env)
       return
     case 'deploy-worker':
@@ -1369,8 +1638,9 @@ async function runAction(action, params, env) {
         const runtimeUpdates = syncRuntimeUrlsToLocalConfig(params?.workerUrl || '', params?.panelUrl || '', env)
         if (runtimeUpdates.length > 0) send(`Updated wrangler.local.toml runtime config: ${runtimeUpdates.join(', ')}`)
       }
-      send('Initializing KV...')
-      await runScript('setup-kv.mjs', [], env)
+      send('Initializing KV and D1...')
+      await ensureKvBindingViaApi(env, {}, send)
+      await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
       {
         const runtimeUpdates = syncRuntimeUrlsToLocalConfig(params?.workerUrl || '', params?.panelUrl || '', env)
         if (runtimeUpdates.length > 0) send(`Updated wrangler.local.toml runtime config: ${runtimeUpdates.join(', ')}`)
@@ -1379,11 +1649,10 @@ async function runAction(action, params, env) {
       const workerConfigPath = getPrivateWranglerPath(env)
       validatePrivateWranglerConfig(workerConfigPath)
       await uploadWorkerViaApi(env, workerConfigPath, send)
-      const deploy = await runWrangler(['deploy', '--config', workerConfigPath], env)
       await ensureWorkerCustomDomain(env, workerConfigPath, params?.workerUrl || '', send)
       {
         const check = await verifyWorkerDeployment(env, workerConfigPath, send, {
-          deployOutput: deploy?.output || '',
+          deployOutput: '',
           workerUrl: params?.workerUrl || '',
         })
         if (!check.ok) {
@@ -1487,6 +1756,12 @@ async function runAction(action, params, env) {
       const { botToken, adminChatId, workerUrl, panelUrl } = params || {}
       let effectiveWorkerUrl = normalizeHttpUrl(workerUrl || '')
       const effectivePanelUrl = normalizeHttpUrl(panelUrl || '')
+      const deployBootstrapToken = crypto.randomBytes(24).toString('hex')
+      const workerSecrets = {
+        BOT_TOKEN: botToken,
+        ADMIN_CHAT_ID: adminChatId,
+        DEPLOY_BOOTSTRAP_TOKEN: deployBootstrapToken,
+      }
       send('Step 1/4: Merging config...')
       await runScript('merge-wrangler-config.mjs', [], env)
 
@@ -1497,8 +1772,8 @@ async function runAction(action, params, env) {
       }
 
       send('Step 2/4: Initializing KV and D1...')
-      await runScript('setup-kv.mjs', [], env)
-      await runScript('setup-d1.mjs', ['--remote'], env)
+      await ensureKvBindingViaApi(env, {}, send)
+      await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
       {
         const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
         if (postInitUpdates.length > 0) {
@@ -1510,11 +1785,10 @@ async function runAction(action, params, env) {
       const workerConfigPath = getPrivateWranglerPath(env)
       validatePrivateWranglerConfig(workerConfigPath)
       await uploadWorkerViaApi(env, workerConfigPath, send)
-      const deploy = await runWrangler(['deploy', '--config', workerConfigPath], env)
       await ensureWorkerCustomDomain(env, workerConfigPath, effectiveWorkerUrl, send)
       {
         const check = await verifyWorkerDeployment(env, workerConfigPath, send, {
-          deployOutput: deploy?.output || '',
+          deployOutput: '',
           workerUrl: effectiveWorkerUrl,
         })
         if (!check.ok) {
@@ -1523,12 +1797,21 @@ async function runAction(action, params, env) {
         send(`Worker verified: ${check.workerName}${check.method ? ` (${check.method})` : ''}`)
       }
       if (!effectiveWorkerUrl) {
-        effectiveWorkerUrl = extractWorkerUrls(deploy?.output || '', getWorkerNameFromConfig(workerConfigPath))[0] || ''
+        try {
+          const privateVars = parseVarsBlock(fs.readFileSync(workerConfigPath, 'utf8'))
+          effectiveWorkerUrl = normalizeHttpUrl(privateVars.PUBLIC_BASE_URL || '')
+        } catch {}
       }
-      if (botToken) await runWranglerSecret('BOT_TOKEN', botToken, env)
-      if (adminChatId) await runWranglerSecret('ADMIN_CHAT_ID', adminChatId, env)
       if (botToken || adminChatId) {
-        send('Worker secrets updated: BOT_TOKEN / ADMIN_CHAT_ID')
+        await updateWorkerSecretsViaApi(env, workerConfigPath, workerSecrets, send)
+        if (effectiveWorkerUrl) {
+          const configReady = await waitForWorkerBotConfig(effectiveWorkerUrl, adminChatId, send)
+          if (!configReady.ok) {
+            send(`Worker bot config warning: ${configReady.reason || 'unknown'}`)
+          }
+        } else {
+          send('Worker bot config warning: missing worker URL, skip runtime check.')
+        }
       }
       send('Step 4/4: Deploying Pages panel...')
       const panelResult = await runAction('deploy-panel', { workerUrl: effectiveWorkerUrl, panelUrl: effectivePanelUrl }, env)
@@ -1544,30 +1827,35 @@ async function runAction(action, params, env) {
       if (finalRuntimeUpdates.length > 0) {
         send(`Updating Worker runtime vars after Pages deployment: ${finalRuntimeUpdates.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
-        const finalDeploy = await runWrangler(['deploy', '--config', workerConfigPath], env)
+        await uploadWorkerViaApi(env, workerConfigPath, send)
         await ensureWorkerCustomDomain(env, workerConfigPath, effectiveWorkerUrl, send)
         const finalCheck = await verifyWorkerDeployment(env, workerConfigPath, send, {
-          deployOutput: finalDeploy?.output || '',
+          deployOutput: '',
           workerUrl: effectiveWorkerUrl,
         })
         if (!finalCheck.ok) {
           throw new Error(`Worker final runtime URL update failed (${finalCheck.workerName || 'unknown'}): ${finalCheck.reason}`)
         }
         send(`Worker runtime URLs updated: ${finalCheck.workerName}`)
+        if (botToken || adminChatId) {
+          await updateWorkerSecretsViaApi(env, workerConfigPath, workerSecrets, send)
+          if (effectiveWorkerUrl) {
+            const configReady = await waitForWorkerBotConfig(effectiveWorkerUrl, adminChatId, send)
+            if (!configReady.ok) {
+              send(`Worker bot config warning: ${configReady.reason || 'unknown'}`)
+            }
+          } else {
+            send('Worker bot config warning: missing worker URL, skip runtime check.')
+          }
+        }
       }
       if (effectiveWorkerUrl) {
         await waitForWorkerHealth(effectiveWorkerUrl, send, 'Worker entry')
       }
       if (botToken && effectiveWorkerUrl) {
-        const webhook = await setTelegramWebhookFromDeploy(botToken, effectiveWorkerUrl, env, send)
-        if (!webhook.ok) {
-          send(`Telegram webhook warning: ${webhook.reason || 'unknown'}`)
-        }
-      }
-      if (effectiveWorkerUrl) {
-        const bootstrap = await triggerAdminPasswordBootstrap(effectiveWorkerUrl, send)
+        const bootstrap = await triggerDeployBootstrap(effectiveWorkerUrl, deployBootstrapToken, send)
         if (!bootstrap.ok) {
-          send(`Admin temporary password warning: ${bootstrap.reason || 'unknown'}`)
+          send(`Worker deployment bootstrap warning: ${bootstrap.reason || 'unknown'}`)
         }
       }
       saveActiveDeployPrefsPatch({

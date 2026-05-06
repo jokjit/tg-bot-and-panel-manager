@@ -41,6 +41,10 @@ export default {
         return json({ ok: true, now: new Date().toISOString() }, 200, {}, request);
       }
 
+      if (request.method === 'POST' && url.pathname === '/deploy/bootstrap') {
+        return await handleDeployBootstrap(request, runtimeEnv, webhookPath, publicBaseUrl);
+      }
+
       if (request.method === 'GET' && url.pathname === ADMIN_PANEL_PATH) {
         const panelUrl = buildAdminPanelUrl(runtimeEnv, publicBaseUrl);
         if (isAbsoluteHttpUrl(panelUrl)) {
@@ -3097,6 +3101,93 @@ async function notifyBootstrapPassword(env, username, password, expiresAt) {
 
 function formatErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function timingSafeEqualText(left, right) {
+  const a = String(left || '');
+  const b = String(right || '');
+  if (!a || !b || a.length !== b.length) return false;
+
+  let diff = 0;
+  for (let index = 0; index < a.length; index += 1) {
+    diff |= a.charCodeAt(index) ^ b.charCodeAt(index);
+  }
+  return diff === 0;
+}
+
+async function readDeployBootstrapToken(request) {
+  const url = new URL(request.url);
+  const authorization = request.headers.get('authorization') || '';
+  const bearerToken = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+  const headerToken = request.headers.get('x-deploy-bootstrap-token') || '';
+  const queryToken = url.searchParams.get('token') || '';
+  let bodyToken = '';
+
+  try {
+    const contentType = request.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const body = await request.json();
+      bodyToken = String(body?.token || '').trim();
+    }
+  } catch (error) {
+    // ignore malformed optional body
+  }
+
+  return String(headerToken || bearerToken || bodyToken || queryToken || '').trim();
+}
+
+async function handleDeployBootstrap(request, env, webhookPath, publicBaseUrl) {
+  const expectedToken = String(env.DEPLOY_BOOTSTRAP_TOKEN || '').trim();
+  if (!expectedToken) {
+    throw new AppError(404, 'deploy_bootstrap_disabled');
+  }
+
+  const providedToken = await readDeployBootstrapToken(request);
+  if (!timingSafeEqualText(providedToken, expectedToken)) {
+    throw new AppError(403, 'forbidden');
+  }
+
+  ensureEnv(env, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
+
+  const webhookUrl = `${publicBaseUrl}${webhookPath}`;
+  const webhookPayload = { url: webhookUrl };
+  if (env.WEBHOOK_SECRET) webhookPayload.secret_token = env.WEBHOOK_SECRET;
+
+  let webhook = null;
+  let webhookError = null;
+  try {
+    webhook = await telegram(env, 'setWebhook', webhookPayload);
+  } catch (error) {
+    webhookError = formatErrorMessage(error);
+  }
+
+  let commands = null;
+  let commandsError = null;
+  try {
+    commands = await syncTelegramCommands(env);
+  } catch (error) {
+    commandsError = formatErrorMessage(error);
+  }
+
+  const passwordState = await ensureAdminPasswordState(env);
+  const bootstrapNotifyError = passwordState.bootstrapNotifyError || null;
+
+  return json(
+    {
+      ok: Boolean(!webhookError && passwordState.passwordReady && !bootstrapNotifyError),
+      webhookUrl,
+      webhook,
+      webhookError,
+      commands,
+      commandsError,
+      passwordReady: Boolean(passwordState.passwordReady),
+      passwordMode: passwordState.passwordMode || 'none',
+      bootstrapNotifyError,
+    },
+    200,
+    {},
+    request,
+  );
 }
 
 function parseCookies(cookieHeader) {
