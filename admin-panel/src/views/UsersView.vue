@@ -16,8 +16,17 @@
       </div>
     </n-card>
 
+    <n-grid class="users-summary" :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
+      <n-gi v-for="card in summaryCards" :key="card.key" span="24 s:12 m:6">
+        <n-card class="glass-card users-stat-card" :bordered="false">
+          <div class="users-stat-card__label">{{ card.label }}</div>
+          <div class="users-stat-card__value">{{ card.value }}</div>
+        </n-card>
+      </n-gi>
+    </n-grid>
+
     <div class="panel-split">
-      <n-card class="glass-card" :bordered="false">
+      <n-card class="glass-card users-list-card" :bordered="false">
         <div class="panel-heading compact">
           <div>
             <h3>{{ t('users.title') }}</h3>
@@ -187,7 +196,7 @@
         <n-empty v-else :description="t('app.noData')" class="panel-empty" />
       </n-card>
 
-      <n-card class="glass-card" :bordered="false">
+      <n-card class="glass-card users-reply-card" :bordered="false">
         <div class="panel-heading compact">
           <div>
             <h3>{{ t('users.quickReply') }}</h3>
@@ -217,7 +226,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NTag, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchUsers, resolveProtectedMediaUrl, sendReply, updateUserAction } from '../services/api';
@@ -233,6 +242,20 @@ const actionLoading = reactive({});
 const replyForm = reactive({
   userId: '',
   text: '',
+});
+
+const summaryCards = computed(() => {
+  const list = users.value || [];
+  const blacklisted = list.filter((item) => item.blacklisted).length;
+  const trusted = list.filter((item) => item.trusted).length;
+  const verified = list.filter((item) => item.verified).length;
+
+  return [
+    { key: 'total', label: t('users.title'), value: String(list.length) },
+    { key: 'blacklisted', label: t('users.blacklisted'), value: String(blacklisted) },
+    { key: 'trusted', label: t('users.trusted'), value: String(trusted) },
+    { key: 'verified', label: t('users.verified'), value: String(verified) },
+  ];
 });
 
 function toLocalTime(value) {
@@ -359,10 +382,47 @@ onMounted(loadUsers);
 </script>
 
 <style scoped>
+.users-summary {
+  margin-top: -2px;
+}
+
+.users-stat-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.users-stat-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+.users-stat-card__label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.users-stat-card__value {
+  margin-top: 10px;
+  font-size: clamp(26px, 4.2vw, 34px);
+  line-height: 1.1;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
 .panel-split {
   display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr);
+  grid-template-columns: minmax(0, 1.75fr) minmax(320px, 1fr);
   gap: 18px;
+  align-items: start;
+}
+
+.users-reply-card {
+  position: sticky;
+  top: 10px;
 }
 
 .status-row {
@@ -376,9 +436,17 @@ onMounted(loadUsers);
   .panel-split {
     grid-template-columns: 1fr;
   }
+
+  .users-reply-card {
+    position: static;
+  }
 }
 
 @media (max-width: 640px) {
+  .users-stat-card__value {
+    font-size: clamp(22px, 8vw, 30px);
+  }
+
   .status-row :deep(.n-tag) {
     max-width: 100%;
   }

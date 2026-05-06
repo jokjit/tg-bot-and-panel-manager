@@ -187,7 +187,7 @@ body[data-theme="dark"] {
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
 }
 .card {
@@ -219,7 +219,8 @@ body[data-theme="dark"] {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  min-height: 280px;
+  flex: 1 1 0;
+  min-height: 120px;
 }
 .panel-toolbar {
   display: flex;
@@ -254,15 +255,41 @@ body[data-theme="dark"] {
   flex: 1;
   width: 100%;
   border: 0;
-  min-height: 320px;
+  min-height: 0;
   background: #fff;
 }
 
+.resizer {
+  flex: 0 0 8px;
+  cursor: row-resize;
+  position: relative;
+  user-select: none;
+}
+.resizer::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 40px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: background 0.15s;
+}
+.resizer:hover::before,
+.resizer.dragging::before {
+  background: var(--accent);
+}
+
 .terminal-wrap {
-  flex: 1;
+  flex: 0 0 var(--terminal-height, 220px);
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+.main.terminal-fullsize .terminal-wrap {
+  flex: 1 1 0;
 }
 .terminal-bar {
   display: flex;
@@ -406,7 +433,7 @@ body[data-theme="dark"] {
   </div>
 </aside>
 
-<main class="main">
+<main class="main terminal-fullsize">
   <div class="topbar">
     <div class="main-header" id="main-header">TG Bot Deploy Tool</div>
     <div class="topbar-actions">
@@ -454,6 +481,8 @@ body[data-theme="dark"] {
     <div class="panel-empty" id="embedded-panel-empty">No panel URL for this account. Deploy Pages first or set panel URL in first deploy.</div>
     <iframe id="embedded-panel-frame" class="hidden" src="about:blank" loading="eager"></iframe>
   </div>
+
+  <div class="resizer hidden" id="panel-resizer" role="separator" aria-orientation="horizontal" title="拖拽调整高度"></div>
 
   <div class="terminal-wrap">
     <div class="terminal-bar">
@@ -526,6 +555,8 @@ const panelHideBtn = document.getElementById("panel-hide-btn")
 const panelOpenExternalBtn = document.getElementById("panel-open-external-btn")
 const langToggleBtn = document.getElementById("lang-toggle-btn")
 const themeToggleBtn = document.getElementById("theme-toggle-btn")
+const mainEl = document.querySelector(".main")
+const panelResizer = document.getElementById("panel-resizer")
 
 let running = false
 let currentActiveAccount = null
@@ -536,6 +567,9 @@ let repoRootPath = ""
 
 const UI_LOCALE_KEY = "tg_bot_ui_locale"
 const UI_THEME_KEY = "tg_bot_ui_theme"
+const UI_TERMINAL_HEIGHT_KEY = "tg_bot_ui_terminal_height"
+const TERMINAL_MIN_HEIGHT = 80
+const TERMINAL_DEFAULT_HEIGHT = 220
 const LEGACY_DEFAULT_PAGES_PANEL_URL = "https://tg-admin-panel.pages.dev"
 
 const i18n = {
@@ -828,6 +862,34 @@ function getWizardParams() {
   }
 }
 
+function clampTerminalHeight(value) {
+  const numeric = Number.isFinite(value) ? value : TERMINAL_DEFAULT_HEIGHT
+  const mainHeight = mainEl.getBoundingClientRect().height
+  const maxAllowed = mainHeight > 0
+    ? Math.max(TERMINAL_MIN_HEIGHT, Math.floor(mainHeight * 0.7))
+    : 9999
+  return Math.max(TERMINAL_MIN_HEIGHT, Math.min(numeric, maxAllowed))
+}
+
+function applyTerminalHeight(height, persist) {
+  const clamped = clampTerminalHeight(height)
+  mainEl.style.setProperty("--terminal-height", `${clamped}px`)
+  if (persist) {
+    localStorage.setItem(UI_TERMINAL_HEIGHT_KEY, String(clamped))
+  }
+  return clamped
+}
+
+function showEmbeddedPanelLayout() {
+  mainEl.classList.remove("terminal-fullsize")
+  panelResizer.classList.remove("hidden")
+}
+
+function hideEmbeddedPanelLayout() {
+  mainEl.classList.add("terminal-fullsize")
+  panelResizer.classList.add("hidden")
+}
+
 function renderEmbeddedPanel(forceReload = false) {
   const accountName = currentActiveAccount?.name || t("no_active_account")
   const panelUrl = getActivePanelUrl()
@@ -854,6 +916,7 @@ function renderEmbeddedPanel(forceReload = false) {
 
 function openEmbeddedPanel(forceReload = false) {
   panelWrap.classList.remove("hidden")
+  showEmbeddedPanelLayout()
   renderEmbeddedPanel(forceReload)
 }
 
@@ -953,6 +1016,7 @@ cards.forEach((card) => {
 
 panelHideBtn.addEventListener("click", () => {
   panelWrap.classList.add("hidden")
+  hideEmbeddedPanelLayout()
 })
 
 panelRefreshBtn.addEventListener("click", () => {
@@ -1110,6 +1174,7 @@ document.getElementById("clear-data-btn").addEventListener("click", async () => 
   setStatus("status_idle", false)
   output.textContent += `${t("data_cleared")}\n`
   panelWrap.classList.add("hidden")
+  hideEmbeddedPanelLayout()
 })
 
 const savedLocale = localStorage.getItem(UI_LOCALE_KEY)
@@ -1123,6 +1188,46 @@ if (savedTheme === "dark" || savedTheme === "light") {
 setTheme(currentTheme)
 applyLocale()
 setStatus("status_idle", false)
+
+let resizerStartY = 0
+let resizerStartHeight = 0
+
+function handleResizerMove(e) {
+  applyTerminalHeight(resizerStartHeight + (resizerStartY - e.clientY), false)
+}
+
+function handleResizerUp() {
+  panelResizer.classList.remove("dragging")
+  document.body.style.cursor = ""
+  document.removeEventListener("mousemove", handleResizerMove)
+  document.removeEventListener("mouseup", handleResizerUp)
+  const cssValue = parseFloat(getComputedStyle(mainEl).getPropertyValue("--terminal-height"))
+  applyTerminalHeight(Number.isFinite(cssValue) ? cssValue : TERMINAL_DEFAULT_HEIGHT, true)
+}
+
+panelResizer.addEventListener("mousedown", (e) => {
+  e.preventDefault()
+  resizerStartY = e.clientY
+  const cssValue = parseFloat(getComputedStyle(mainEl).getPropertyValue("--terminal-height"))
+  resizerStartHeight = Number.isFinite(cssValue) && cssValue > 0
+    ? cssValue
+    : document.querySelector(".terminal-wrap").getBoundingClientRect().height || TERMINAL_DEFAULT_HEIGHT
+  panelResizer.classList.add("dragging")
+  document.body.style.cursor = "row-resize"
+  document.addEventListener("mousemove", handleResizerMove)
+  document.addEventListener("mouseup", handleResizerUp)
+})
+
+window.addEventListener("resize", () => {
+  const cssValue = parseFloat(getComputedStyle(mainEl).getPropertyValue("--terminal-height"))
+  if (Number.isFinite(cssValue)) applyTerminalHeight(cssValue, false)
+})
+
+const savedTerminalHeight = parseFloat(localStorage.getItem(UI_TERMINAL_HEIGHT_KEY))
+applyTerminalHeight(
+  Number.isFinite(savedTerminalHeight) && savedTerminalHeight > 0 ? savedTerminalHeight : TERMINAL_DEFAULT_HEIGHT,
+  false,
+)
 
 renderAccounts()
 </script>

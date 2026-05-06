@@ -8,7 +8,8 @@
           <p>{{ t('history.desc') }}</p>
         </div>
         <div class="panel-toolbar history-toolbar">
-          <n-tag round type="info">{{ groupedSessions.length }} 会话</n-tag>
+          <n-tag round type="info">{{ t('history.sessionList') }} · {{ groupedSessions.length }}</n-tag>
+          <n-tag round type="success">{{ t('history.sessionMessages', { n: items.length }) }}</n-tag>
           <n-button type="primary" :loading="loading" @click="load">{{ t('history.load') }}</n-button>
         </div>
       </div>
@@ -28,11 +29,20 @@
       <p class="muted history-hint">{{ t('history.d1Hint') }}</p>
     </n-card>
 
+    <n-grid class="history-overview" :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
+      <n-gi v-for="card in overviewCards" :key="card.key" span="24 s:8">
+        <n-card class="glass-card history-overview-card" :bordered="false">
+          <div class="history-overview-card__label">{{ card.label }}</div>
+          <div class="history-overview-card__value">{{ card.value }}</div>
+        </n-card>
+      </n-gi>
+    </n-grid>
+
     <n-empty v-if="!loading && groupedSessions.length === 0" :description="t('history.empty')" class="glass-card history-empty" />
 
     <div v-else class="history-layout">
       <n-card class="glass-card history-sidebar" :bordered="false">
-        <div class="history-sidebar__title">会话列表</div>
+        <div class="history-sidebar__title">{{ t('history.sessionList') }}</div>
         <div class="history-sidebar__list">
           <button
             v-for="session in groupedSessions"
@@ -43,12 +53,12 @@
             @click="activeSessionId = session.userId"
           >
             <div class="history-session-link__top">
-              <strong>用户 #{{ session.userId }}</strong>
-              <span>{{ session.items.length }} 条</span>
+              <strong>{{ t('history.sessionUser', { id: session.userId }) }}</strong>
+              <span>{{ t('history.sessionCount', { n: session.items.length }) }}</span>
             </div>
             <div class="history-session-link__meta">
               <span>{{ formatTime(session.latestAt) }}</span>
-              <span v-if="session.topicId">Topic {{ session.topicId }}</span>
+              <span v-if="session.topicId">{{ t('history.sessionTopic', { id: session.topicId }) }}</span>
             </div>
             <div class="history-session-link__preview">{{ getSessionPreview(session) }}</div>
           </button>
@@ -58,9 +68,9 @@
       <n-card v-if="selectedSession" class="glass-card history-detail" :bordered="false">
         <div class="history-session__header">
           <div>
-            <div class="history-session__title">用户 #{{ selectedSession.userId }}</div>
+            <div class="history-session__title">{{ t('history.sessionUser', { id: selectedSession.userId }) }}</div>
             <div class="history-session__subtitle">
-              {{ selectedSession.items.length }} 条消息 · 最近更新 {{ formatTime(selectedSession.latestAt) }}
+              {{ t('history.sessionMessages', { n: selectedSession.items.length }) }} · {{ t('history.sessionUpdated') }} {{ formatTime(selectedSession.latestAt) }}
             </div>
           </div>
           <div class="history-session__meta">
@@ -113,6 +123,24 @@ const filters = reactive({
   userId: '',
   limit: 50,
 });
+
+const overviewCards = computed(() => [
+  {
+    key: 'sessions',
+    label: t('history.sessionList'),
+    value: String(groupedSessions.value.length),
+  },
+  {
+    key: 'messages',
+    label: t('history.panelTitle'),
+    value: String(items.value.length),
+  },
+  {
+    key: 'selected',
+    label: t('history.sessionUpdated'),
+    value: selectedSession.value ? t('history.sessionUser', { id: selectedSession.value.userId }) : '-',
+  },
+]);
 
 const groupedSessions = computed(() => {
   const map = new Map();
@@ -175,7 +203,7 @@ function renderMessageText(item) {
 
 function getSessionPreview(session) {
   const lastItem = session?.items?.[session.items.length - 1];
-  if (!lastItem) return '暂无内容';
+  if (!lastItem) return t('history.sessionPreviewEmpty');
   return renderMessageText(lastItem);
 }
 
@@ -205,6 +233,37 @@ onMounted(load);
   flex-wrap: wrap;
 }
 
+.history-overview {
+  margin-top: -2px;
+}
+
+.history-overview-card {
+  position: relative;
+}
+
+.history-overview-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+.history-overview-card__label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.history-overview-card__value {
+  margin-top: 10px;
+  font-size: clamp(24px, 4vw, 30px);
+  line-height: 1.15;
+  font-weight: 800;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
 .history-filters {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(160px, 1fr);
@@ -228,7 +287,7 @@ onMounted(load);
 
 .history-sidebar,
 .history-detail {
-  min-height: 620px;
+  min-height: 640px;
 }
 
 .history-sidebar__title {
@@ -242,6 +301,9 @@ onMounted(load);
   display: flex;
   flex-direction: column;
   gap: 12px;
+  max-height: 560px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .history-session-link {
@@ -334,6 +396,9 @@ onMounted(load);
 
 .history-chat--detail {
   min-height: 520px;
+  max-height: 600px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .history-bubble {
@@ -376,6 +441,17 @@ onMounted(load);
   line-height: 1.75;
 }
 
+.history-sidebar__list::-webkit-scrollbar,
+.history-chat--detail::-webkit-scrollbar {
+  width: 6px;
+}
+
+.history-sidebar__list::-webkit-scrollbar-thumb,
+.history-chat--detail::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(92, 139, 255, 0.4);
+}
+
 @media (max-width: 1100px) {
   .history-layout {
     grid-template-columns: 1fr;
@@ -391,6 +467,10 @@ onMounted(load);
 @media (max-width: 900px) {
   .history-filters {
     grid-template-columns: 1fr;
+  }
+
+  .history-overview-card__value {
+    font-size: clamp(22px, 7vw, 28px);
   }
 
   .history-bubble {

@@ -16,8 +16,17 @@
       </div>
     </n-card>
 
+    <n-grid class="blacklist-summary" :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
+      <n-gi v-for="card in summaryCards" :key="card.key" span="24 s:12 m:6">
+        <n-card class="glass-card blacklist-stat-card" :bordered="false">
+          <div class="blacklist-stat-card__label">{{ card.label }}</div>
+          <div class="blacklist-stat-card__value">{{ card.value }}</div>
+        </n-card>
+      </n-gi>
+    </n-grid>
+
     <div class="panel-split">
-      <n-card class="glass-card" :bordered="false">
+      <n-card class="glass-card blacklist-list-card" :bordered="false">
         <div class="panel-heading compact">
           <div>
             <h3>{{ t('blacklist.title') }}</h3>
@@ -150,7 +159,7 @@
         <n-empty v-else :description="t('app.noData')" class="panel-empty" />
       </n-card>
 
-      <n-card class="glass-card" :bordered="false">
+      <n-card class="glass-card blacklist-form-card" :bordered="false">
         <div class="panel-heading compact">
           <div>
             <h3>{{ t('blacklist.addTitle') }}</h3>
@@ -180,7 +189,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NTag, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchBlacklist, resolveProtectedMediaUrl, updateBlacklist } from '../services/api';
@@ -195,6 +204,18 @@ const blacklist = ref([]);
 const form = reactive({
   userId: '',
   reason: t('blacklist.defaultReason'),
+});
+
+const summaryCards = computed(() => {
+  const list = blacklist.value || [];
+  const withReason = list.filter((item) => String(item.reason || '').trim()).length;
+  const withAvatar = list.filter((item) => item.hasAvatar).length;
+  return [
+    { key: 'total', label: t('blacklist.title'), value: String(list.length) },
+    { key: 'reason', label: t('blacklist.reason'), value: String(withReason) },
+    { key: 'avatar', label: t('profile.avatar'), value: `${withAvatar}/${list.length || 0}` },
+    { key: 'latest', label: t('blacklist.bannedAt'), value: list[0]?.createdAt ? toLocalTime(list[0].createdAt) : '-' },
+  ];
 });
 
 function toLocalTime(value) {
@@ -288,15 +309,63 @@ onMounted(loadList);
 </script>
 
 <style scoped>
+.blacklist-summary {
+  margin-top: -2px;
+}
+
+.blacklist-stat-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.blacklist-stat-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+.blacklist-stat-card__label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.blacklist-stat-card__value {
+  margin-top: 10px;
+  font-size: clamp(24px, 4vw, 32px);
+  line-height: 1.15;
+  font-weight: 800;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
 .panel-split {
   display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr);
+  grid-template-columns: minmax(0, 1.75fr) minmax(320px, 1fr);
   gap: 18px;
+  align-items: start;
+}
+
+.blacklist-form-card {
+  position: sticky;
+  top: 10px;
 }
 
 @media (max-width: 1180px) {
   .panel-split {
     grid-template-columns: 1fr;
+  }
+
+  .blacklist-form-card {
+    position: static;
+  }
+}
+
+@media (max-width: 640px) {
+  .blacklist-stat-card__value {
+    font-size: clamp(22px, 8vw, 28px);
   }
 }
 </style>

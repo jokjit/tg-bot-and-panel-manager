@@ -73,6 +73,18 @@
               </div>
             </div>
 
+            <div class="motion-block">
+              <div class="motion-head">
+                <strong>{{ t('settings.motion') }}</strong>
+                <span>{{ t('settings.motionDesc') }}</span>
+              </div>
+              <n-radio-group class="motion-group" :value="motionLevel" @update:value="onMotionChange">
+                <n-radio-button v-for="item in motionOptions" :key="item.value" :value="item.value">
+                  {{ item.label }}
+                </n-radio-button>
+              </n-radio-group>
+            </div>
+
             <div v-if="form.USER_VERIFICATION_BOOL" class="verify-block">
               <div class="verify-grid">
                 <n-form-item :label="t('settings.verifyExpireMinutes')">
@@ -146,7 +158,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import {
   NButton,
   NCard,
@@ -156,11 +168,14 @@ import {
   NGrid,
   NInput,
   NInputNumber,
+  NRadioButton,
+  NRadioGroup,
   NSwitch,
   useMessage,
 } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchSystemConfig, saveSystemConfig } from '../services/api';
+import { setMotion, uiStore } from '../stores/ui';
 
 const DEFAULT_VERIFY_EXPIRE_MS = 15 * 60 * 1000;
 const DEFAULT_VERIFY_FAIL_BLOCK_MS = 60 * 1000;
@@ -171,6 +186,13 @@ const message = useMessage();
 const { t } = useI18n();
 const loading = ref(false);
 const saving = ref(false);
+const motionLevel = ref(uiStore.motion);
+
+const motionOptions = computed(() => [
+  { label: t('settings.motionStandard'), value: 'standard' },
+  { label: t('settings.motionLight'), value: 'light' },
+  { label: t('settings.motionOff'), value: 'off' },
+]);
 
 const form = reactive({
   BOT_TOKEN: '',
@@ -197,6 +219,11 @@ function msToMinutes(value, fallbackMs) {
 
 function msToSeconds(value, fallbackMs) {
   return Math.max(1, Math.round(toPositiveNumber(value, fallbackMs) / 1000));
+}
+
+function onMotionChange(next) {
+  setMotion(next);
+  motionLevel.value = uiStore.motion;
 }
 
 function assignConfig(cfg = {}) {
@@ -253,7 +280,10 @@ async function save() {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  motionLevel.value = uiStore.motion;
+  load();
+});
 </script>
 
 <style scoped>
@@ -278,6 +308,35 @@ onMounted(load);
   margin-top: 16px;
 }
 
+.motion-block {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 18px;
+  background: var(--panel-strong);
+  border: 1px solid var(--panel-border-strong);
+  display: grid;
+  gap: 10px;
+}
+
+.motion-head strong {
+  display: block;
+  color: var(--text-primary);
+}
+
+.motion-head span {
+  display: block;
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.motion-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .verify-block {
   margin-top: 18px;
   padding-top: 18px;
@@ -299,6 +358,10 @@ onMounted(load);
 
   .settings-grid-span-2 {
     grid-column: auto;
+  }
+
+  .motion-group {
+    width: 100%;
   }
 }
 </style>

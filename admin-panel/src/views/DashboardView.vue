@@ -1,22 +1,31 @@
 <template>
   <div class="page-stack">
     <n-card class="glass-card hero-strip" :bordered="false">
-      <div class="panel-heading">
-        <div>
-          <div class="panel-kicker">{{ t('dashboard.title') }}</div>
-          <h2>{{ t('dashboard.panelTitle') }}</h2>
-          <p>{{ t('dashboard.panelDesc') }}</p>
+      <div class="dashboard-hero">
+        <div class="panel-heading">
+          <div>
+            <div class="panel-kicker">{{ t('dashboard.title') }}</div>
+            <h2>{{ t('dashboard.panelTitle') }}</h2>
+            <p>{{ t('dashboard.panelDesc') }}</p>
+          </div>
+
+          <div class="panel-summary">
+            <n-tag type="success" round>{{ t('dashboard.loggedInAs', { name: adminStore.username || 'admin' }) }}</n-tag>
+            <n-button tertiary round @click="router.push('/history')">{{ t('app.history') }}</n-button>
+            <n-button secondary round @click="refresh">{{ t('dashboard.refresh') }}</n-button>
+          </div>
         </div>
 
-        <div class="panel-summary">
-          <n-tag type="success" round>{{ t('dashboard.loggedInAs', { name: adminStore.username || 'admin' }) }}</n-tag>
-          <n-button tertiary round @click="router.push('/history')">{{ t('app.history') }}</n-button>
-          <n-button secondary round @click="refresh">{{ t('dashboard.refresh') }}</n-button>
+        <div class="dashboard-hero__meta">
+          <div v-for="item in heroIndicators" :key="item.key" class="dashboard-meta-pill">
+            <span>{{ item.label }}</span>
+            <strong>{{ item.value }}</strong>
+          </div>
         </div>
       </div>
     </n-card>
 
-    <n-grid :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
+    <n-grid class="dashboard-metrics" :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
       <n-gi v-for="card in statusCards" :key="card.key" span="24 s:12 m:6">
         <n-card class="glass-card metric-card" :bordered="false">
           <div class="metric-card__label">{{ card.label }}</div>
@@ -27,7 +36,7 @@
 
     <n-grid :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
       <n-gi span="24 m:10">
-        <n-card class="glass-card" :bordered="false">
+        <n-card class="glass-card dashboard-actions-card" :bordered="false">
           <div class="panel-heading compact">
             <div>
               <h3>{{ t('dashboard.quickActions') }}</h3>
@@ -50,6 +59,12 @@
             <n-button tertiary :loading="loadingWebhook" @click="handleSyncCommands">
               {{ t('dashboard.syncCommands') }}
             </n-button>
+          </div>
+          <div class="dashboard-runtime-note">
+            <div v-for="row in runtimeRows" :key="row.label" class="runtime-note-item">
+              <span>{{ row.label }}</span>
+              <code>{{ row.value }}</code>
+            </div>
           </div>
           <pre class="mono-box" v-if="webhookResult">{{ webhookResult }}</pre>
         </n-card>
@@ -86,6 +101,47 @@ const webhookResult = ref('');
 
 const statusData = computed(() => adminStore.statusData || null);
 const prettyStatus = computed(() => JSON.stringify(statusData.value || {}, null, 2));
+const stateLabel = (enabled) => (enabled ? t('dashboard.on') : t('dashboard.off'));
+
+const heroIndicators = computed(() => [
+  {
+    key: 'bot-ready',
+    label: t('dashboard.botReady'),
+    value: statusData.value?.botConfigReady ? t('app.enabled') : t('app.disabled'),
+  },
+  {
+    key: 'topic-mode',
+    label: t('dashboard.topicMode'),
+    value: stateLabel(Boolean(statusData.value?.topicModeEnabled)),
+  },
+  {
+    key: 'verification',
+    label: t('dashboard.verification'),
+    value: stateLabel(Boolean(statusData.value?.userVerificationEnabled)),
+  },
+  {
+    key: 'kv',
+    label: 'KV',
+    value: statusData.value?.hasKv ? t('app.enabled') : t('app.disabled'),
+  },
+  {
+    key: 'd1',
+    label: 'D1',
+    value: statusData.value?.hasD1 ? t('app.enabled') : t('app.disabled'),
+  },
+]);
+
+const runtimeRows = computed(() => [
+  {
+    label: 'Webhook',
+    value: statusData.value?.webhookUrl || '-',
+  },
+  {
+    label: 'Panel',
+    value: statusData.value?.adminPanel || statusData.value?.adminPanelTarget || '-',
+  },
+]);
+
 const statusCards = computed(() => [
   {
     key: 'bot-ready',
@@ -185,6 +241,43 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.dashboard-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.dashboard-hero__meta {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dashboard-meta-pill {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: var(--panel-strong);
+  border: 1px solid var(--panel-border-strong);
+  box-shadow: var(--card-shadow);
+}
+
+.dashboard-meta-pill span {
+  display: block;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.dashboard-meta-pill strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.dashboard-metrics {
+  margin-top: -2px;
+}
+
 .metric-card {
   overflow: hidden;
 }
@@ -221,15 +314,58 @@ onMounted(() => {
   margin-top: 16px;
 }
 
+.dashboard-runtime-note {
+  margin-top: 16px;
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-note-item {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(92, 139, 255, 0.08);
+  border: 1px dashed var(--panel-border-strong);
+}
+
+.runtime-note-item span {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.runtime-note-item code {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @media (max-width: 1200px) {
+  .dashboard-hero__meta {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .action-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .dashboard-hero__meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 640px) {
   .panel-summary {
     gap: 8px;
+  }
+
+  .dashboard-hero__meta {
+    grid-template-columns: 1fr;
   }
 
   .metric-card__value {

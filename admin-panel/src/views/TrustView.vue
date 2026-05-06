@@ -16,8 +16,17 @@
       </div>
     </n-card>
 
+    <n-grid class="trust-summary" :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
+      <n-gi v-for="card in summaryCards" :key="card.key" span="24 s:12 m:6">
+        <n-card class="glass-card trust-stat-card" :bordered="false">
+          <div class="trust-stat-card__label">{{ card.label }}</div>
+          <div class="trust-stat-card__value">{{ card.value }}</div>
+        </n-card>
+      </n-gi>
+    </n-grid>
+
     <div class="panel-split">
-      <n-card class="glass-card" :bordered="false">
+      <n-card class="glass-card trust-list-card" :bordered="false">
         <div class="panel-heading compact">
           <div>
             <h3>{{ t('trust.title') }}</h3>
@@ -148,7 +157,7 @@
         <n-empty v-else :description="t('app.noData')" class="panel-empty" />
       </n-card>
 
-      <n-card class="glass-card" :bordered="false">
+      <n-card class="glass-card trust-form-card" :bordered="false">
         <div class="panel-heading compact">
           <div>
             <h3>{{ t('trust.addTitle') }}</h3>
@@ -178,7 +187,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NTag, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchTrust, resolveProtectedMediaUrl, updateTrust } from '../services/api';
@@ -193,6 +202,18 @@ const trustList = ref([]);
 const form = reactive({
   userId: '',
   note: '',
+});
+
+const summaryCards = computed(() => {
+  const list = trustList.value || [];
+  const withNote = list.filter((item) => String(item.note || '').trim()).length;
+  const withAvatar = list.filter((item) => item.hasAvatar).length;
+  return [
+    { key: 'total', label: t('trust.title'), value: String(list.length) },
+    { key: 'notes', label: t('trust.note'), value: String(withNote) },
+    { key: 'avatar', label: t('profile.avatar'), value: `${withAvatar}/${list.length || 0}` },
+    { key: 'latest', label: t('trust.addedAt'), value: list[0]?.createdAt ? toLocalTime(list[0].createdAt) : '-' },
+  ];
 });
 
 function toLocalTime(value) {
@@ -286,15 +307,63 @@ onMounted(loadList);
 </script>
 
 <style scoped>
+.trust-summary {
+  margin-top: -2px;
+}
+
+.trust-stat-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.trust-stat-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+.trust-stat-card__label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.trust-stat-card__value {
+  margin-top: 10px;
+  font-size: clamp(24px, 4vw, 32px);
+  line-height: 1.15;
+  font-weight: 800;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
 .panel-split {
   display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr);
+  grid-template-columns: minmax(0, 1.75fr) minmax(320px, 1fr);
   gap: 18px;
+  align-items: start;
+}
+
+.trust-form-card {
+  position: sticky;
+  top: 10px;
 }
 
 @media (max-width: 1180px) {
   .panel-split {
     grid-template-columns: 1fr;
+  }
+
+  .trust-form-card {
+    position: static;
+  }
+}
+
+@media (max-width: 640px) {
+  .trust-stat-card__value {
+    font-size: clamp(22px, 8vw, 28px);
   }
 }
 </style>

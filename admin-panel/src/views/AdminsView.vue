@@ -16,8 +16,17 @@
       </div>
     </n-card>
 
+    <n-grid class="admins-summary" :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
+      <n-gi v-for="card in summaryCards" :key="card.key" span="24 s:12 m:6">
+        <n-card class="glass-card admins-stat-card" :bordered="false">
+          <div class="admins-stat-card__label">{{ card.label }}</div>
+          <div class="admins-stat-card__value">{{ card.value }}</div>
+        </n-card>
+      </n-gi>
+    </n-grid>
+
     <div class="panel-split">
-      <n-card class="glass-card" :bordered="false">
+      <n-card class="glass-card admins-list-card" :bordered="false">
         <div class="panel-heading compact">
           <div>
             <h3>{{ t('admins.title') }}</h3>
@@ -156,7 +165,7 @@
         <n-empty v-else :description="t('app.noData')" class="panel-empty" />
       </n-card>
 
-      <n-card class="glass-card" :bordered="false">
+      <n-card class="glass-card admins-form-card" :bordered="false">
         <div class="panel-heading compact">
           <div>
             <h3>{{ t('admins.addTitle') }}</h3>
@@ -186,7 +195,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NTag, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchAdmins, resolveProtectedMediaUrl, updateAdmins } from '../services/api';
@@ -201,6 +210,19 @@ const admins = ref([]);
 const form = reactive({
   userId: '',
   note: '',
+});
+
+const summaryCards = computed(() => {
+  const list = admins.value || [];
+  const root = list.filter((item) => item.source === 'root-env').length;
+  const group = list.filter((item) => item.source === 'group-admin').length;
+  const manual = list.filter((item) => item.source === 'kv').length;
+  return [
+    { key: 'total', label: t('admins.title'), value: String(list.length) },
+    { key: 'root', label: t('admins.rootAdmin'), value: String(root) },
+    { key: 'group', label: t('admins.source'), value: `group ${group}` },
+    { key: 'manual', label: t('admins.note'), value: `kv ${manual}` },
+  ];
 });
 
 function toLocalTime(value) {
@@ -295,15 +317,63 @@ onMounted(loadAdmins);
 </script>
 
 <style scoped>
+.admins-summary {
+  margin-top: -2px;
+}
+
+.admins-stat-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.admins-stat-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+.admins-stat-card__label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.admins-stat-card__value {
+  margin-top: 10px;
+  font-size: clamp(24px, 4vw, 32px);
+  line-height: 1.15;
+  font-weight: 800;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
 .panel-split {
   display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr);
+  grid-template-columns: minmax(0, 1.75fr) minmax(320px, 1fr);
   gap: 18px;
+  align-items: start;
+}
+
+.admins-form-card {
+  position: sticky;
+  top: 10px;
 }
 
 @media (max-width: 1180px) {
   .panel-split {
     grid-template-columns: 1fr;
+  }
+
+  .admins-form-card {
+    position: static;
+  }
+}
+
+@media (max-width: 640px) {
+  .admins-stat-card__value {
+    font-size: clamp(22px, 8vw, 28px);
   }
 }
 </style>
