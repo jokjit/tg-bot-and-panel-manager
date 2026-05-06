@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.1.19'
+const DEPLOY_TOOL_VERSION = 'v1.1.20'
 
 // paths
 function findRepoRoot() {
@@ -206,30 +206,6 @@ function stripManagedWorkerRouteBlock(content) {
   return String(content || '').replace(/\n?# TG_BOT_WORKER_ROUTE_START[\s\S]*?# TG_BOT_WORKER_ROUTE_END\n?/m, '\n')
 }
 
-function upsertManagedWorkerRoute(content, workerUrl) {
-  const current = String(content || '')
-  const withoutManaged = stripManagedWorkerRouteBlock(current).replace(/\n{3,}/g, '\n\n')
-  const host = getWorkerCustomDomainHost(workerUrl)
-  if (!host) {
-    return { content: withoutManaged, updated: withoutManaged !== current, host: '' }
-  }
-
-  const block = [
-    '# TG_BOT_WORKER_ROUTE_START',
-    '# Managed by TG Bot Deploy Tool. Do not edit this block manually.',
-    'routes = [',
-    `  { pattern = ${JSON.stringify(host)}, custom_domain = true }`,
-    ']',
-    '# TG_BOT_WORKER_ROUTE_END',
-  ].join('\n')
-
-  const firstTableIndex = withoutManaged.search(/^[ \t]*\[/m)
-  const next = firstTableIndex >= 0
-    ? `${withoutManaged.slice(0, firstTableIndex).replace(/\s+$/, '')}\n\n${block}\n\n${withoutManaged.slice(firstTableIndex).replace(/^\s+/, '')}`
-    : `${withoutManaged.replace(/\s+$/, '')}\n\n${block}\n`
-  return { content: next, updated: next !== current, host }
-}
-
 function upsertVarsBlock(content, updates) {
   const entries = Object.entries(updates).filter(([, value]) => String(value || '').trim())
   if (entries.length === 0) return { content, updatedKeys: [] }
@@ -281,12 +257,10 @@ function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl, env = {}) {
 
   const current = fs.readFileSync(localPath, 'utf8')
   let { content, updatedKeys } = upsertVarsBlock(current, updates)
-  if (String(workerUrl || '').trim()) {
-    const route = upsertManagedWorkerRoute(content, normalizedWorker)
-    content = route.content
-    if (route.updated) {
-      updatedKeys.push(route.host ? `WORKER_CUSTOM_DOMAIN:${route.host}` : 'WORKER_CUSTOM_DOMAIN_REMOVED')
-    }
+  const withoutManagedRoute = stripManagedWorkerRouteBlock(content).replace(/\n{3,}/g, '\n\n')
+  if (withoutManagedRoute !== content) {
+    content = withoutManagedRoute
+    updatedKeys.push('WORKER_CUSTOM_DOMAIN_CONFIG_REMOVED')
   }
   if (content !== current) {
     fs.writeFileSync(localPath, content.replace(/\s+$/, '') + '\n', 'utf8')
@@ -321,6 +295,159 @@ function buildCfErrorReason(json, status) {
   return errors.length > 0
     ? errors.map((item) => `${item.code || 'unknown'}:${item.message || 'unknown'}`).join('; ')
     : `http_${status}`
+}
+
+function getCfTokenAndAccount(env = {}, requireAccount = true) {
+  const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
+  if (!token) {
+    throw new Error('missing_cloudflare_api_token')
+  }
+  if (requireAccount && !accountId) {
+    throw new Error('missing_cloudflare_account_id')
+  }
+  return { token, accountId }
+}
+
+async function cfApiRequest(env, resource, options = {}) {
+  const { token } = getCfTokenAndAccount(env, options.requireAccount !== false)
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    ...(options.headers || {}),
+  }
+  let body = options.body
+  if (body !== undefined && body !== null && typeof body !== 'string' && !(body instanceof FormData)) {
+    body = JSON.stringify(body)
+    headers['Content-Type'] = headers['Content-Type'] || 'application/json'
+  }
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4${resource}`, {
+    method: options.method || 'GET',
+    headers,
+    body,
+  })
+  const text = await response.text().catch(() => '')
+  let json = null
+  try { json = text ? JSON.parse(text) : null } catch {}
+
+  if (json?.success || (response.ok && !json?.errors)) {
+    return {
+      ok: true,
+      status: response.status,
+      result: json?.result ?? null,
+      resultInfo: json?.result_info ?? null,
+    }
+  }
+
+  return {
+    ok: false,
+    status: response.status,
+    reason: json ? buildCfErrorReason(json, response.status) : `http_${response.status}${text ? `:${text.slice(0, 180)}` : ''}`,
+    result: json?.result ?? null,
+  }
+}
+
+function getZoneNameCandidatesForHostname(hostname) {
+  const labels = String(hostname || '')
+    .toLowerCase()
+    .replace(/\.$/, '')
+    .split('.')
+    .map((part) => part.trim())
+    .filter(Boolean)
+  const candidates = []
+  for (let index = 0; index < labels.length - 1; index += 1) {
+    candidates.push(labels.slice(index).join('.'))
+  }
+  return [...new Set(candidates)]
+}
+
+async function findZoneForHostname(env, hostname, onProgress) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const candidates = getZoneNameCandidatesForHostname(hostname)
+  if (candidates.length === 0) {
+    return { ok: false, reason: `invalid_hostname:${hostname}` }
+  }
+
+  for (const candidate of candidates) {
+    const query = new URLSearchParams({ name: candidate, per_page: '50' })
+    const response = await cfApiRequest(env, `/zones?${query.toString()}`, { requireAccount: false })
+    if (!response.ok) {
+      return { ok: false, reason: `zone_lookup_failed:${candidate}:${response.reason || 'unknown'}` }
+    }
+
+    const zones = Array.isArray(response.result) ? response.result : []
+    const exactZones = zones.filter((zone) => String(zone?.name || '').toLowerCase() === candidate)
+    const accountZone = exactZones.find((zone) => String(zone?.account?.id || '') === accountId)
+    const zone = accountZone || exactZones[0]
+    if (zone?.id) {
+      onProgress?.(`Cloudflare zone matched: ${hostname} -> ${zone.name}`)
+      return { ok: true, zoneId: String(zone.id), zoneName: String(zone.name || candidate) }
+    }
+  }
+
+  return { ok: false, reason: `zone_not_found_for_hostname:${hostname}; candidates=${candidates.join(',')}` }
+}
+
+async function putWorkerCustomDomain(env, workerName, hostname, zoneId) {
+  const { accountId } = getCfTokenAndAccount(env)
+  return cfApiRequest(env, `/accounts/${accountId}/workers/domains`, {
+    method: 'PUT',
+    body: {
+      environment: 'production',
+      hostname,
+      service: workerName,
+      zone_id: zoneId,
+    },
+  })
+}
+
+async function putWorkerCustomDomainRecords(env, workerName, hostname, zoneId) {
+  const { accountId } = getCfTokenAndAccount(env)
+  return cfApiRequest(env, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/domains/records`, {
+    method: 'PUT',
+    body: {
+      override_scope: true,
+      override_existing_origin: true,
+      override_existing_dns_record: true,
+      origins: [{
+        hostname,
+        zone_id: zoneId,
+        enabled: true,
+      }],
+    },
+  })
+}
+
+async function ensureWorkerCustomDomain(env, configPath, workerUrl, onProgress) {
+  const hostname = getWorkerCustomDomainHost(workerUrl)
+  if (!hostname) {
+    return { ok: true, skipped: true, reason: 'worker_url_is_not_custom_domain' }
+  }
+
+  const workerName = getWorkerNameFromConfig(configPath)
+  if (!workerName) {
+    throw new Error('Worker custom domain binding failed: missing_worker_name_in_config')
+  }
+
+  const zone = await findZoneForHostname(env, hostname, onProgress)
+  if (!zone.ok) {
+    throw new Error(`Worker custom domain binding failed (${hostname} -> ${workerName}): ${zone.reason}`)
+  }
+
+  const primary = await putWorkerCustomDomain(env, workerName, hostname, zone.zoneId)
+  if (primary.ok) {
+    onProgress?.(`Worker custom domain ensured: ${hostname} -> ${workerName}`)
+    return { ok: true, hostname, workerName, zoneId: zone.zoneId, method: 'workers-domains' }
+  }
+
+  onProgress?.(`Worker custom domain primary API failed (${primary.reason || 'unknown'}). Trying override fallback...`)
+  const fallback = await putWorkerCustomDomainRecords(env, workerName, hostname, zone.zoneId)
+  if (fallback.ok) {
+    onProgress?.(`Worker custom domain ensured by override fallback: ${hostname} -> ${workerName}`)
+    return { ok: true, hostname, workerName, zoneId: zone.zoneId, method: 'domains-records' }
+  }
+
+  throw new Error(`Worker custom domain binding failed (${hostname} -> ${workerName}): ${primary.reason || 'unknown'}; fallback=${fallback.reason || 'unknown'}`)
 }
 
 async function createPagesProject(env, projectName) {
@@ -1240,19 +1367,20 @@ async function runAction(action, params, env) {
     case 'deploy-worker':
       {
         const runtimeUpdates = syncRuntimeUrlsToLocalConfig(params?.workerUrl || '', params?.panelUrl || '', env)
-        if (runtimeUpdates.length > 0) send(`Updated wrangler.local.toml vars/routes: ${runtimeUpdates.join(', ')}`)
+        if (runtimeUpdates.length > 0) send(`Updated wrangler.local.toml runtime config: ${runtimeUpdates.join(', ')}`)
       }
       send('Initializing KV...')
       await runScript('setup-kv.mjs', [], env)
       {
         const runtimeUpdates = syncRuntimeUrlsToLocalConfig(params?.workerUrl || '', params?.panelUrl || '', env)
-        if (runtimeUpdates.length > 0) send(`Updated wrangler.local.toml vars/routes: ${runtimeUpdates.join(', ')}`)
+        if (runtimeUpdates.length > 0) send(`Updated wrangler.local.toml runtime config: ${runtimeUpdates.join(', ')}`)
       }
       await runScript('merge-wrangler-config.mjs', [], env)
       const workerConfigPath = getPrivateWranglerPath(env)
       validatePrivateWranglerConfig(workerConfigPath)
       await uploadWorkerViaApi(env, workerConfigPath, send)
       const deploy = await runWrangler(['deploy', '--config', workerConfigPath], env)
+      await ensureWorkerCustomDomain(env, workerConfigPath, params?.workerUrl || '', send)
       {
         const check = await verifyWorkerDeployment(env, workerConfigPath, send, {
           deployOutput: deploy?.output || '',
@@ -1364,7 +1492,7 @@ async function runAction(action, params, env) {
 
       const updatedVars = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
       if (updatedVars.length > 0) {
-        send(`Updated wrangler.local.toml vars/routes: ${updatedVars.join(', ')}`)
+        send(`Updated wrangler.local.toml runtime config: ${updatedVars.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
       }
 
@@ -1374,7 +1502,7 @@ async function runAction(action, params, env) {
       {
         const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
         if (postInitUpdates.length > 0) {
-          send(`Updated wrangler.local.toml vars/routes: ${postInitUpdates.join(', ')}`)
+          send(`Updated wrangler.local.toml runtime config: ${postInitUpdates.join(', ')}`)
         }
       }
       await runScript('merge-wrangler-config.mjs', [], env)
@@ -1383,6 +1511,7 @@ async function runAction(action, params, env) {
       validatePrivateWranglerConfig(workerConfigPath)
       await uploadWorkerViaApi(env, workerConfigPath, send)
       const deploy = await runWrangler(['deploy', '--config', workerConfigPath], env)
+      await ensureWorkerCustomDomain(env, workerConfigPath, effectiveWorkerUrl, send)
       {
         const check = await verifyWorkerDeployment(env, workerConfigPath, send, {
           deployOutput: deploy?.output || '',
@@ -1416,6 +1545,7 @@ async function runAction(action, params, env) {
         send(`Updating Worker runtime vars after Pages deployment: ${finalRuntimeUpdates.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
         const finalDeploy = await runWrangler(['deploy', '--config', workerConfigPath], env)
+        await ensureWorkerCustomDomain(env, workerConfigPath, effectiveWorkerUrl, send)
         const finalCheck = await verifyWorkerDeployment(env, workerConfigPath, send, {
           deployOutput: finalDeploy?.output || '',
           workerUrl: effectiveWorkerUrl,
