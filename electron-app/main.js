@@ -5,7 +5,7 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 
-const DEPLOY_TOOL_VERSION = 'v1.1.17'
+const DEPLOY_TOOL_VERSION = 'v1.1.18'
 
 // paths
 function findRepoRoot() {
@@ -439,9 +439,9 @@ async function verifyPagesDeployment(env, projectName, previousIds = new Set(), 
   if (fallbackUrl) {
     return {
       ok: true,
-      id: 'verified-by-wrangler-output',
+      id: 'verified-by-fallback-url',
       url: fallbackUrl,
-      method: 'wrangler-output',
+      method: 'fallback-url',
       warning: lastReason,
     }
   }
@@ -449,36 +449,281 @@ async function verifyPagesDeployment(env, projectName, previousIds = new Set(), 
   return { ok: false, reason: lastReason }
 }
 
-async function deployPagesViaDirectUpload(tempDist, projectName, branch, env, onProgress) {
-  const uploadToken = await getPagesUploadToken(env, projectName)
-  const manifestPath = path.join(os.tmpdir(), `tg-bot-pages-manifest-${Date.now()}.json`)
+let _blake3Wasm = null
+function requireResourceModule(name) {
+  const candidates = [
+    () => require(name),
+    () => require(path.join(__dirname, 'node_modules', name)),
+    () => require(path.join(getRepoRoot(), 'node_modules', name)),
+    () => app.isPackaged ? require(path.join(process.resourcesPath, 'node_modules', name)) : null,
+  ]
+  let lastError = null
+  for (const load of candidates) {
+    try {
+      const loaded = load()
+      if (loaded) return loaded
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError || new Error(`module_not_found:${name}`)
+}
+
+function getBlake3Wasm() {
+  if (!_blake3Wasm) _blake3Wasm = requireResourceModule('blake3-wasm')
+  return _blake3Wasm
+}
+
+function hashPagesFile(filepath) {
+  const contents = fs.readFileSync(filepath)
+  const base64Contents = contents.toString('base64')
+  const extension = path.extname(filepath).substring(1)
+  return getBlake3Wasm().hash(base64Contents + extension).toString('hex').slice(0, 32)
+}
+
+function getPagesMimeType(name) {
+  const ext = path.extname(name).toLowerCase()
+  const types = {
+    '.html': 'text/html; charset=utf-8',
+    '.htm': 'text/html; charset=utf-8',
+    '.js': 'application/javascript; charset=utf-8',
+    '.mjs': 'application/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.map': 'application/json; charset=utf-8',
+    '.txt': 'text/plain; charset=utf-8',
+    '.svg': 'image/svg+xml',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.ico': 'image/x-icon',
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+    '.ttf': 'font/ttf',
+    '.otf': 'font/otf',
+    '.eot': 'application/vnd.ms-fontobject',
+    '.wasm': 'application/wasm',
+    '.xml': 'application/xml; charset=utf-8',
+    '.webmanifest': 'application/manifest+json; charset=utf-8',
+  }
+  return types[ext] || 'application/octet-stream'
+}
+
+function normalizePagesRelativePath(rootDir, filepath) {
+  return path.relative(rootDir, filepath).split(path.sep).join('/')
+}
+
+function shouldIgnorePagesAsset(relativePath) {
+  const normalized = String(relativePath || '').split('\\').join('/')
+  const parts = normalized.split('/').filter(Boolean)
+  if (['_worker.js', '_redirects', '_headers', '_routes.json'].includes(normalized)) return true
+  if (normalized === 'functions' || normalized.startsWith('functions/')) return true
+  if (parts.includes('.DS_Store') || parts.includes('node_modules') || parts.includes('.git') || parts.includes('.wrangler')) return true
+  return false
+}
+
+function decodeJwtPayload(token) {
+  const payload = String(token || '').split('.')[1] || ''
+  const padded = payload.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - payload.length % 4) % 4)
+  return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'))
+}
+
+function maxPagesFileCountFromClaims(token) {
   try {
-    onProgress?.('Pages direct upload fallback: uploading assets...')
-    await runWrangler(['pages', 'project', 'upload', tempDist, '--output-manifest-path', manifestPath], {
-      ...env,
-      ELECTRON_RUN_AS_NODE: '1',
-      CF_PAGES_UPLOAD_JWT: uploadToken,
-    })
+    const maxFileCountAllowed = decodeJwtPayload(token).max_file_count_allowed
+    return typeof maxFileCountAllowed === 'number' ? maxFileCountAllowed : 20000
+  } catch {
+    return 20000
+  }
+}
 
-    if (!fs.existsSync(manifestPath)) {
-      throw new Error(`manifest_not_created:${manifestPath}`)
-    }
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
-    const fileCount = Object.keys(manifest || {}).length
-    if (fileCount === 0) {
-      throw new Error('manifest_empty')
-    }
+function isPagesUploadTokenExpired(token) {
+  try {
+    return Number(decodeJwtPayload(token).exp || 0) <= Date.now() / 1000
+  } catch {
+    return false
+  }
+}
 
-    onProgress?.(`Pages direct upload fallback: creating deployment with ${fileCount} files...`)
-    const deployment = await createPagesDeploymentFromManifest(env, projectName, manifest, branch || 'main')
-    return {
-      ok: true,
-      id: String(deployment.id || ''),
-      url: normalizeHttpUrl(deployment.url || ''),
-      method: 'direct-upload',
+function collectPagesAssets(rootDir, uploadToken) {
+  const root = path.resolve(rootDir)
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+    throw new Error(`pages_dist_not_found:${root}`)
+  }
+
+  const files = []
+  const maxFiles = maxPagesFileCountFromClaims(uploadToken)
+  const maxAssetSize = 25 * 1024 * 1024
+
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const filepath = path.join(dir, entry.name)
+      const relativePath = normalizePagesRelativePath(root, filepath)
+      if (shouldIgnorePagesAsset(relativePath) || entry.isSymbolicLink()) continue
+      if (entry.isDirectory()) {
+        walk(filepath)
+        continue
+      }
+      if (!entry.isFile()) continue
+
+      const stat = fs.statSync(filepath)
+      if (stat.size > maxAssetSize) {
+        throw new Error(`pages_asset_too_large:${relativePath}:${stat.size}`)
+      }
+      files.push({
+        name: relativePath,
+        path: filepath,
+        contentType: getPagesMimeType(relativePath),
+        sizeInBytes: stat.size,
+        hash: hashPagesFile(filepath),
+      })
     }
-  } finally {
-    try { fs.rmSync(manifestPath, { force: true }) } catch {}
+  }
+
+  walk(root)
+  files.sort((a, b) => a.name.localeCompare(b.name))
+  if (files.length > maxFiles) {
+    throw new Error(`pages_asset_count_exceeded:${files.length}/${maxFiles}`)
+  }
+  return files
+}
+
+function buildPagesManifest(files) {
+  return Object.fromEntries(files.map((file) => [`/${file.name}`, file.hash]))
+}
+
+async function pagesAssetsApi(uploadToken, resource, body) {
+  const response = await fetch(`https://api.cloudflare.com/client/v4${resource}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${uploadToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+
+  const text = await response.text().catch(() => '')
+  let json = null
+  try { json = text ? JSON.parse(text) : null } catch {}
+  if (json?.success) return json.result
+
+  const error = new Error(json ? buildCfErrorReason(json, response.status) : `http_${response.status}${text ? `:${text.slice(0, 180)}` : ''}`)
+  error.status = response.status
+  error.code = Array.isArray(json?.errors) ? json.errors[0]?.code : undefined
+  throw error
+}
+
+function isPagesUploadAuthError(error) {
+  const text = String(error?.message || '')
+  return error?.status === 401 || String(error?.code || '') === '8000013' || text.includes('8000013')
+}
+
+function normalizeHashListResult(result, fallback) {
+  if (Array.isArray(result)) return result.map(String)
+  if (Array.isArray(result?.hashes)) return result.hashes.map(String)
+  return fallback
+}
+
+async function checkMissingPagesAssets(uploadToken, hashes) {
+  if (hashes.length === 0) return []
+  const result = await pagesAssetsApi(uploadToken, '/pages/assets/check-missing', { hashes })
+  return normalizeHashListResult(result, hashes)
+}
+
+function buildPagesUploadBatches(files) {
+  const maxBatchBytes = 20 * 1024 * 1024
+  const maxBatchFiles = 500
+  const batches = []
+  let current = []
+  let currentBytes = 0
+
+  for (const file of files) {
+    const wouldExceedBytes = current.length > 0 && currentBytes + file.sizeInBytes > maxBatchBytes
+    const wouldExceedCount = current.length >= maxBatchFiles
+    if (wouldExceedBytes || wouldExceedCount) {
+      batches.push(current)
+      current = []
+      currentBytes = 0
+    }
+    current.push(file)
+    currentBytes += file.sizeInBytes
+  }
+  if (current.length > 0) batches.push(current)
+  return batches
+}
+
+async function uploadPagesAssetBatch(uploadToken, batch) {
+  const payload = batch.map((file) => ({
+    key: file.hash,
+    value: fs.readFileSync(file.path).toString('base64'),
+    metadata: { contentType: file.contentType },
+    base64: true,
+  }))
+  await pagesAssetsApi(uploadToken, '/pages/assets/upload', payload)
+}
+
+async function upsertPagesAssetHashes(uploadToken, hashes) {
+  if (hashes.length === 0) return
+  await pagesAssetsApi(uploadToken, '/pages/assets/upsert-hashes', { hashes })
+}
+
+async function deployPagesViaDirectUpload(tempDist, projectName, branch, env, onProgress) {
+  let uploadToken = await getPagesUploadToken(env, projectName)
+  const withFreshUploadToken = async (operation) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (isPagesUploadTokenExpired(uploadToken)) {
+        uploadToken = await getPagesUploadToken(env, projectName)
+      }
+      try {
+        return await operation(uploadToken)
+      } catch (error) {
+        if (attempt === 0 && isPagesUploadAuthError(error)) {
+          uploadToken = await getPagesUploadToken(env, projectName)
+          continue
+        }
+        throw error
+      }
+    }
+    throw new Error('pages_upload_token_refresh_failed')
+  }
+
+  const files = collectPagesAssets(tempDist, uploadToken)
+  const hashes = files.map((file) => file.hash)
+  const manifest = buildPagesManifest(files)
+  const fileCount = Object.keys(manifest).length
+  if (fileCount === 0) {
+    throw new Error('manifest_empty')
+  }
+
+  onProgress?.(`Pages direct upload: collected ${fileCount} files.`)
+  const missingHashes = await withFreshUploadToken((token) => checkMissingPagesAssets(token, hashes))
+  const missingSet = new Set(missingHashes.map(String))
+  const missingFiles = files.filter((file) => missingSet.has(file.hash))
+  onProgress?.(`Pages direct upload: uploading ${missingFiles.length} missing files (${fileCount - missingFiles.length} cached).`)
+
+  const batches = buildPagesUploadBatches(missingFiles)
+  let uploaded = 0
+  for (const batch of batches) {
+    await withFreshUploadToken((token) => uploadPagesAssetBatch(token, batch))
+    uploaded += batch.length
+    onProgress?.(`Pages direct upload: uploaded ${uploaded}/${missingFiles.length} missing files.`)
+  }
+
+  try {
+    await withFreshUploadToken((token) => upsertPagesAssetHashes(token, hashes))
+  } catch (error) {
+    onProgress?.(`Pages direct upload warning: hash cache update failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  onProgress?.(`Pages direct upload: creating deployment with ${fileCount} files.`)
+  const deployment = await createPagesDeploymentFromManifest(env, projectName, manifest, branch || 'main')
+  return {
+    ok: true,
+    id: String(deployment.id || ''),
+    url: normalizeHttpUrl(deployment.url || ''),
+    method: 'direct-upload',
   }
 }
 
@@ -926,14 +1171,9 @@ async function runAction(action, params, env) {
         send(`Pages project exists, uploading overwrite: ${projectName}`)
       }
 
-      const beforeDeployments = await listPagesDeployments(env, projectName)
-      const beforeDeploymentIds = new Set((beforeDeployments.deployments || []).map((item) => String(item.id || '')).filter(Boolean))
-      const deployArgs = ['pages', 'deploy', tempDist, '--project-name', projectName, '--branch', params?.branch || 'main']
-      const pagesDeploy = await runWrangler(deployArgs, { ...env, ELECTRON_RUN_AS_NODE: '1' })
-
       const check = await getPagesProject(env, projectName)
       if (!check?.ok || !check.project) {
-        throw new Error(`Pages upload command finished but project verification failed: ${check?.reason || 'unknown'}`)
+        throw new Error(`Pages project verification failed: ${check?.reason || 'unknown'}`)
       }
       const project = check.project
       const subdomain = String(project.subdomain || '').trim()
@@ -944,29 +1184,25 @@ async function runAction(action, params, env) {
       }
 
       const deployedPanelUrl = subdomain ? normalizeHttpUrl(`https://${subdomain}`) : ''
-      let deployment = await verifyPagesDeployment(env, projectName, beforeDeploymentIds, {
-        deployOutput: pagesDeploy?.output || '',
-        projectUrl: deployedPanelUrl,
-        onProgress: send,
-      })
-      if (deployment.warning && String(deployment.warning).includes('no_pages_deployments_found')) {
-        send(`Pages deployment list is empty after Wrangler deploy; using direct upload fallback.`)
-        try {
-          const directDeployment = await deployPagesViaDirectUpload(tempDist, projectName, params?.branch || 'main', env, send)
-          const directCheck = await verifyPagesDeployment(env, projectName, beforeDeploymentIds, {
-            deployOutput: directDeployment.url || '',
-            projectUrl: directDeployment.url || deployedPanelUrl,
-            onProgress: send,
-          })
-          deployment = directCheck.ok
-            ? { ...directCheck, method: directCheck.method || directDeployment.method, url: directCheck.url || directDeployment.url, id: directCheck.id || directDeployment.id }
-            : { ...directDeployment, warning: directCheck.reason || 'direct_upload_created_but_list_not_ready' }
-        } catch (error) {
-          throw new Error(`Pages direct upload fallback failed: ${error instanceof Error ? error.message : String(error)}`)
-        }
+      const beforeDeployments = await listPagesDeployments(env, projectName)
+      const beforeDeploymentIds = new Set((beforeDeployments.deployments || []).map((item) => String(item.id || '')).filter(Boolean))
+      let deployment
+      try {
+        const directDeployment = await deployPagesViaDirectUpload(tempDist, projectName, params?.branch || 'main', env, send)
+        const directCheck = await verifyPagesDeployment(env, projectName, beforeDeploymentIds, {
+          deployOutput: directDeployment.url || '',
+          projectUrl: directDeployment.url || deployedPanelUrl,
+          onProgress: send,
+        })
+        const method = directCheck.method === 'fallback-url' ? directDeployment.method : (directCheck.method || directDeployment.method)
+        deployment = directCheck.ok
+          ? { ...directCheck, method, url: directCheck.url || directDeployment.url || deployedPanelUrl, id: directCheck.id || directDeployment.id }
+          : { ...directDeployment, url: directDeployment.url || deployedPanelUrl, warning: directCheck.reason || 'direct_upload_created_but_list_not_ready' }
+      } catch (error) {
+        throw new Error(`Pages direct upload failed: ${error instanceof Error ? error.message : String(error)}`)
       }
       if (!deployment.ok) {
-        throw new Error(`Pages upload command finished but deployment verification failed: ${deployment.reason || 'unknown'}`)
+        throw new Error(`Pages deployment verification failed: ${deployment.reason || 'unknown'}`)
       }
       send(`Pages deployment verified: ${deployment.id || projectName}${deployment.url ? ` -> ${deployment.url}` : ''}${deployment.method ? ` (${deployment.method})` : ''}`)
       if (deployment.warning) {
