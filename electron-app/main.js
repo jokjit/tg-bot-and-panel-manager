@@ -379,6 +379,508 @@ async function cfApiRequest(env, resource, options = {}) {
   }
 }
 
+async function cfApiTextRequest(env, resource, options = {}) {
+  const { token } = getCfTokenAndAccount(env, options.requireAccount !== false)
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    ...(options.headers || {}),
+  }
+  let body = options.body
+  if (body !== undefined && body !== null && typeof body !== 'string' && !(body instanceof FormData)) {
+    body = JSON.stringify(body)
+    headers['Content-Type'] = headers['Content-Type'] || 'application/json'
+  }
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4${resource}`, {
+    method: options.method || 'GET',
+    headers,
+    body,
+  })
+  const text = await response.text().catch(() => '')
+  let json = null
+  try { json = text ? JSON.parse(text) : null } catch {}
+
+  if (response.ok) {
+    return { ok: true, status: response.status, text, json }
+  }
+
+  return {
+    ok: false,
+    status: response.status,
+    reason: json ? buildCfErrorReason(json, response.status) : `http_${response.status}${text ? `:${text.slice(0, 180)}` : ''}`,
+    text,
+    json,
+  }
+}
+
+function parseIdList(value) {
+  if (!value) return []
+  return String(value)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item))
+}
+
+function createBootstrapPassword(length = 12) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+  const bytes = crypto.randomBytes(length)
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('')
+}
+
+async function telegramApiRequest(botToken, method, payload = {}) {
+  const token = String(botToken || '').trim()
+  const apiMethod = String(method || '').trim()
+  if (!token) throw new Error('missing_bot_token')
+  if (!apiMethod) throw new Error('missing_telegram_method')
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 20000)
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/${apiMethod}`, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json; charset=UTF-8',
+      },
+      body: JSON.stringify(payload || {}),
+      signal: controller.signal,
+    })
+    const data = await response.json().catch(() => null)
+    if (response.ok && data?.ok) {
+      return data.result
+    }
+    throw new Error(String(data?.description || `telegram_http_${response.status}`))
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function getRootAdminIdsFromVars(vars = {}, adminChatId = '') {
+  const ids = parseIdList(vars.ADMIN_IDS || vars.ADMIN_ID)
+  const numericAdminChatId = Number(adminChatId || vars.ADMIN_CHAT_ID || '')
+  if (ids.length === 0 && Number.isFinite(numericAdminChatId) && numericAdminChatId > 0) {
+    ids.push(numericAdminChatId)
+  }
+  return [...new Set(ids.filter((item) => Number.isFinite(item) && item > 0))]
+}
+
+async function getTelegramAdminTargets(botToken, adminChatId, vars = {}) {
+  const targets = [...getRootAdminIdsFromVars(vars, adminChatId)]
+  const numericAdminChatId = Number(adminChatId || vars.ADMIN_CHAT_ID || '')
+  if (Number.isFinite(numericAdminChatId) && numericAdminChatId < 0) {
+    try {
+      const members = await telegramApiRequest(botToken, 'getChatAdministrators', {
+        chat_id: numericAdminChatId,
+      })
+      targets.push(
+        ...(Array.isArray(members) ? members : [])
+          .map((item) => Number(item?.user?.id))
+          .filter((userId) => Number.isFinite(userId) && userId > 0),
+      )
+    } catch {
+      // ignore group admin lookup failures and fall back to configured IDs
+    }
+  }
+  return [...new Set(targets.filter((item) => Number.isFinite(item) && item > 0))]
+}
+
+function buildTelegramCommandSets() {
+  return {
+    userCommands: [
+      { command: 'start', description: '开始使用机器人 / 查看欢迎说明' },
+    ],
+    adminCommands: [
+      { command: 'start', description: '开始使用机器人 / 查看欢迎说明' },
+      { command: 'help', description: '查看管理员帮助' },
+      { command: 'panel', description: '打开管理面板入口' },
+      { command: 'reply', description: '回复用户：/reply 用户ID 内容' },
+      { command: 'ban', description: '拉黑用户：/ban 用户ID 原因' },
+      { command: 'unban', description: '解除拉黑：/unban 用户ID' },
+      { command: 'trust', description: '设为信任用户：/trust 用户ID 备注' },
+      { command: 'untrust', description: '取消信任用户：/untrust 用户ID' },
+      { command: 'restart', description: '要求用户重新验证：/restart 用户ID' },
+      { command: 'user', description: '查看用户详情：/user 用户ID' },
+      { command: 'users', description: '查看最近用户：/users 20' },
+      { command: 'blacklist', description: '查看黑名单列表' },
+      { command: 'admins', description: '查看管理员列表' },
+      { command: 'adminadd', description: '授权管理员：/adminadd 用户ID 备注' },
+      { command: 'admindel', description: '移除管理员：/admindel 用户ID' },
+      { command: 'panelpass', description: '重发当前面板临时密码' },
+      { command: 'panelreset', description: '生成新的面板临时密码' },
+    ],
+  }
+}
+
+async function syncTelegramBotSetupViaApi(options = {}, onProgress) {
+  const botToken = String(options.botToken || '').trim()
+  const adminChatId = String(options.adminChatId || '').trim()
+  const publicBaseUrl = normalizeHttpUrl(options.publicBaseUrl || options.workerUrl || '')
+  const webhookPath = normalizeWebhookPath(options.webhookPath || '/webhook')
+  const vars = options.vars || {}
+  const result = {
+    ok: false,
+    webhookUrl: '',
+    webhookError: null,
+    commandsError: null,
+    failedScopes: [],
+    adminCommandTargets: [],
+  }
+
+  if (!botToken) {
+    result.webhookError = 'missing_bot_token'
+    result.commandsError = 'missing_bot_token'
+    return result
+  }
+  if (!publicBaseUrl) {
+    result.webhookError = 'missing_public_base_url'
+    result.commandsError = 'missing_public_base_url'
+    return result
+  }
+
+  const { userCommands, adminCommands } = buildTelegramCommandSets()
+  const webhookUrl = `${publicBaseUrl}${webhookPath}`
+  result.webhookUrl = webhookUrl
+
+  try {
+    const webhookPayload = { url: webhookUrl }
+    const webhookSecret = String(options.webhookSecret || vars.WEBHOOK_SECRET || '').trim()
+    if (webhookSecret) webhookPayload.secret_token = webhookSecret
+    await telegramApiRequest(botToken, 'setWebhook', webhookPayload)
+    onProgress?.(`直连 Telegram API：Webhook 已设置为 ${webhookUrl}`)
+  } catch (error) {
+    result.webhookError = error instanceof Error ? error.message : String(error)
+  }
+
+  try {
+    await telegramApiRequest(botToken, 'setMyCommands', {
+      scope: { type: 'default' },
+      commands: userCommands,
+    })
+    await telegramApiRequest(botToken, 'setChatMenuButton', {
+      menu_button: { type: 'commands' },
+    })
+
+    const adminTargets = await getTelegramAdminTargets(botToken, adminChatId, vars)
+    result.adminCommandTargets = adminTargets
+    for (const userId of adminTargets) {
+      try {
+        await telegramApiRequest(botToken, 'setMyCommands', {
+          scope: {
+            type: 'chat',
+            chat_id: userId,
+          },
+          commands: adminCommands,
+        })
+      } catch (error) {
+        result.failedScopes.push({
+          userId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+
+    onProgress?.(
+      adminTargets.length > 0
+        ? `直连 Telegram API：默认命令已同步，管理员命令目标 ${adminTargets.length} 个`
+        : '直连 Telegram API：默认命令已同步，未找到可下发管理员命令的私聊用户 ID',
+    )
+    if (result.failedScopes.length > 0) {
+      onProgress?.(
+        `直连 Telegram API：管理员命令有 ${result.failedScopes.length} 个目标下发失败`,
+      )
+    }
+  } catch (error) {
+    result.commandsError = error instanceof Error ? error.message : String(error)
+  }
+
+  result.ok = !result.webhookError && !result.commandsError
+  return result
+}
+
+function getKvNamespaceIdFromConfig(configPath, binding = 'BOT_KV') {
+  if (!fs.existsSync(configPath)) return ''
+  const content = fs.readFileSync(configPath, 'utf8')
+  const block = getBindingBlock(content, 'kv_namespaces', binding)
+  return getTomlString(block, 'id')
+}
+
+async function getKvTextValueViaApi(env, namespaceId, key) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const response = await cfApiTextRequest(
+    env,
+    `/accounts/${accountId}/storage/kv/namespaces/${encodeURIComponent(namespaceId)}/values/${encodeURIComponent(key)}`,
+  )
+  if (response.ok) {
+    return { ok: true, value: response.text || '' }
+  }
+  if (response.status === 404) {
+    return { ok: true, value: '', missing: true }
+  }
+  return { ok: false, reason: response.reason || 'unknown', value: '' }
+}
+
+async function putKvTextValueViaApi(env, namespaceId, key, value) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const response = await cfApiTextRequest(
+    env,
+    `/accounts/${accountId}/storage/kv/namespaces/${encodeURIComponent(namespaceId)}/values/${encodeURIComponent(key)}`,
+    {
+      method: 'PUT',
+      body: String(value ?? ''),
+      headers: {
+        'Content-Type': 'text/plain; charset=UTF-8',
+      },
+    },
+  )
+  return response.ok
+    ? { ok: true }
+    : { ok: false, reason: response.reason || 'unknown' }
+}
+
+async function getSystemConfigViaKvApi(env, namespaceId) {
+  const response = await getKvTextValueViaApi(env, namespaceId, 'sys:config')
+  if (!response.ok) {
+    return { ok: false, reason: response.reason || 'unknown', config: {} }
+  }
+  if (!String(response.value || '').trim()) {
+    return { ok: true, config: {}, missing: true }
+  }
+  try {
+    const config = JSON.parse(response.value)
+    return { ok: true, config: config && typeof config === 'object' ? config : {} }
+  } catch {
+    return { ok: true, config: {} }
+  }
+}
+
+async function putSystemConfigViaKvApi(env, namespaceId, config) {
+  return putKvTextValueViaApi(env, namespaceId, 'sys:config', JSON.stringify(config))
+}
+
+function getAdminPanelUserFromVars(vars = {}) {
+  return String(vars.ADMIN_PANEL_USER || 'admin').trim() || 'admin'
+}
+
+function buildBootstrapPasswordMessage(username, password, expiresAt, panelUrl) {
+  const lines = [
+    '你的管理面板首次临时密码已生成。',
+    `账号：${username || 'admin'}`,
+    `临时密码：${password}`,
+    `有效期至：${expiresAt}`,
+    '请尽快登录并修改为永久密码。',
+  ]
+  if (panelUrl) {
+    lines.splice(1, 0, `面板入口：${panelUrl}`)
+  }
+  return lines.join('\n')
+}
+
+async function notifyBootstrapPasswordViaTelegram(options = {}) {
+  const botToken = String(options.botToken || '').trim()
+  const adminChatId = Number(options.adminChatId)
+  if (!botToken) throw new Error('missing_bot_token')
+  if (!Number.isFinite(adminChatId)) throw new Error('invalid_admin_chat_id')
+
+  await telegramApiRequest(botToken, 'sendMessage', {
+    chat_id: adminChatId,
+    text: buildBootstrapPasswordMessage(
+      options.username,
+      options.password,
+      options.expiresAt,
+      options.panelUrl,
+    ),
+  })
+}
+
+async function ensureAdminPasswordStateViaKvApi(env, options = {}, onProgress) {
+  const namespaceId = String(options.namespaceId || '').trim()
+  const botToken = String(options.botToken || '').trim()
+  const adminChatId = String(options.adminChatId || '').trim()
+  const username = String(options.username || 'admin').trim() || 'admin'
+  const panelUrl = String(options.panelUrl || '').trim()
+
+  if (!namespaceId) {
+    return { ok: false, reason: 'missing_kv_namespace_id', passwordReady: false, passwordMode: 'none' }
+  }
+
+  const configResult = await getSystemConfigViaKvApi(env, namespaceId)
+  if (!configResult.ok) {
+    return { ok: false, reason: configResult.reason || 'system_config_read_failed', passwordReady: false, passwordMode: 'none' }
+  }
+
+  const config = configResult.config || {}
+  const permanentPassword = String(config.ADMIN_PANEL_PASSWORD || '').trim()
+  if (permanentPassword) {
+    onProgress?.('直连 Cloudflare KV：检测到已存在永久面板密码，跳过临时密码重建')
+    return {
+      ok: true,
+      passwordReady: true,
+      passwordMode: 'permanent',
+      password: permanentPassword,
+      bootstrapExpiresAt: null,
+      bootstrapNotifyError: null,
+      config,
+    }
+  }
+
+  if (!botToken || !adminChatId) {
+    return {
+      ok: false,
+      reason: 'missing_bot_token_or_admin_chat_id',
+      passwordReady: false,
+      passwordMode: 'none',
+      config,
+    }
+  }
+
+  const bootstrapPassword = String(config.ADMIN_BOOTSTRAP_PASSWORD || '').trim()
+  const bootstrapExpiresAt = String(config.ADMIN_BOOTSTRAP_EXPIRES_AT || '').trim() || null
+  const bootstrapExpireMs = bootstrapExpiresAt ? new Date(bootstrapExpiresAt).getTime() : 0
+
+  let password = bootstrapPassword
+  let expiresAt = bootstrapExpiresAt
+  let nextConfig = { ...config }
+  let notifyMode = 'resent'
+
+  if (!(bootstrapPassword && bootstrapExpireMs > Date.now())) {
+    password = createBootstrapPassword()
+    expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    nextConfig = {
+      ...config,
+      ADMIN_BOOTSTRAP_PASSWORD: password,
+      ADMIN_BOOTSTRAP_EXPIRES_AT: expiresAt,
+      ADMIN_FORCE_PASSWORD_CHANGE: 'true',
+      updatedAt: new Date().toISOString(),
+    }
+    delete nextConfig.ADMIN_PANEL_PASSWORD
+    delete nextConfig.ADMIN_BOOTSTRAP_NOTIFY_ERROR
+    const saved = await putSystemConfigViaKvApi(env, namespaceId, nextConfig)
+    if (!saved.ok) {
+      return {
+        ok: false,
+        reason: saved.reason || 'system_config_write_failed',
+        passwordReady: false,
+        passwordMode: 'none',
+        config,
+      }
+    }
+    notifyMode = 'created'
+  }
+
+  try {
+    await notifyBootstrapPasswordViaTelegram({
+      botToken,
+      adminChatId,
+      username,
+      password,
+      expiresAt,
+      panelUrl,
+    })
+    if (nextConfig.ADMIN_BOOTSTRAP_NOTIFY_ERROR) {
+      delete nextConfig.ADMIN_BOOTSTRAP_NOTIFY_ERROR
+      nextConfig.updatedAt = new Date().toISOString()
+      await putSystemConfigViaKvApi(env, namespaceId, nextConfig)
+    }
+    onProgress?.(
+      notifyMode === 'created'
+        ? '直连 Cloudflare KV：已生成后台临时密码并发送到 Telegram'
+        : '直连 Cloudflare KV：已重发当前有效的后台临时密码到 Telegram',
+    )
+    return {
+      ok: true,
+      passwordReady: true,
+      passwordMode: 'bootstrap',
+      password,
+      bootstrapExpiresAt: expiresAt,
+      bootstrapNotifyError: null,
+      config: nextConfig,
+    }
+  } catch (error) {
+    const notifyError = error instanceof Error ? error.message : String(error)
+    nextConfig.ADMIN_BOOTSTRAP_NOTIFY_ERROR = notifyError
+    nextConfig.updatedAt = new Date().toISOString()
+    const saved = await putSystemConfigViaKvApi(env, namespaceId, nextConfig)
+    return {
+      ok: false,
+      reason: notifyError,
+      passwordReady: true,
+      passwordMode: 'bootstrap',
+      password,
+      bootstrapExpiresAt: expiresAt,
+      bootstrapNotifyError: notifyError,
+      saveWarning: saved.ok ? null : saved.reason || 'system_config_write_failed',
+      config: nextConfig,
+    }
+  }
+}
+
+function buildBootstrapFallbackReason(result = {}) {
+  return [
+    result.webhookError,
+    result.commandsError,
+    result.bootstrapNotifyError,
+    result.reason,
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .join('; ')
+}
+
+async function triggerDeployBootstrapFallbackViaApis(env, configPath, options = {}, onProgress) {
+  const content = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : ''
+  const vars = parseVarsBlock(content)
+  const publicBaseUrl = normalizeHttpUrl(options.workerUrl || vars.PUBLIC_BASE_URL || '')
+  const panelUrl = normalizeHttpUrl(options.panelUrl || vars.ADMIN_PANEL_URL || '')
+  const panelEntryUrl = buildAdminPanelEntryUrl(publicBaseUrl) || panelUrl
+  const webhookPath = normalizeWebhookPath(vars.WEBHOOK_PATH || '/webhook')
+  const botToken = String(options.botToken || '').trim()
+  const adminChatId = String(options.adminChatId || vars.ADMIN_CHAT_ID || '').trim()
+  const namespaceId = getKvNamespaceIdFromConfig(configPath, 'BOT_KV')
+
+  const telegramSetup = await syncTelegramBotSetupViaApi({
+    botToken,
+    adminChatId,
+    workerUrl: publicBaseUrl,
+    publicBaseUrl,
+    webhookPath,
+    webhookSecret: vars.WEBHOOK_SECRET,
+    vars,
+  }, onProgress)
+
+  const passwordState = await ensureAdminPasswordStateViaKvApi(env, {
+    namespaceId,
+    botToken,
+    adminChatId,
+    username: getAdminPanelUserFromVars(vars),
+    panelUrl: panelEntryUrl,
+  }, onProgress)
+
+  const result = {
+    ok: Boolean(telegramSetup.ok && passwordState.passwordReady && !passwordState.bootstrapNotifyError),
+    webhookUrl: telegramSetup.webhookUrl || (publicBaseUrl ? `${publicBaseUrl}${webhookPath}` : ''),
+    webhookError: telegramSetup.webhookError || null,
+    commandsError: telegramSetup.commandsError || null,
+    failedScopes: telegramSetup.failedScopes || [],
+    adminCommandTargets: telegramSetup.adminCommandTargets || [],
+    passwordReady: Boolean(passwordState.passwordReady),
+    passwordMode: passwordState.passwordMode || 'none',
+    bootstrapNotifyError: passwordState.bootstrapNotifyError || null,
+    reason: buildBootstrapFallbackReason({
+      webhookError: telegramSetup.webhookError,
+      commandsError: telegramSetup.commandsError,
+      bootstrapNotifyError: passwordState.bootstrapNotifyError,
+      reason: passwordState.ok ? '' : passwordState.reason,
+    }),
+  }
+
+  if (result.ok) {
+    onProgress?.(`部署引导兜底已完成：${result.webhookUrl || 'webhook_ready'}`)
+  }
+  return result
+}
+
 function getZoneNameCandidatesForHostname(hostname) {
   const labels = String(hostname || '')
     .toLowerCase()
@@ -2075,7 +2577,17 @@ async function runAction(action, params, env) {
       if (botToken && effectiveWorkerUrl) {
         const bootstrap = await triggerDeployBootstrap(effectiveWorkerUrl, deployBootstrapToken, send)
         if (!bootstrap.ok) {
-          send(`Worker 部署引导警告：${bootstrap.reason || 'unknown'}`)
+          send(`Worker \u90e8\u7f72\u5f15\u5bfc\u4e3b\u94fe\u8def\u5931\u8d25\uff1a${bootstrap.reason || 'unknown'}`)
+          send('\u6b63\u5728\u5207\u6362\u5230 Cloudflare API + Telegram API \u515c\u5e95\u521d\u59cb\u5316...')
+          const fallback = await triggerDeployBootstrapFallbackViaApis(env, workerConfigPath, {
+            botToken,
+            adminChatId,
+            workerUrl: effectiveWorkerUrl,
+            panelUrl: finalPanelUrl,
+          }, send)
+          if (!fallback.ok) {
+            send(`Worker \u90e8\u7f72\u5f15\u5bfc\u8b66\u544a\uff1a${fallback.reason || bootstrap.reason || 'unknown'}`)
+          }
         }
       }
       saveActiveDeployPrefsPatch({
