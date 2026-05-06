@@ -29,6 +29,8 @@ scripts/           # 配置合并和资源初始化辅助脚本
 
 ### 构建客户端
 
+该项目已发布便携式客户端
+
 ```bash
 cd electron-app
 npm install
@@ -48,6 +50,10 @@ cloudflare api设置
 2. 打开首次部署向导，填写 `BOT_TOKEN`、`ADMIN_CHAT_ID`、Worker 地址和面板地址。
 3. 点击开始部署，客户端会自动初始化 KV/D1、上传 Worker、写入 Secrets、绑定 Worker 自定义域名、部署 Pages 面板。
 4. 推荐入口为 `https://你的Worker域名/admin`，Worker 会把 `/admin` 跳转到 Pages 面板。
+### tg设置
+1. 创建一个群聊，并开启话题模式
+2. 把创建好的机器人bot拉进群聊，并授予管理员权限
+
 
 ### 后续操作
 
@@ -66,10 +72,7 @@ cloudflare api设置
 | `ADMIN_CHAT_ID` | 是 | 管理员 Chat ID 或超级群 ID |
 | `TOPIC_MODE` | 否 | 默认 `true`，启用管理员群话题模式 |
 | `USER_VERIFICATION` | 否 | `true` 启用首次验证 |
-| `WEBHOOK_SECRET` | 建议 | Telegram Webhook 安全密钥 |
-| `ADMIN_API_KEY` | 建议 | 后台 API 访问密钥 |
 | `PUBLIC_BASE_URL` | 否 | Worker 对外地址，例如自定义域名 |
-| `ADMIN_PANEL_URL` | 否 | Cloudflare Pages 面板地址 |
 
 ## 首次登录后台
 
@@ -81,11 +84,5 @@ cloudflare api设置
 
 首次部署默认启用话题模式。`ADMIN_CHAT_ID` 建议填写已开启话题功能的 Telegram 超级群 ID，并确保机器人已加入该群且具备创建/管理话题权限。
 
-如果只想让机器人私聊管理员个人账号，可以在后台设置里关闭 `TOPIC_MODE` 后重新部署 Worker。
+如果只想让机器人私聊管理员个人账号，可以在后台设置里关闭 `TOPIC_MODE` 
 
-## 本地开发
-
-```bash
-npm --prefix electron-app run start
-npm run build:panel
-```
