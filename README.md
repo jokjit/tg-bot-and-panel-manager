@@ -44,6 +44,7 @@ cloudflare api设置
 <img width="1108" height="517" alt="image" src="https://github.com/user-attachments/assets/ec8a1aa4-40e9-40c7-8f3e-72a4910fd427" />
 
 下边的选择包含你的cloudflare账户
+
 2. 打开首次部署向导，填写 `BOT_TOKEN`、`ADMIN_CHAT_ID`、Worker 地址和面板地址。
 3. 点击开始部署，客户端会自动初始化 KV/D1、上传 Worker、写入 Secrets、绑定 Worker 自定义域名、部署 Pages 面板。
 4. 推荐入口为 `https://你的Worker域名/admin`，Worker 会把 `/admin` 跳转到 Pages 面板。
