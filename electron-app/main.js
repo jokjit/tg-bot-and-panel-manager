@@ -6,6 +6,7 @@ const { spawn } = require('child_process')
 const crypto = require('crypto')
 
 const DEPLOY_TOOL_VERSION = `v${app.getVersion()}`
+const LEGACY_DEFAULT_PAGES_PANEL_URL = 'https://tg-admin-panel.pages.dev'
 
 // paths
 function findRepoRoot() {
@@ -72,13 +73,14 @@ function normalizeDeployPrefs(input = {}) {
   const asText = (value) => String(value ?? '').trim()
   const openPanelInClient = Boolean(input.openPanelInClient ?? input.useBuiltinPanel)
   const workerUrl = asText(input.workerUrl)
-  const panelUrl = asText(input.panelUrl)
+  const panelUrl = normalizePanelUrl(input.panelUrl)
+  const panelEntryUrl = normalizePanelUrl(input.panelEntryUrl)
   return {
     botToken: asText(input.botToken),
     adminChatId: asText(input.adminChatId),
     workerUrl,
     panelUrl,
-    panelEntryUrl: asText(input.panelEntryUrl) || buildAdminPanelEntryUrl(workerUrl) || panelUrl,
+    panelEntryUrl: panelEntryUrl || buildAdminPanelEntryUrl(workerUrl) || panelUrl,
     openPanelInClient,
   }
 }
@@ -89,7 +91,8 @@ function saveActiveDeployPrefsPatch(patch = {}) {
   if (index < 0) return null
 
   const currentPrefs = normalizeDeployPrefs(accounts[index]?.deployPrefs || {})
-  const nextPrefs = normalizeDeployPrefs({ ...currentPrefs, ...patch })
+  const patchEntries = Object.entries(patch).filter(([, value]) => value !== undefined)
+  const nextPrefs = normalizeDeployPrefs({ ...currentPrefs, ...Object.fromEntries(patchEntries) })
   accounts[index] = { ...accounts[index], deployPrefs: nextPrefs }
   saveAccounts(accounts)
   return nextPrefs
@@ -155,6 +158,12 @@ function normalizeHttpUrl(raw) {
   } catch {
     return ''
   }
+}
+
+function normalizePanelUrl(raw) {
+  const normalized = normalizeHttpUrl(raw)
+  if (!normalized || normalized === LEGACY_DEFAULT_PAGES_PANEL_URL) return ''
+  return normalized
 }
 
 function getUrlOrigin(raw) {
@@ -832,7 +841,7 @@ async function triggerDeployBootstrapFallbackViaApis(env, configPath, options = 
   const content = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : ''
   const vars = parseVarsBlock(content)
   const publicBaseUrl = normalizeHttpUrl(options.workerUrl || vars.PUBLIC_BASE_URL || '')
-  const panelUrl = normalizeHttpUrl(options.panelUrl || vars.ADMIN_PANEL_URL || '')
+  const panelUrl = normalizePanelUrl(options.panelUrl || vars.ADMIN_PANEL_URL || '')
   const panelEntryUrl = buildAdminPanelEntryUrl(publicBaseUrl) || panelUrl
   const webhookPath = normalizeWebhookPath(vars.WEBHOOK_PATH || '/webhook')
   const botToken = String(options.botToken || '').trim()
@@ -2322,7 +2331,7 @@ async function runAction(action, params, env) {
       return
     case 'deploy-worker': {
       let effectiveWorkerUrl = normalizeHttpUrl(params?.workerUrl || '')
-      const effectivePanelUrl = normalizeHttpUrl(params?.panelUrl || '')
+      const effectivePanelUrl = normalizePanelUrl(params?.panelUrl || '')
       const runtimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
       if (runtimeUpdates.length > 0) send(`已更新账号运行配置：${runtimeUpdates.join(', ')}`)
       send('正在初始化 KV 和 D1...')
@@ -2366,7 +2375,7 @@ async function runAction(action, params, env) {
     }
     case 'deploy-panel': {
       const workerUrl = normalizeHttpUrl(params?.workerUrl || '')
-      const panelUrl = normalizeHttpUrl(params?.panelUrl || '')
+      const panelUrl = normalizePanelUrl(params?.panelUrl || '')
       const tempDist = path.join(os.tmpdir(), 'tg-bot-panel-dist-' + Date.now())
       const viteBin = path.join(getAdminPanelDir(), 'node_modules', 'vite', 'bin', 'vite.js')
       const viteEnv = { ...env, ELECTRON_RUN_AS_NODE: '1', VITE_WORKER_BASE_URL: workerUrl }
@@ -2431,12 +2440,19 @@ async function runAction(action, params, env) {
 
       const effectivePanelUrl = panelUrl || deployedPanelUrl || deployment.url
       const panelEntryUrl = buildAdminPanelEntryUrl(workerUrl) || effectivePanelUrl
+      let updatedVars = []
       if (workerUrl || effectivePanelUrl) {
-        const updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env)
+        updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env)
         if (updatedVars.length > 0) {
           send(`已更新账号变量配置：${updatedVars.join(', ')}`)
           await runScript('merge-wrangler-config.mjs', [], env)
         }
+      }
+      if (workerUrl && effectivePanelUrl) {
+        const workerConfigPath = getPrivateWranglerPath(env)
+        validatePrivateWranglerConfig(workerConfigPath)
+        await uploadWorkerViaApi(env, workerConfigPath, send)
+        send(`Worker /admin target synced: ${effectivePanelUrl}`)
       }
       saveActiveDeployPrefsPatch({
         workerUrl: workerUrl || undefined,
@@ -2461,7 +2477,7 @@ async function runAction(action, params, env) {
     case 'first-deploy': {
       const { botToken, adminChatId, workerUrl, panelUrl } = params || {}
       let effectiveWorkerUrl = normalizeHttpUrl(workerUrl || '')
-      const effectivePanelUrl = normalizeHttpUrl(panelUrl || '')
+      const effectivePanelUrl = normalizePanelUrl(panelUrl || '')
       const deployBootstrapToken = crypto.randomBytes(24).toString('hex')
       const workerSecrets = {
         BOT_TOKEN: botToken,

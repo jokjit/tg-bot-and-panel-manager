@@ -536,7 +536,7 @@ let repoRootPath = ""
 
 const UI_LOCALE_KEY = "tg_bot_ui_locale"
 const UI_THEME_KEY = "tg_bot_ui_theme"
-const DEFAULT_PAGES_PANEL_URL = "https://tg-admin-panel.pages.dev"
+const LEGACY_DEFAULT_PAGES_PANEL_URL = "https://tg-admin-panel.pages.dev"
 
 const i18n = {
   zh: {
@@ -583,7 +583,7 @@ const i18n = {
     wizard_advanced: "高级选项（可选）",
     w_worker_label: "Worker 地址（Webhook / 面板入口）",
     w_panel_label: "Pages 面板地址（只读，/admin 跳转目标）",
-    w_panel_ph: "默认使用 Cloudflare 分配的 pages.dev 地址",
+    w_panel_ph: "部署后自动读取 Cloudflare 分配的 pages.dev 地址",
     w_open_panel: "部署完成后在客户端打开面板",
     start_deploy: "开始部署",
     error_prefix: "错误",
@@ -647,7 +647,7 @@ const i18n = {
     wizard_advanced: "Advanced (optional)",
     w_worker_label: "Worker URL (webhook / panel entry)",
     w_panel_label: "Pages panel URL (read-only /admin target)",
-    w_panel_ph: "Use the default Cloudflare pages.dev URL",
+    w_panel_ph: "Auto-detect the Cloudflare-assigned pages.dev URL after deploy",
     w_open_panel: "Open panel in app after deploy",
     start_deploy: "Start Deploy",
     error_prefix: "Error",
@@ -737,7 +737,6 @@ function applyLocale() {
   document.getElementById("w-bot-token").placeholder = t("w_bot_token_ph")
   document.getElementById("w-admin-chat-id").placeholder = t("w_admin_ph")
   document.getElementById("w-panel-url").placeholder = t("w_panel_ph")
-  document.getElementById("w-panel-url").value = wizardPanelUrl.value || DEFAULT_PAGES_PANEL_URL
 
   langToggleBtn.textContent = t("language_toggle")
   themeToggleBtn.textContent = currentTheme === "dark" ? t("theme_toggle_light") : t("theme_toggle_dark")
@@ -762,11 +761,17 @@ function normalizeHttpUrl(raw) {
   }
 }
 
+function normalizePanelUrl(raw) {
+  const normalized = normalizeHttpUrl(raw)
+  if (!normalized || normalized === LEGACY_DEFAULT_PAGES_PANEL_URL) return ""
+  return normalized
+}
+
 function getDeployedPanelUrl(result) {
   if (!result) return ""
-  if (typeof result.panelUrl === "string") return normalizeHttpUrl(result.panelUrl)
+  if (typeof result.panelUrl === "string") return normalizePanelUrl(result.panelUrl)
   if (result.panel && typeof result.panel.panelUrl === "string") {
-    return normalizeHttpUrl(result.panel.panelUrl)
+    return normalizePanelUrl(result.panel.panelUrl)
   }
   return ""
 }
@@ -792,14 +797,14 @@ function buildPanelEntryUrl(workerUrl) {
 
 function getActivePanelUrl() {
   const prefs = currentActiveAccount?.deployPrefs || {}
-  return normalizeHttpUrl(prefs.panelEntryUrl || buildPanelEntryUrl(prefs.workerUrl) || prefs.panelUrl || "")
+  return normalizePanelUrl(prefs.panelUrl) || normalizePanelUrl(prefs.panelEntryUrl) || normalizePanelUrl(buildPanelEntryUrl(prefs.workerUrl))
 }
 
 function getSavedDeployParams() {
   const prefs = currentActiveAccount?.deployPrefs || {}
   return {
     workerUrl: String(prefs.workerUrl || "").trim(),
-    panelUrl: DEFAULT_PAGES_PANEL_URL,
+    panelUrl: normalizePanelUrl(prefs.panelUrl),
     panelEntryUrl: String(prefs.panelEntryUrl || "").trim(),
   }
 }
@@ -809,7 +814,7 @@ function applyWizardPrefsFromActiveAccount() {
   document.getElementById("w-bot-token").value = prefs.botToken || ""
   document.getElementById("w-admin-chat-id").value = prefs.adminChatId || ""
   wizardWorkerUrl.value = prefs.workerUrl || ""
-  wizardPanelUrl.value = DEFAULT_PAGES_PANEL_URL
+  wizardPanelUrl.value = normalizePanelUrl(prefs.panelUrl)
   wizardOpenPanelInClient.checked = Boolean(prefs.openPanelInClient ?? prefs.useBuiltinPanel)
 }
 
@@ -818,7 +823,7 @@ function getWizardParams() {
     botToken: document.getElementById("w-bot-token").value.trim(),
     adminChatId: document.getElementById("w-admin-chat-id").value.trim(),
     workerUrl: wizardWorkerUrl.value.trim(),
-    panelUrl: DEFAULT_PAGES_PANEL_URL,
+    panelUrl: normalizePanelUrl(wizardPanelUrl.value),
     openPanelInClient: Boolean(wizardOpenPanelInClient.checked),
   }
 }
