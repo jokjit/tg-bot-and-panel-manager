@@ -47,7 +47,7 @@ cloudflare api设置
 
 下边的选择包含你的cloudflare账户
 
-2. 打开首次部署向导，填写 `BOT_TOKEN`、`ADMIN_CHAT_ID`、Worker 地址和面板地址。
+2. 打开首次部署向导，填写 `BOT_TOKEN`、`ADMIN_CHAT_ID`，并在高级选项中按需填写 Worker 地址、验证页面域名（`VERIFY_PUBLIC_BASE_URL`）。
 3. 点击开始部署，客户端会自动初始化 KV/D1、上传 Worker、写入 Secrets、绑定 Worker 自定义域名、部署 Pages 面板。
 4. 推荐入口为 `https://你的Worker域名/admin`，Worker 会把 `/admin` 跳转到 Pages 面板。
 ### tg设置
@@ -73,6 +73,7 @@ cloudflare api设置
 | `TOPIC_MODE` | 否 | 默认 `true`，启用管理员群话题模式 |
 | `USER_VERIFICATION` | 否 | `true` 启用首次验证 |
 | `PUBLIC_BASE_URL` | 否 | Worker 对外地址，例如自定义域名 |
+| `VERIFY_PUBLIC_BASE_URL` | 否 | 验证页面对外域名；留空时默认使用 `PUBLIC_BASE_URL` |
 
 ## 首次登录后台
 

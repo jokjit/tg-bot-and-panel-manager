@@ -73,12 +73,14 @@ function normalizeDeployPrefs(input = {}) {
   const asText = (value) => String(value ?? '').trim()
   const openPanelInClient = Boolean(input.openPanelInClient ?? input.useBuiltinPanel)
   const workerUrl = asText(input.workerUrl)
+  const verifyPublicBaseUrl = normalizeHttpUrl(input.verifyPublicBaseUrl)
   const panelUrl = normalizePanelUrl(input.panelUrl)
   const panelEntryUrl = normalizePanelUrl(input.panelEntryUrl)
   return {
     botToken: asText(input.botToken),
     adminChatId: asText(input.adminChatId),
     workerUrl,
+    verifyPublicBaseUrl,
     panelUrl,
     panelEntryUrl: panelEntryUrl || buildAdminPanelEntryUrl(workerUrl) || panelUrl,
     openPanelInClient,
@@ -307,6 +309,12 @@ function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl, env = {}, extraUpdate
     fs.writeFileSync(localPath, content.replace(/\s+$/, '') + '\n', 'utf8')
   }
   return updatedKeys
+}
+
+function buildVerificationRuntimeVarUpdates(params = {}) {
+  const verifyPublicBaseUrl = normalizeHttpUrl(params?.verifyPublicBaseUrl || '')
+  if (!verifyPublicBaseUrl) return {}
+  return { VERIFY_PUBLIC_BASE_URL: verifyPublicBaseUrl }
 }
 
 async function getPagesProject(env, projectName) {
@@ -2332,12 +2340,13 @@ async function runAction(action, params, env) {
     case 'deploy-worker': {
       let effectiveWorkerUrl = normalizeHttpUrl(params?.workerUrl || '')
       const effectivePanelUrl = normalizePanelUrl(params?.panelUrl || '')
-      const runtimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+      const runtimeVarUpdates = buildVerificationRuntimeVarUpdates(params)
+      const runtimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
       if (runtimeUpdates.length > 0) send(`已更新账号运行配置：${runtimeUpdates.join(', ')}`)
       send('正在初始化 KV 和 D1...')
       await ensureKvBindingViaApi(env, {}, send)
       await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
-      const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+      const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
       if (postInitUpdates.length > 0) send(`已更新账号运行配置：${postInitUpdates.join(', ')}`)
       await runScript('merge-wrangler-config.mjs', [], env)
       const workerConfigPath = getPrivateWranglerPath(env)
@@ -2347,7 +2356,7 @@ async function runAction(action, params, env) {
       await waitForWorkerEndpointWarmup(publicEndpoint, send)
       effectiveWorkerUrl = normalizeHttpUrl(publicEndpoint.workerUrl || effectiveWorkerUrl || '')
       if (effectiveWorkerUrl) {
-        const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+        const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
         if (endpointUpdates.length > 0) {
           await runScript('merge-wrangler-config.mjs', [], env)
         }
@@ -2362,6 +2371,7 @@ async function runAction(action, params, env) {
       send(`Worker 已验证：${check.workerName}${check.method ? ` (${check.method})` : ''}`)
       saveActiveDeployPrefsPatch({
         workerUrl: effectiveWorkerUrl || undefined,
+        verifyPublicBaseUrl: runtimeVarUpdates.VERIFY_PUBLIC_BASE_URL || undefined,
         panelUrl: effectivePanelUrl || undefined,
         panelEntryUrl: buildAdminPanelEntryUrl(effectiveWorkerUrl) || effectivePanelUrl || undefined,
       })
@@ -2376,6 +2386,7 @@ async function runAction(action, params, env) {
     case 'deploy-panel': {
       const workerUrl = normalizeHttpUrl(params?.workerUrl || '')
       const panelUrl = normalizePanelUrl(params?.panelUrl || '')
+      const runtimeVarUpdates = buildVerificationRuntimeVarUpdates(params)
       const tempDist = path.join(os.tmpdir(), 'tg-bot-panel-dist-' + Date.now())
       const viteBin = path.join(getAdminPanelDir(), 'node_modules', 'vite', 'bin', 'vite.js')
       const viteEnv = { ...env, ELECTRON_RUN_AS_NODE: '1', VITE_WORKER_BASE_URL: workerUrl }
@@ -2441,8 +2452,8 @@ async function runAction(action, params, env) {
       const effectivePanelUrl = panelUrl || deployedPanelUrl || deployment.url
       const panelEntryUrl = buildAdminPanelEntryUrl(workerUrl) || effectivePanelUrl
       let updatedVars = []
-      if (workerUrl || effectivePanelUrl) {
-        updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env)
+      if (workerUrl || effectivePanelUrl || Object.keys(runtimeVarUpdates).length > 0) {
+        updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env, runtimeVarUpdates)
         if (updatedVars.length > 0) {
           send(`已更新账号变量配置：${updatedVars.join(', ')}`)
           await runScript('merge-wrangler-config.mjs', [], env)
@@ -2456,6 +2467,7 @@ async function runAction(action, params, env) {
       }
       saveActiveDeployPrefsPatch({
         workerUrl: workerUrl || undefined,
+        verifyPublicBaseUrl: runtimeVarUpdates.VERIFY_PUBLIC_BASE_URL || undefined,
         panelUrl: effectivePanelUrl || undefined,
         panelEntryUrl: panelEntryUrl || undefined,
       })
@@ -2475,8 +2487,12 @@ async function runAction(action, params, env) {
       return { worker: workerResult || null, panel: panelResult || null }
     }
     case 'first-deploy': {
-      const { botToken, adminChatId, workerUrl, panelUrl } = params || {}
+      const { botToken, adminChatId, workerUrl, verifyPublicBaseUrl, panelUrl } = params || {}
       let effectiveWorkerUrl = normalizeHttpUrl(workerUrl || '')
+      const effectiveVerifyPublicBaseUrl = normalizeHttpUrl(verifyPublicBaseUrl || '')
+      const runtimeVarUpdates = effectiveVerifyPublicBaseUrl
+        ? { VERIFY_PUBLIC_BASE_URL: effectiveVerifyPublicBaseUrl }
+        : {}
       const effectivePanelUrl = normalizePanelUrl(panelUrl || '')
       const deployBootstrapToken = crypto.randomBytes(24).toString('hex')
       const workerSecrets = {
@@ -2487,7 +2503,12 @@ async function runAction(action, params, env) {
       send('步骤 1/4：合并配置...')
       await runScript('merge-wrangler-config.mjs', [], env)
 
-      const updatedVars = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, { TOPIC_MODE: 'true' })
+      const updatedVars = syncRuntimeUrlsToLocalConfig(
+        effectiveWorkerUrl,
+        effectivePanelUrl,
+        env,
+        { TOPIC_MODE: 'true', ...runtimeVarUpdates },
+      )
       if (updatedVars.length > 0) {
         send(`已更新账号运行配置：${updatedVars.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
@@ -2497,7 +2518,7 @@ async function runAction(action, params, env) {
       await ensureKvBindingViaApi(env, {}, send)
       await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
       {
-        const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+        const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
         if (postInitUpdates.length > 0) {
           send(`已更新账号运行配置：${postInitUpdates.join(', ')}`)
         }
@@ -2511,7 +2532,7 @@ async function runAction(action, params, env) {
       await waitForWorkerEndpointWarmup(publicEndpoint, send)
       effectiveWorkerUrl = normalizeHttpUrl(publicEndpoint.workerUrl || effectiveWorkerUrl || '')
       if (effectiveWorkerUrl) {
-        const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+        const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
         if (endpointUpdates.length > 0) {
           await runScript('merge-wrangler-config.mjs', [], env)
         }
@@ -2544,7 +2565,11 @@ async function runAction(action, params, env) {
         }
       }
       send('步骤 4/4：部署 Pages 面板...')
-      const panelResult = await runAction('deploy-panel', { workerUrl: effectiveWorkerUrl, panelUrl: effectivePanelUrl }, env)
+      const panelResult = await runAction(
+        'deploy-panel',
+        { workerUrl: effectiveWorkerUrl, verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl, panelUrl: effectivePanelUrl },
+        env,
+      )
       if (panelResult?.panelUrl) {
         send(`Pages 面板地址：${panelResult.panelUrl}`)
       }
@@ -2553,7 +2578,7 @@ async function runAction(action, params, env) {
       }
       const finalPanelUrl = panelResult?.panelUrl || effectivePanelUrl
       const finalPanelEntryUrl = panelResult?.panelEntryUrl || buildAdminPanelEntryUrl(effectiveWorkerUrl) || finalPanelUrl
-      const finalRuntimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, finalPanelUrl, env)
+      const finalRuntimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, finalPanelUrl, env, runtimeVarUpdates)
       if (finalRuntimeUpdates.length > 0) {
         send(`Pages 部署后正在更新 Worker 运行变量：${finalRuntimeUpdates.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
@@ -2562,7 +2587,7 @@ async function runAction(action, params, env) {
         await waitForWorkerEndpointWarmup(publicEndpoint, send)
         effectiveWorkerUrl = normalizeHttpUrl(publicEndpoint.workerUrl || effectiveWorkerUrl || '')
         if (effectiveWorkerUrl) {
-          const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env)
+          const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
           if (endpointUpdates.length > 0) {
             await runScript('merge-wrangler-config.mjs', [], env)
           }
@@ -2610,6 +2635,7 @@ async function runAction(action, params, env) {
         botToken: botToken || undefined,
         adminChatId: adminChatId || undefined,
         workerUrl: effectiveWorkerUrl || undefined,
+        verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl || undefined,
         panelUrl: finalPanelUrl || undefined,
         panelEntryUrl: finalPanelEntryUrl || undefined,
         openPanelInClient: Boolean(params?.openPanelInClient),

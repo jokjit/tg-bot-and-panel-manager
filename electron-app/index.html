@@ -524,6 +524,10 @@ body[data-theme="dark"] {
         <input id="w-worker-url" placeholder="https://your-worker.example.com" />
       </div>
       <div style="margin-top:10px;">
+        <label id="w-verify-public-base-url-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Verification URL base (optional)</label>
+        <input id="w-verify-public-base-url" placeholder="https://verify.example.com" />
+      </div>
+      <div style="margin-top:10px;">
         <label id="w-panel-url-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Panel URL</label>
         <input id="w-panel-url" placeholder="Cloudflare Pages default URL" readonly />
       </div>
@@ -546,6 +550,7 @@ const statusText = document.getElementById("status-text")
 const cards = document.querySelectorAll(".card[data-action]")
 const wizardModal = document.getElementById("wizard-modal")
 const wizardWorkerUrl = document.getElementById("w-worker-url")
+const wizardVerifyPublicBaseUrl = document.getElementById("w-verify-public-base-url")
 const wizardPanelUrl = document.getElementById("w-panel-url")
 const wizardOpenPanelInClient = document.getElementById("w-open-panel-in-client")
 
@@ -621,6 +626,8 @@ const i18n = {
     w_admin_ph: "管理员用户 ID 或群组 ID",
     wizard_advanced: "高级选项（可选）",
     w_worker_label: "Worker 地址（Webhook / 面板入口）",
+    w_verify_base_label: "验证页面域名（可选）",
+    w_verify_base_ph: "留空则使用 Worker 地址（PUBLIC_BASE_URL）",
     w_panel_label: "Pages 面板地址（只读，/admin 跳转目标）",
     w_panel_ph: "部署后自动读取 Cloudflare 分配的 pages.dev 地址",
     w_open_panel: "部署完成后在客户端打开面板",
@@ -685,6 +692,8 @@ const i18n = {
     w_admin_ph: "Admin user ID or group ID",
     wizard_advanced: "Advanced (optional)",
     w_worker_label: "Worker URL (webhook / panel entry)",
+    w_verify_base_label: "Verification URL base (optional)",
+    w_verify_base_ph: "Leave empty to use Worker URL (PUBLIC_BASE_URL)",
     w_panel_label: "Pages panel URL (read-only /admin target)",
     w_panel_ph: "Auto-detect the Cloudflare-assigned pages.dev URL after deploy",
     w_open_panel: "Open panel in app after deploy",
@@ -764,6 +773,7 @@ function applyLocale() {
   document.getElementById("w-admin-chat-id-label").textContent = t("w_admin_label")
   document.getElementById("wizard-advanced-summary").textContent = t("wizard_advanced")
   document.getElementById("w-worker-url-label").textContent = t("w_worker_label")
+  document.getElementById("w-verify-public-base-url-label").textContent = t("w_verify_base_label")
   document.getElementById("w-panel-url-label").textContent = t("w_panel_label")
   document.getElementById("w-open-panel-in-client-text").textContent = t("w_open_panel")
   document.getElementById("cancel-wizard").textContent = t("cancel")
@@ -775,6 +785,7 @@ function applyLocale() {
   document.getElementById("f-email").placeholder = t("f_email_ph")
   document.getElementById("w-bot-token").placeholder = t("w_bot_token_ph")
   document.getElementById("w-admin-chat-id").placeholder = t("w_admin_ph")
+  document.getElementById("w-verify-public-base-url").placeholder = t("w_verify_base_ph")
   document.getElementById("w-panel-url").placeholder = t("w_panel_ph")
 
   langToggleBtn.textContent = t("language_toggle")
@@ -843,6 +854,7 @@ function getSavedDeployParams() {
   const prefs = currentActiveAccount?.deployPrefs || {}
   return {
     workerUrl: String(prefs.workerUrl || "").trim(),
+    verifyPublicBaseUrl: normalizeHttpUrl(prefs.verifyPublicBaseUrl || ""),
     panelUrl: normalizePanelUrl(prefs.panelUrl),
     panelEntryUrl: String(prefs.panelEntryUrl || "").trim(),
   }
@@ -853,6 +865,7 @@ function applyWizardPrefsFromActiveAccount() {
   document.getElementById("w-bot-token").value = prefs.botToken || ""
   document.getElementById("w-admin-chat-id").value = prefs.adminChatId || ""
   wizardWorkerUrl.value = prefs.workerUrl || ""
+  wizardVerifyPublicBaseUrl.value = normalizeHttpUrl(prefs.verifyPublicBaseUrl || "")
   wizardPanelUrl.value = normalizePanelUrl(prefs.panelUrl)
   wizardOpenPanelInClient.checked = Boolean(prefs.openPanelInClient ?? prefs.useBuiltinPanel)
 }
@@ -862,6 +875,7 @@ function getWizardParams() {
     botToken: document.getElementById("w-bot-token").value.trim(),
     adminChatId: document.getElementById("w-admin-chat-id").value.trim(),
     workerUrl: wizardWorkerUrl.value.trim(),
+    verifyPublicBaseUrl: normalizeHttpUrl(wizardVerifyPublicBaseUrl.value),
     panelUrl: normalizePanelUrl(wizardPanelUrl.value),
     openPanelInClient: Boolean(wizardOpenPanelInClient.checked),
   }
