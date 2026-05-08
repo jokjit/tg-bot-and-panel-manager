@@ -42,6 +42,13 @@
               <n-form-item class="settings-grid-span-2" :label="t('settings.publicBaseUrl')">
                 <n-input v-model:value="form.PUBLIC_BASE_URL" :placeholder="t('settings.publicBaseUrlPlaceholder')" />
               </n-form-item>
+
+              <n-form-item class="settings-grid-span-2" :label="t('settings.verifyPublicBaseUrl')">
+                <n-input
+                  v-model:value="form.VERIFY_PUBLIC_BASE_URL"
+                  :placeholder="t('settings.verifyPublicBaseUrlPlaceholder')"
+                />
+              </n-form-item>
             </div>
           </n-card>
         </n-gi>
@@ -198,6 +205,7 @@ const form = reactive({
   BOT_TOKEN: '',
   ADMIN_CHAT_ID: '',
   PUBLIC_BASE_URL: '',
+  VERIFY_PUBLIC_BASE_URL: '',
   TOPIC_MODE_BOOL: true,
   USER_VERIFICATION_BOOL: true,
   VERIFY_CAPTCHA_ENABLED_BOOL: true,
@@ -229,6 +237,7 @@ function onMotionChange(next) {
 function assignConfig(cfg = {}) {
   form.ADMIN_CHAT_ID = cfg.ADMIN_CHAT_ID || '';
   form.PUBLIC_BASE_URL = cfg.PUBLIC_BASE_URL || '';
+  form.VERIFY_PUBLIC_BASE_URL = cfg.VERIFY_PUBLIC_BASE_URL || '';
   form.TOPIC_MODE_BOOL = String(cfg.TOPIC_MODE || 'true') !== 'false';
   form.USER_VERIFICATION_BOOL = String(cfg.USER_VERIFICATION || 'true') !== 'false';
   form.VERIFY_CAPTCHA_ENABLED_BOOL = String(cfg.VERIFY_CAPTCHA_ENABLED ?? 'true') !== 'false';
@@ -258,6 +267,7 @@ async function save() {
     const payload = {
       ADMIN_CHAT_ID: form.ADMIN_CHAT_ID,
       PUBLIC_BASE_URL: form.PUBLIC_BASE_URL,
+      VERIFY_PUBLIC_BASE_URL: form.VERIFY_PUBLIC_BASE_URL,
       TOPIC_MODE: form.TOPIC_MODE_BOOL ? 'true' : 'false',
       USER_VERIFICATION: form.USER_VERIFICATION_BOOL ? 'true' : 'false',
       VERIFY_CAPTCHA_ENABLED: form.VERIFY_CAPTCHA_ENABLED_BOOL ? 'true' : 'false',

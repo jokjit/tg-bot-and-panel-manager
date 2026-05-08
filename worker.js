@@ -836,7 +836,7 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
     }
 
     await restartUserVerification(env, userId, formatAdminOperator(message.from));
-    await sendAdminNotice(env, message, `已要求用户重新验证：${userId}`);
+    await sendAdminNotice(env, message, `已重置用户验证：${userId}\n用户下一条消息将触发新的验证入口。`);
     return true;
   }
 
@@ -1044,8 +1044,8 @@ async function handleAdminActionCallback(callbackQuery, env) {
 
   if (action === 'restart') {
     await restartUserVerification(env, userId, formatAdminOperator(callbackQuery.from));
-    await sendAdminNotice(env, sourceMessage, `已通过按钮要求用户重新验证：${userId}`);
-    await answerCallback(env, callbackQuery.id, '已要求用户重新验证');
+    await sendAdminNotice(env, sourceMessage, `已通过按钮重置用户验证：${userId}\n用户下一条消息将触发新的验证入口。`);
+    await answerCallback(env, callbackQuery.id, '已重置，等待用户发新消息触发验证');
     return;
   }
 
@@ -2897,8 +2897,31 @@ function createGridChallengeForWebVerification() {
   };
 }
 
+function normalizeVerificationBaseUrl(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const withProtocol = /^https?:\/\//i.test(text) ? text : `https://${text}`;
+  try {
+    const parsed = new URL(withProtocol);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return '';
+    }
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch (error) {
+    return '';
+  }
+}
+
+function getVerificationBaseUrl(env = null, fallbackBaseUrl = '') {
+  const custom = normalizeVerificationBaseUrl(env?.VERIFY_PUBLIC_BASE_URL || '');
+  if (custom) return custom;
+  return normalizeVerificationBaseUrl(fallbackBaseUrl || env?.PUBLIC_BASE_URL || '');
+}
+
 function buildVerificationWebUrl(state, userId, publicBaseUrl = '') {
-  const base = String(publicBaseUrl || '').trim().replace(/\/$/, '');
+  const base = getVerificationBaseUrl(null, publicBaseUrl);
   if (!base || !state?.sessionToken) return '';
   const params = new URLSearchParams({
     uid: String(userId),
@@ -3038,8 +3061,12 @@ function base64Encode(input) {
   return btoa(binary);
 }
 
-async function sendVerificationWebPrompt(env, userId, state, publicBaseUrl = '') {
-  const verifyUrl = buildVerificationWebUrl(state, userId, publicBaseUrl || env.PUBLIC_BASE_URL || '');
+async function sendVerificationWebPrompt(env, userId, state, publicBaseUrl = '', forceNewMessage = false) {
+  const verifyUrl = buildVerificationWebUrl(
+    state,
+    userId,
+    getVerificationBaseUrl(env, publicBaseUrl || env.PUBLIC_BASE_URL || ''),
+  );
   const maxAttempts = getVerifyStageMaxAttempts(env);
   const lines = [
     '🔐 首次私聊验证（双重挑战）',
@@ -3049,7 +3076,7 @@ async function sendVerificationWebPrompt(env, userId, state, publicBaseUrl = '')
   ];
 
   if (!verifyUrl) {
-    lines.push('未找到可用验证链接，请联系管理员配置 PUBLIC_BASE_URL。');
+    lines.push('未找到可用验证链接，请联系管理员配置 VERIFY_PUBLIC_BASE_URL 或 PUBLIC_BASE_URL。');
   } else {
     lines.push('点击下方按钮打开验证页面。');
   }
@@ -3064,7 +3091,7 @@ async function sendVerificationWebPrompt(env, userId, state, publicBaseUrl = '')
       : undefined,
   };
 
-  const promptMessageId = Number(state?.promptMessageId || 0);
+  const promptMessageId = forceNewMessage ? 0 : Number(state?.promptMessageId || 0);
   if (promptMessageId) {
     try {
       await telegram(env, 'editMessageText', {
@@ -3085,7 +3112,7 @@ async function sendVerificationWebPrompt(env, userId, state, publicBaseUrl = '')
 
 async function handleVerificationApiRequest(request, url, env) {
   if (!isUserVerificationEnabled(env)) {
-    throw new AppError(403, 'verification is disabled');
+    throw new AppError(403, '当前未开启验证');
   }
   ensureKv(env);
 
@@ -3107,17 +3134,17 @@ async function handleVerificationApiRequest(request, url, env) {
     return json({ ok: true, ...result }, 200, {}, request);
   }
 
-  throw new AppError(404, 'verification api path not found');
+  throw new AppError(404, '未找到验证接口');
 }
 
 function parseVerificationApiIdentity(body) {
   const userId = Number(body?.userId ?? body?.uid);
   if (!(Number.isInteger(userId) && userId > 0)) {
-    throw new AppError(400, 'invalid userId');
+    throw new AppError(400, 'userId 无效');
   }
   const token = String(body?.token || '').trim();
   if (!token) {
-    throw new AppError(400, 'missing token');
+    throw new AppError(400, '缺少验证令牌');
   }
   return { userId, token };
 }
@@ -3131,16 +3158,16 @@ async function handleVerificationSessionApi(env, body) {
   const { userId, token } = parseVerificationApiIdentity(body);
   const state = await getUserVerificationState(env, userId);
   if (!state) {
-    throw new AppError(401, 'verification session not found');
+    throw new AppError(401, '验证会话不存在');
   }
   if (state?.verified) {
     return buildVerificationSessionPayload(state, env);
   }
   if (!state?.sessionToken) {
-    throw new AppError(401, 'verification session not found');
+    throw new AppError(401, '验证会话不存在');
   }
   if (!timingSafeEqualText(token, state.sessionToken)) {
-    throw new AppError(401, 'verification token mismatch');
+    throw new AppError(401, '验证会话不匹配');
   }
 
   const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
@@ -3163,7 +3190,7 @@ async function handleVerificationSliderApi(env, body) {
   const { userId, token } = parseVerificationApiIdentity(body);
   const current = await getUserVerificationState(env, userId);
   if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
-    throw new AppError(401, 'verification token mismatch');
+    throw new AppError(401, '验证会话不匹配');
   }
 
   if (current?.verified) {
@@ -3171,7 +3198,7 @@ async function handleVerificationSliderApi(env, body) {
   }
 
   if (isVerificationSessionExpired(current)) {
-    throw new AppError(410, 'verification session expired');
+    throw new AppError(410, '验证会话已过期');
   }
 
   if (current?.stage === 'grid') {
@@ -3223,7 +3250,7 @@ async function handleVerificationGridApi(env, body) {
   const { userId, token } = parseVerificationApiIdentity(body);
   const current = await getUserVerificationState(env, userId);
   if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
-    throw new AppError(401, 'verification token mismatch');
+    throw new AppError(401, '验证会话不匹配');
   }
 
   if (current?.verified) {
@@ -3231,7 +3258,7 @@ async function handleVerificationGridApi(env, body) {
   }
 
   if (isVerificationSessionExpired(current)) {
-    throw new AppError(410, 'verification session expired');
+    throw new AppError(410, '验证会话已过期');
   }
 
   if (current?.stage !== 'grid') {
@@ -3426,15 +3453,17 @@ async function reportVerificationFailureToTopic(env, userId, state) {
     const topicId = getVerifyFailTopicId(env);
     const stage = String(state?.lastLockStage || state?.stage || 'unknown');
     const reason = String(state?.lastLockReason || 'verification_failed');
+    const stageText = formatVerificationStageText(stage);
+    const reasonText = formatVerificationReasonText(reason);
     const text = [
-      '🚨 Verification failed and locked',
-      `User: ${profile?.displayName || 'Unknown'}${profile?.username ? ` @${profile.username}` : ''}`,
-      `User ID: ${userId}`,
-      `Stage: ${stage}`,
-      `Reason: ${reason}`,
-      `Blocked until: ${state?.blockedUntil || 'unknown'}`,
-      `Slider attempts: ${Number(state?.slider?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
-      `Grid attempts: ${Number(state?.grid?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
+      '🚨 验证失败并已锁定',
+      `用户：${profile?.displayName || '未知用户'}${profile?.username ? ` @${profile.username}` : ''}`,
+      `用户ID：${userId}`,
+      `阶段：${stageText} (${stage})`,
+      `原因：${reasonText} (${reason})`,
+      `锁定至：${state?.blockedUntil || '未知'}`,
+      `滑块尝试：${Number(state?.slider?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
+      `九宫格尝试：${Number(state?.grid?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
     ].join('\n');
 
     await telegramWithThreadFallback(env, 'sendMessage', {
@@ -3446,6 +3475,31 @@ async function reportVerificationFailureToTopic(env, userId, state) {
   } catch (error) {
     // keep locked state even if report fails
   }
+}
+
+function formatVerificationStageText(stage) {
+  const normalized = String(stage || '').toLowerCase();
+  if (normalized === 'slider') return '滑块拼图';
+  if (normalized === 'grid') return '九宫格点选';
+  if (normalized === 'blocked') return '锁定状态';
+  return '未知阶段';
+}
+
+function formatVerificationReasonText(reason) {
+  const normalized = String(reason || '').toLowerCase();
+  if (normalized === 'slider_position_mismatch') return '滑块位置不匹配';
+  if (normalized === 'slider_value_invalid') return '滑块值无效';
+  if (normalized === 'slider_missing') return '滑块题目缺失';
+  if (normalized === 'trace_too_short') return '滑动轨迹过短';
+  if (normalized === 'trace_too_fast') return '滑动速度过快';
+  if (normalized === 'trace_not_enough_segments') return '滑动轨迹分段不足';
+  if (normalized === 'trace_direction_invalid') return '轨迹方向异常';
+  if (normalized === 'trace_distance_invalid') return '轨迹位移异常';
+  if (normalized === 'trace_too_linear') return '轨迹过于线性';
+  if (normalized === 'trace_variance_too_low') return '轨迹波动不足';
+  if (normalized === 'grid_selection_mismatch') return '九宫格选择错误';
+  if (normalized === 'verification_failed') return '验证失败';
+  return '未知原因';
 }
 
 function buildVerificationFailureAdminKeyboard(userId) {
@@ -3645,6 +3699,7 @@ async function restartUserVerification(env, userId, operator = 'unknown') {
     verified: false,
     verifiedAt: null,
     answeredAt: null,
+    promptMessageId: null,
     blockedUntil: null,
     stage: null,
     sessionToken: null,
@@ -3973,6 +4028,7 @@ async function getRuntimeEnv(env) {
     'ADMIN_ID',
     'WEBHOOK_SECRET',
     'PUBLIC_BASE_URL',
+    'VERIFY_PUBLIC_BASE_URL',
     'WEBHOOK_PATH',
     'TOPIC_MODE',
     'USER_VERIFICATION',
@@ -4111,6 +4167,7 @@ async function getEffectiveSystemConfig(env) {
     'ADMIN_ID',
     'WEBHOOK_SECRET',
     'PUBLIC_BASE_URL',
+    'VERIFY_PUBLIC_BASE_URL',
     'WEBHOOK_PATH',
     'TOPIC_MODE',
     'USER_VERIFICATION',
@@ -4358,6 +4415,7 @@ async function updateSystemConfig(env, payload) {
     'ADMIN_ID',
     'WEBHOOK_SECRET',
     'PUBLIC_BASE_URL',
+    'VERIFY_PUBLIC_BASE_URL',
     'WEBHOOK_PATH',
     'TOPIC_MODE',
     'USER_VERIFICATION',
@@ -4391,6 +4449,7 @@ function buildSystemConfigView(config) {
     ADMIN_IDS: config.ADMIN_IDS || config.ADMIN_ID || '',
     WEBHOOK_SECRET: maskSecret(config.WEBHOOK_SECRET),
     PUBLIC_BASE_URL: config.PUBLIC_BASE_URL || '',
+    VERIFY_PUBLIC_BASE_URL: config.VERIFY_PUBLIC_BASE_URL || '',
     WEBHOOK_PATH: config.WEBHOOK_PATH || '',
     TOPIC_MODE: config.TOPIC_MODE || '',
     USER_VERIFICATION: config.USER_VERIFICATION || '',
@@ -5168,70 +5227,198 @@ function renderVerificationWebPage() {
   <title>安全验证</title>
   <style>
     :root{
-      --bg:#f6f9fc;
+      --bg:#f4f7fb;
       --card:#ffffff;
-      --line:#d9e2ec;
-      --text:#12263a;
-      --muted:#486581;
-      --ok:#12733c;
-      --warn:#b06b00;
-      --err:#b00020;
-      --accent:#0b84ff;
-      --accent-2:#005cc5;
+      --panel:#f8fbff;
+      --line:#d6e0ee;
+      --line-strong:#bfd0e5;
+      --text:#132b45;
+      --muted:#4f6985;
+      --brand:#1372d3;
+      --brand-2:#0b57a7;
+      --brand-soft:#e8f3ff;
+      --ok:#0f7745;
+      --warn:#a46a00;
+      --err:#ab1d2d;
+      --shadow:0 22px 55px rgba(24,57,92,.14);
     }
     *{box-sizing:border-box}
+    html,body{height:100%}
     body{
       margin:0;
-      font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
-      background:
-        radial-gradient(circle at 0 0,rgba(11,132,255,.08),transparent 40%),
-        radial-gradient(circle at 100% 100%,rgba(0,92,197,.12),transparent 45%),
-        var(--bg);
-      min-height:100vh;
+      font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei','Segoe UI',sans-serif;
       color:var(--text);
+      background:
+        radial-gradient(1200px 520px at -15% -10%,rgba(19,114,211,.11),transparent 55%),
+        radial-gradient(900px 460px at 115% -5%,rgba(29,184,122,.12),transparent 60%),
+        linear-gradient(180deg,#f6f9fd,#f2f6fb);
       display:flex;
       justify-content:center;
-      padding:18px;
+      padding:16px;
     }
     .shell{
       width:min(760px,100%);
       background:var(--card);
       border:1px solid var(--line);
-      border-radius:16px;
-      box-shadow:0 18px 42px rgba(16,42,67,.12);
+      border-radius:20px;
       overflow:hidden;
+      box-shadow:var(--shadow);
+      position:relative;
+      isolation:isolate;
     }
-    .head{
-      padding:18px 20px 14px;
+    .shell::before{
+      content:'';
+      position:absolute;
+      inset:-120px auto auto -120px;
+      width:260px;
+      height:260px;
+      border-radius:50%;
+      background:radial-gradient(circle,rgba(19,114,211,.2),rgba(19,114,211,0));
+      pointer-events:none;
+      animation:floatGlow 8s ease-in-out infinite;
+      z-index:-1;
+    }
+    .shell::after{
+      content:'';
+      position:absolute;
+      inset:auto -90px -110px auto;
+      width:240px;
+      height:240px;
+      border-radius:50%;
+      background:radial-gradient(circle,rgba(29,184,122,.18),rgba(29,184,122,0));
+      pointer-events:none;
+      animation:floatGlow 10s ease-in-out infinite reverse;
+      z-index:-1;
+    }
+    .hero{
+      padding:20px 22px 16px;
       border-bottom:1px solid var(--line);
-      background:linear-gradient(120deg,#f6fbff,#eef8ff 48%,#f8fffb);
+      background:linear-gradient(135deg,#f7fbff,#eef7ff 54%,#f6fff9);
     }
-    .head h1{
-      margin:0 0 4px;
-      font-size:22px;
+    .hero-head{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:10px;
+    }
+    .title{
+      margin:0;
+      font-size:34px;
+      line-height:1.1;
+      font-weight:900;
+      letter-spacing:.4px;
+    }
+    .subtitle{
+      margin:8px 0 0;
+      color:var(--muted);
+      font-size:17px;
+      line-height:1.6;
+      font-weight:520;
+    }
+    .hero-tag{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      font-size:12px;
+      color:#1a4e84;
+      border:1px solid #b8d2ef;
+      background:rgba(255,255,255,.8);
+      border-radius:999px;
+      padding:5px 10px;
+      white-space:nowrap;
+      margin-top:4px;
+    }
+    .flow{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:8px;
+      margin-top:14px;
+    }
+    .flow-item{
+      border:1px dashed var(--line-strong);
+      background:#fff;
+      border-radius:12px;
+      padding:10px 12px;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      transition:.22s ease;
+    }
+    .flow-item i{
+      width:22px;
+      height:22px;
+      border-radius:50%;
+      border:2px solid #a8bed8;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      font-size:12px;
+      color:#4f6985;
+      flex:0 0 auto;
+      font-style:normal;
       font-weight:700;
+      background:#fff;
+    }
+    .flow-item span{
+      font-size:13px;
+      font-weight:700;
+      color:#3f5975;
       letter-spacing:.2px;
     }
-    .head p{
-      margin:0;
-      color:var(--muted);
-      font-size:13px;
-      line-height:1.6;
+    .flow-item.active{
+      border-style:solid;
+      border-color:#9fc3ea;
+      background:var(--brand-soft);
+      transform:translateY(-1px);
+    }
+    .flow-item.active i{
+      border-color:#5d97d5;
+      color:#12539f;
+      background:#e8f2ff;
+    }
+    .flow-item.done{
+      border-style:solid;
+      border-color:#8fd1b4;
+      background:#ecfbf2;
+    }
+    .flow-item.done i{
+      border-color:#3eaa72;
+      color:#0f7745;
+      background:#e3f8ed;
     }
     .content{
       padding:18px 20px 22px;
       display:grid;
-      gap:16px;
+      gap:14px;
     }
+    .status{
+      border-radius:14px;
+      padding:12px 14px;
+      border:1px solid var(--line);
+      background:var(--panel);
+      color:#375170;
+      font-size:14px;
+      line-height:1.7;
+      white-space:pre-wrap;
+    }
+    .status.ok{border-color:#9fd4b8;background:#ecfbf2;color:var(--ok)}
+    .status.warn{border-color:#e9cc8a;background:#fff8e9;color:var(--warn)}
+    .status.err{border-color:#edafb8;background:#fff1f3;color:var(--err)}
     .panel{
       border:1px solid var(--line);
-      border-radius:12px;
-      padding:14px;
       background:#fff;
+      border-radius:16px;
+      padding:16px;
+      animation:fadeInUp .28s ease both;
     }
     .panel h2{
       margin:0 0 10px;
-      font-size:17px;
+      font-size:42px;
+      line-height:1.1;
+      letter-spacing:.2px;
+      font-weight:900;
+      font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
     }
     .meta{
       display:flex;
@@ -5240,32 +5427,20 @@ function renderVerificationWebPage() {
       margin-bottom:12px;
     }
     .chip{
-      font-size:12px;
-      border:1px solid #c8d6e5;
-      padding:4px 9px;
+      border:1px solid #bdd0e6;
+      background:#f5fbff;
       border-radius:999px;
-      color:#334e68;
-      background:#f9fcff;
-    }
-    .status{
-      border-radius:10px;
-      padding:10px 12px;
-      border:1px solid #d8e2ec;
-      background:#f8fbff;
-      color:#334e68;
+      padding:6px 11px;
       font-size:13px;
-      line-height:1.6;
-      white-space:pre-wrap;
+      color:#3a5976;
+      font-weight:600;
     }
-    .status.ok{border-color:#abd9c3;background:#f2fbf6;color:var(--ok)}
-    .status.warn{border-color:#ffd488;background:#fff9ef;color:var(--warn)}
-    .status.err{border-color:#ffb6c1;background:#fff3f5;color:var(--err)}
-    .puzzle-wrap{
-      position:relative;
-      border:1px solid var(--line);
-      border-radius:10px;
-      background:#eef4fb;
+    .board{
+      border:1px solid #c0d2e7;
+      border-radius:14px;
       overflow:hidden;
+      background:#e8eff7;
+      position:relative;
       margin-bottom:10px;
       touch-action:none;
     }
@@ -5279,38 +5454,54 @@ function renderVerificationWebPage() {
     }
     .piece{
       position:absolute;
-      border:2px solid rgba(13,36,68,.75);
-      background:rgba(255,255,255,.36);
-      border-radius:10px;
-      box-shadow:0 2px 8px rgba(20,40,80,.28);
+      border:3px solid rgba(31,59,89,.78);
+      background:linear-gradient(160deg,rgba(255,255,255,.45),rgba(255,255,255,.18));
+      border-radius:16px;
+      box-shadow:0 10px 24px rgba(24,46,74,.28), inset 0 0 0 1px rgba(255,255,255,.45);
       pointer-events:none;
       transition:left .04s linear;
     }
     .slider-row{
       display:grid;
-      gap:9px;
+      gap:10px;
       margin-top:8px;
     }
-    .slider-row input[type=range]{width:100%}
+    .slider-row input[type=range]{
+      width:100%;
+      accent-color:#1a76d7;
+      height:32px;
+    }
+    .tiny{
+      font-size:14px;
+      color:#56738f;
+      line-height:1.65;
+    }
     .actions{
       display:flex;
-      gap:10px;
       flex-wrap:wrap;
-      margin-top:10px;
+      gap:10px;
+      margin-top:12px;
     }
-    button{
+    .primary-btn{
       border:0;
-      border-radius:10px;
-      background:linear-gradient(135deg,var(--accent),var(--accent-2));
+      border-radius:14px;
+      background:linear-gradient(135deg,var(--brand),var(--brand-2));
       color:#fff;
-      padding:10px 14px;
-      font-size:14px;
-      font-weight:700;
+      min-width:160px;
+      padding:12px 18px;
+      font-size:17px;
+      font-weight:820;
+      letter-spacing:.3px;
+      box-shadow:0 8px 18px rgba(19,114,211,.25);
       cursor:pointer;
+      transition:.2s ease;
     }
-    button[disabled]{
+    .primary-btn:hover{transform:translateY(-1px);box-shadow:0 12px 22px rgba(19,114,211,.3)}
+    .primary-btn:active{transform:translateY(1px)}
+    .primary-btn[disabled]{
+      opacity:.55;
       cursor:not-allowed;
-      opacity:.5;
+      box-shadow:none;
     }
     .grid{
       display:grid;
@@ -5319,29 +5510,69 @@ function renderVerificationWebPage() {
       margin-top:8px;
     }
     .grid button{
-      min-height:76px;
-      background:#eef4fb;
-      color:#102a43;
-      border:1px solid #c8d6e5;
-      font-size:28px;
-      font-weight:600;
-      transition:transform .08s ease,border-color .08s ease,background .08s ease;
+      min-height:88px;
+      border:1px solid #bfd0e5;
+      border-radius:16px;
+      background:linear-gradient(180deg,#f2f8ff,#e6f0fb);
+      color:#183955;
+      font-size:34px;
+      font-weight:700;
+      transition:transform .12s ease,border-color .12s ease,box-shadow .12s ease,background .12s ease;
+      cursor:pointer;
     }
-    .grid button:active{transform:scale(.98)}
+    .grid button:hover{
+      border-color:#7aaada;
+      box-shadow:0 10px 18px rgba(34,72,112,.12);
+      transform:translateY(-1px);
+    }
+    .grid button:active{transform:scale(.985)}
     .grid button.selected{
-      border-color:#0b84ff;
-      background:#d9ecff;
-      box-shadow:inset 0 0 0 1px rgba(11,132,255,.25);
+      border-color:#1770cf;
+      background:linear-gradient(180deg,#daebff,#c8e2ff);
+      box-shadow:0 0 0 3px rgba(23,112,207,.15);
     }
-    .tiny{font-size:12px;color:#627d98;line-height:1.6}
+    .foot{
+      color:#6a839d;
+      font-size:13px;
+      line-height:1.65;
+    }
     .hide{display:none}
+    @keyframes floatGlow{
+      0%,100%{transform:translateY(0)}
+      50%{transform:translateY(-8px)}
+    }
+    @keyframes fadeInUp{
+      from{opacity:0;transform:translateY(8px)}
+      to{opacity:1;transform:translateY(0)}
+    }
+    @media (max-width:640px){
+      body{padding:10px}
+      .shell{border-radius:16px}
+      .hero{padding:16px}
+      .title{font-size:31px}
+      .subtitle{font-size:15px}
+      .content{padding:14px}
+      .panel{padding:14px}
+      .panel h2{font-size:38px}
+      .grid button{min-height:82px;font-size:32px}
+      .primary-btn{width:100%}
+    }
   </style>
 </head>
 <body>
   <main class="shell">
-    <header class="head">
-      <h1>两步安全验证</h1>
-      <p>先完成滑块拼图，再完成九宫格九选二。每一步最多 3 次，超限将锁定 60 分钟。</p>
+    <header class="hero">
+      <div class="hero-head">
+        <div>
+          <h1 class="title">两步安全验证</h1>
+          <p class="subtitle">先完成滑块拼图，再完成九宫格九选二。每一步最多 3 次，超限将锁定 60 分钟。</p>
+        </div>
+        <span class="hero-tag">Bot Shield v2</span>
+      </div>
+      <div class="flow">
+        <div id="stageOne" class="flow-item"><i>1</i><span>滑块拼图</span></div>
+        <div id="stageTwo" class="flow-item"><i>2</i><span>九宫格点选</span></div>
+      </div>
     </header>
     <section class="content">
       <div id="status" class="status">正在加载验证会话...</div>
@@ -5352,16 +5583,16 @@ function renderVerificationWebPage() {
           <span id="sliderAttemptChip" class="chip"></span>
           <span class="chip">需检测滑动轨迹</span>
         </div>
-        <div id="puzzleWrap" class="puzzle-wrap">
+        <div id="puzzleWrap" class="board">
           <img id="puzzleBg" class="puzzle-bg" alt="slider puzzle" />
           <div id="piece" class="piece"></div>
         </div>
         <div class="slider-row">
           <input id="sliderInput" type="range" min="0" step="1" value="0" />
-          <div class="tiny">拖动滑块使拼图块与缺口对齐，然后提交。</div>
+          <div class="tiny">拖动滑块使图块与缺口对齐，然后提交。</div>
         </div>
         <div class="actions">
-          <button id="sliderSubmitBtn" type="button">提交第一步</button>
+          <button id="sliderSubmitBtn" class="primary-btn" type="button">提交第一步</button>
         </div>
       </section>
 
@@ -5373,9 +5604,9 @@ function renderVerificationWebPage() {
         </div>
         <div id="gridCells" class="grid"></div>
         <div class="actions">
-          <button id="gridSubmitBtn" type="button" disabled>提交第二步</button>
+          <button id="gridSubmitBtn" class="primary-btn" type="button" disabled>提交第二步</button>
         </div>
-        <div id="gridHint" class="tiny"></div>
+        <div id="gridHint" class="foot">当前已选择 0/2</div>
       </section>
     </section>
   </main>
@@ -5397,6 +5628,8 @@ function renderVerificationWebPage() {
 
       const el = {
         status: document.getElementById('status'),
+        stageOne: document.getElementById('stageOne'),
+        stageTwo: document.getElementById('stageTwo'),
         sliderPanel: document.getElementById('sliderPanel'),
         sliderInput: document.getElementById('sliderInput'),
         sliderSubmitBtn: document.getElementById('sliderSubmitBtn'),
@@ -5436,6 +5669,21 @@ function renderVerificationWebPage() {
         el.status.textContent = text;
       }
 
+      function setStageState(stage, doneFirst = false, doneSecond = false) {
+        el.stageOne.classList.remove('active', 'done');
+        el.stageTwo.classList.remove('active', 'done');
+        if (doneFirst) {
+          el.stageOne.classList.add('done');
+        } else if (stage === 'slider') {
+          el.stageOne.classList.add('active');
+        }
+        if (doneSecond) {
+          el.stageTwo.classList.add('done');
+        } else if (stage === 'grid') {
+          el.stageTwo.classList.add('active');
+        }
+      }
+
       function clearBlockedTimer() {
         if (state.blockedTimer) {
           clearInterval(state.blockedTimer);
@@ -5453,11 +5701,13 @@ function renderVerificationWebPage() {
         }
 
         if (payload.status === 'verified') {
+          setStageState('done', true, true);
           setStatus('验证已通过，你可以返回 Telegram 继续发送消息。', 'ok');
           return;
         }
 
         if (payload.status === 'blocked') {
+          setStageState('');
           startBlockedCountdown(payload.blockedUntil);
           return;
         }
@@ -5472,6 +5722,7 @@ function renderVerificationWebPage() {
           return;
         }
 
+        setStageState('');
         setStatus('未知状态，请返回 Telegram 重新发起验证。', 'err');
       }
 
@@ -5489,6 +5740,7 @@ function renderVerificationWebPage() {
         const targetY = Number(slider.targetY || 56);
         const attemptsLeft = Number(payload.sliderAttemptsLeft || 0);
 
+        setStageState('slider', false, false);
         el.sliderPanel.classList.remove('hide');
         el.sliderAttemptChip.textContent = '剩余次数：' + attemptsLeft;
         el.sliderInput.max = String(maxX);
@@ -5518,6 +5770,7 @@ function renderVerificationWebPage() {
         const promptSymbols = Array.isArray(grid.promptSymbols) ? grid.promptSymbols : [];
         const attemptsLeft = Number(payload.gridAttemptsLeft || 0);
 
+        setStageState('grid', true, false);
         el.gridPanel.classList.remove('hide');
         el.gridAttemptChip.textContent = '剩余次数：' + attemptsLeft;
         el.gridPromptChip.textContent = '请选择：' + promptSymbols.join(' 与 ');
@@ -5676,7 +5929,7 @@ function renderVerificationWebPage() {
         });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok || !data.ok) {
-          throw new Error(data.error || 'request_failed_' + resp.status);
+          throw new Error(data.error || '请求失败_' + resp.status);
         }
         return data;
       }
