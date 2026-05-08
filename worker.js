@@ -57,7 +57,16 @@ export default {
       }
 
       if (request.method === 'GET' && url.pathname === VERIFY_WEB_PATH) {
-        return html(renderVerificationWebPage(), 200, request);
+        return html(
+          renderVerificationWebPage(),
+          200,
+          request,
+          {
+            'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+            pragma: 'no-cache',
+            expires: '0',
+          },
+        );
       }
 
       if (request.method === 'POST' && url.pathname.startsWith(VERIFY_API_PREFIX)) {
@@ -1364,7 +1373,8 @@ async function ensureUserVerifiedOrPrompt(message, env, publicBaseUrl = '') {
   }
 
   const nextState = await createOrRefreshVerificationWebSession(env, userId, {
-    forceNew: false,
+    // 一次一码：每次触发验证入口都强制刷新会话令牌，避免旧链接/缓存复用
+    forceNew: true,
   });
   await sendVerificationWebPrompt(env, userId, nextState, publicBaseUrl);
   return false;
@@ -3115,23 +3125,28 @@ async function handleVerificationApiRequest(request, url, env) {
     throw new AppError(403, '当前未开启验证');
   }
   ensureKv(env);
+  const noCacheHeaders = {
+    'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+    pragma: 'no-cache',
+    expires: '0',
+  };
 
   const body = await readJsonBody(request);
   const pathname = url.pathname;
 
   if (pathname === `${VERIFY_API_PREFIX}/session`) {
     const result = await handleVerificationSessionApi(env, body);
-    return json({ ok: true, ...result }, 200, {}, request);
+    return json({ ok: true, ...result }, 200, noCacheHeaders, request);
   }
 
   if (pathname === `${VERIFY_API_PREFIX}/slider`) {
     const result = await handleVerificationSliderApi(env, body);
-    return json({ ok: true, ...result }, 200, {}, request);
+    return json({ ok: true, ...result }, 200, noCacheHeaders, request);
   }
 
   if (pathname === `${VERIFY_API_PREFIX}/grid`) {
     const result = await handleVerificationGridApi(env, body);
-    return json({ ok: true, ...result }, 200, {}, request);
+    return json({ ok: true, ...result }, 200, noCacheHeaders, request);
   }
 
   throw new AppError(404, '未找到验证接口');
@@ -3161,7 +3176,7 @@ async function handleVerificationSessionApi(env, body) {
     throw new AppError(401, '验证会话不存在');
   }
   if (state?.verified) {
-    return buildVerificationSessionPayload(state, env);
+    throw new AppError(410, '验证链接已失效，请返回 Telegram 点击最新验证按钮。');
   }
   if (!state?.sessionToken) {
     throw new AppError(401, '验证会话不存在');
@@ -5134,12 +5149,13 @@ function shuffleArray(items) {
   return arr;
 }
 
-function html(content, status = 200, request = null) {
+function html(content, status = 200, request = null, extraHeaders = {}) {
   return new Response(content, {
     status,
     headers: {
       'content-type': 'text/html; charset=UTF-8',
       ...corsHeaders(request),
+      ...extraHeaders,
     },
   });
 }
@@ -5624,6 +5640,8 @@ function renderVerificationWebPage() {
         sliderDragging: false,
         selected: new Set(),
         blockedTimer: null,
+        loadingSession: false,
+        pendingSessionReload: false,
       };
 
       const el = {
@@ -5653,14 +5671,45 @@ function renderVerificationWebPage() {
       bindSliderEvents();
       bindGridEvents();
       loadSession();
+      window.addEventListener('pageshow', () => loadSession({ silent: true }));
+      window.addEventListener('focus', () => loadSession({ silent: true }));
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+          loadSession({ silent: true });
+        }
+      });
 
-      async function loadSession() {
+      async function loadSession(options = {}) {
+        const silent = Boolean(options && options.silent);
+        if (state.loadingSession) {
+          state.pendingSessionReload = true;
+          return;
+        }
+        state.loadingSession = true;
         try {
+          if (!silent) {
+            setStatus('正在加载验证会话...', 'warn');
+          }
           const payload = await callApi('/session', {});
           state.payload = payload;
           renderByPayload(payload);
         } catch (error) {
-          setStatus('加载失败：' + String(error.message || error), 'err');
+          const message = String(error.message || error);
+          if (
+            message.includes('验证会话不匹配') ||
+            message.includes('验证会话不存在') ||
+            message.includes('验证链接已失效')
+          ) {
+            setStatus('当前验证链接已失效，请返回 Telegram 点击最新验证按钮。', 'err');
+          } else {
+            setStatus('加载失败：' + message, 'err');
+          }
+        } finally {
+          state.loadingSession = false;
+          if (state.pendingSessionReload) {
+            state.pendingSessionReload = false;
+            loadSession({ silent: true });
+          }
         }
       }
 
@@ -5920,6 +5969,7 @@ function renderVerificationWebPage() {
       async function callApi(path, extra) {
         const resp = await fetch(API_PREFIX + path, {
           method: 'POST',
+          cache: 'no-store',
           headers: { 'content-type': 'application/json;charset=UTF-8' },
           body: JSON.stringify({
             userId,
