@@ -5259,7 +5259,7 @@ function renderVerificationWebPage() {
       --shadow:0 22px 55px rgba(24,57,92,.14);
     }
     *{box-sizing:border-box}
-    html,body{height:100%}
+    html,body{height:100%;min-height:100%}
     body{
       margin:0;
       font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei','Segoe UI',sans-serif;
@@ -5270,7 +5270,8 @@ function renderVerificationWebPage() {
         linear-gradient(180deg,#f6f9fd,#f2f6fb);
       display:flex;
       justify-content:center;
-      padding:16px;
+      padding:calc(10px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
+      overflow:auto;
     }
     .shell{
       width:min(760px,100%);
@@ -5281,6 +5282,9 @@ function renderVerificationWebPage() {
       box-shadow:var(--shadow);
       position:relative;
       isolation:isolate;
+      max-height:calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 24px);
+      display:flex;
+      flex-direction:column;
     }
     .shell::before{
       content:'';
@@ -5320,7 +5324,7 @@ function renderVerificationWebPage() {
     }
     .title{
       margin:0;
-      font-size:34px;
+      font-size:clamp(30px,7.2vw,34px);
       line-height:1.1;
       font-weight:900;
       letter-spacing:.4px;
@@ -5407,6 +5411,9 @@ function renderVerificationWebPage() {
       padding:18px 20px 22px;
       display:grid;
       gap:14px;
+      overflow-y:auto;
+      overscroll-behavior:contain;
+      padding-bottom:calc(22px + env(safe-area-inset-bottom));
     }
     .status{
       border-radius:14px;
@@ -5430,11 +5437,12 @@ function renderVerificationWebPage() {
     }
     .panel h2{
       margin:0 0 10px;
-      font-size:42px;
-      line-height:1.1;
+      font-size:clamp(26px,7vw,42px);
+      line-height:1.16;
       letter-spacing:.2px;
       font-weight:900;
       font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+      word-break:break-word;
     }
     .meta{
       display:flex;
@@ -5457,8 +5465,10 @@ function renderVerificationWebPage() {
       overflow:hidden;
       background:#e8eff7;
       position:relative;
-      margin-bottom:10px;
+      margin:0 auto 10px;
       touch-action:none;
+      width:100%;
+      max-width:320px;
     }
     .puzzle-bg{
       width:100%;
@@ -5497,6 +5507,12 @@ function renderVerificationWebPage() {
       flex-wrap:wrap;
       gap:10px;
       margin-top:12px;
+      position:sticky;
+      bottom:-1px;
+      padding-top:10px;
+      padding-bottom:calc(10px + env(safe-area-inset-bottom));
+      background:linear-gradient(180deg,rgba(255,255,255,0) 0%,rgba(255,255,255,.92) 34%,#fff 62%);
+      z-index:3;
     }
     .primary-btn{
       border:0;
@@ -5526,12 +5542,13 @@ function renderVerificationWebPage() {
       margin-top:8px;
     }
     .grid button{
-      min-height:88px;
+      min-height:76px;
+      aspect-ratio:1/1;
       border:1px solid #bfd0e5;
       border-radius:16px;
       background:linear-gradient(180deg,#f2f8ff,#e6f0fb);
       color:#183955;
-      font-size:34px;
+      font-size:clamp(28px,7.2vw,34px);
       font-weight:700;
       transition:transform .12s ease,border-color .12s ease,box-shadow .12s ease,background .12s ease;
       cursor:pointer;
@@ -5562,16 +5579,25 @@ function renderVerificationWebPage() {
       to{opacity:1;transform:translateY(0)}
     }
     @media (max-width:640px){
-      body{padding:10px}
+      body{padding:calc(8px + env(safe-area-inset-top)) 8px calc(10px + env(safe-area-inset-bottom))}
       .shell{border-radius:16px}
       .hero{padding:16px}
-      .title{font-size:31px}
+      .title{font-size:clamp(27px,8vw,31px)}
       .subtitle{font-size:15px}
       .content{padding:14px}
       .panel{padding:14px}
-      .panel h2{font-size:38px}
-      .grid button{min-height:82px;font-size:32px}
+      .panel h2{font-size:clamp(26px,10.5vw,34px)}
+      .grid button{min-height:70px;font-size:clamp(24px,9vw,30px)}
       .primary-btn{width:100%}
+      .chip{font-size:12px;padding:5px 10px}
+    }
+    @media (max-width:380px){
+      .hero{padding:14px}
+      .flow-item{padding:8px 10px}
+      .flow-item span{font-size:12px}
+      .panel h2{font-size:clamp(23px,9.8vw,30px)}
+      .grid{gap:8px}
+      .grid button{border-radius:14px}
     }
   </style>
 </head>
@@ -5638,6 +5664,8 @@ function renderVerificationWebPage() {
         sliderTrace: [],
         sliderDragStart: 0,
         sliderDragging: false,
+        sliderScale: 1,
+        sliderView: null,
         selected: new Set(),
         blockedTimer: null,
         loadingSession: false,
@@ -5673,6 +5701,11 @@ function renderVerificationWebPage() {
       loadSession();
       window.addEventListener('pageshow', () => loadSession({ silent: true }));
       window.addEventListener('focus', () => loadSession({ silent: true }));
+      window.addEventListener('resize', () => {
+        if (state.payload && state.payload.stage === 'slider') {
+          syncSliderPieceVisual();
+        }
+      });
       document.addEventListener('visibilitychange', () => {
         if (!document.hidden) {
           loadSession({ silent: true });
@@ -5794,14 +5827,13 @@ function renderVerificationWebPage() {
         el.sliderAttemptChip.textContent = '剩余次数：' + attemptsLeft;
         el.sliderInput.max = String(maxX);
         el.sliderInput.value = '0';
-        el.puzzleWrap.style.width = width + 'px';
-        el.puzzleWrap.style.height = height + 'px';
+        el.puzzleWrap.style.maxWidth = width + 'px';
+        el.puzzleWrap.style.width = '100%';
+        el.puzzleWrap.style.aspectRatio = width + ' / ' + height;
+        el.puzzleWrap.style.height = 'auto';
         el.puzzleBg.src = String(slider.background || '');
-
-        el.piece.style.width = piece + 'px';
-        el.piece.style.height = piece + 'px';
-        el.piece.style.top = targetY + 'px';
-        el.piece.style.left = '0px';
+        state.sliderView = { width, height, piece, targetY };
+        syncSliderPieceVisual();
 
         state.sliderTrace = [];
         state.sliderDragging = false;
@@ -5893,7 +5925,21 @@ function renderVerificationWebPage() {
 
       function movePieceByInput() {
         const x = Number(el.sliderInput.value || 0);
-        el.piece.style.left = x + 'px';
+        const scale = Number(state.sliderScale || 1);
+        el.piece.style.left = Math.round(x * scale) + 'px';
+      }
+
+      function syncSliderPieceVisual() {
+        const view = state.sliderView;
+        if (!view) return;
+        const renderedWidth = Number(el.puzzleWrap.clientWidth || view.width);
+        const scale = Math.max(0.2, Math.min(2, renderedWidth / Math.max(1, view.width)));
+        state.sliderScale = scale;
+        const pieceDisplay = Math.max(18, Math.round(view.piece * scale));
+        el.piece.style.width = pieceDisplay + 'px';
+        el.piece.style.height = pieceDisplay + 'px';
+        el.piece.style.top = Math.round(view.targetY * scale) + 'px';
+        movePieceByInput();
       }
 
       function pushTrace() {
