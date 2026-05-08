@@ -20,6 +20,14 @@ const PROFILE_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_ADMIN_PANEL_EXTERNAL_URL = '';
 const LAST_WEBHOOK_ERROR_KEY = 'sys:last_webhook_error';
 const VERIFY_IMAGE_PATH = '/verify-image';
+const VERIFY_WEB_PATH = '/verify';
+const VERIFY_API_PREFIX = '/verify/api';
+const VERIFY_WEB_SESSION_EXPIRE_MS = 15 * 60 * 1000;
+const VERIFY_RETRY_BLOCK_MS = 60 * 60 * 1000;
+const VERIFY_STAGE_MAX_ATTEMPTS = 3;
+const VERIFY_MIN_SLIDER_TIME_MS = 900;
+const VERIFY_SLIDER_TOLERANCE = 8;
+const VERIFY_OBSERVE_MESSAGE_COUNT = 5;
 
 export default {
   async fetch(request, env) {
@@ -46,6 +54,14 @@ export default {
 
       if (request.method === 'GET' && url.pathname === VERIFY_IMAGE_PATH) {
         return serveVerificationImage(url, request);
+      }
+
+      if (request.method === 'GET' && url.pathname === VERIFY_WEB_PATH) {
+        return html(renderVerificationWebPage(), 200, request);
+      }
+
+      if (request.method === 'POST' && url.pathname.startsWith(VERIFY_API_PREFIX)) {
+        return await handleVerificationApiRequest(request, url, runtimeEnv, publicBaseUrl);
       }
 
       if (request.method === 'POST' && url.pathname === '/deploy/bootstrap') {
@@ -169,7 +185,14 @@ export default {
           return json({ ok: true, action, state }, 200, {}, request);
         }
 
-        throw new AppError(400, 'action 必须是 ban / unban / trust / untrust / restart');
+        if (action === 'verifypass') {
+          const state = await adminApproveUserVerification(runtimeEnv, userId, operator, {
+            notifyUser: true,
+          });
+          return json({ ok: true, action, state }, 200, {}, request);
+        }
+
+        throw new AppError(400, 'action 必须是 ban / unban / trust / untrust / restart / verifypass');
       }
 
       if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/blacklist`) {
@@ -408,25 +431,13 @@ async function handleUpdate(update, env, publicBaseUrl = '') {
     return;
   }
 
-  const trustEntry = await getTrustEntry(env, message.chat.id);
-  const keywordHit = trustEntry ? null : matchKeywordFilter(env, message);
-  if (keywordHit) {
-    const entry = await setBlacklistEntry(env, message.chat.id, {
-      reason: `命中关键词过滤：${keywordHit}`,
-      createdAt: new Date().toISOString(),
-      createdBy: 'keyword-filter',
-    });
-
-    await reportKeywordBan(env, adminChatId, message, keywordHit, entry);
-    await telegram(env, 'sendMessage', {
-      chat_id: message.chat.id,
-      text: env.BLOCKED_TEXT || DEFAULT_BLOCKED_TEXT,
-    });
+  const verified = await ensureUserVerifiedOrPrompt(message, env, publicBaseUrl);
+  if (!verified) {
     return;
   }
 
-  const verified = await ensureUserVerifiedOrPrompt(message, env, publicBaseUrl);
-  if (!verified) {
+  const observationAllowed = await applyPostVerifyObservationLayer(message, env, adminChatId);
+  if (!observationAllowed) {
     return;
   }
 
@@ -441,7 +452,7 @@ async function handleCallbackQuery(callbackQuery, env, publicBaseUrl = '') {
   }
 
   if (data.startsWith('verify:')) {
-    await handleUserVerificationCallback(callbackQuery, env, publicBaseUrl);
+    await answerCallback(env, callbackQuery.id, '旧版验证已下线，请重新打开新的网页验证入口。', true);
     return;
   }
 
@@ -701,6 +712,7 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
         '10. 打开浏览器管理面板：/panel',
         '11. 重发当前临时密码：/panelpass',
         '12. 强制生成新的临时密码：/panelreset',
+        '13. 手动放行验证：/verifypass 用户ID',
       ].join('\n'),
     );
     return true;
@@ -825,6 +837,19 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
 
     await restartUserVerification(env, userId, formatAdminOperator(message.from));
     await sendAdminNotice(env, message, `已要求用户重新验证：${userId}`);
+    return true;
+  }
+
+  const verifyPassMatch = trimmed.match(/^\/(?:verifypass|passverify|approveverify)\s*(\-?\d+)?\s*$/i);
+  if (verifyPassMatch) {
+    const userId = verifyPassMatch[1] ? Number(verifyPassMatch[1]) : defaultTargetUserId;
+    if (!userId) {
+      await sendAdminNotice(env, message, '请使用 /verifypass 用户ID，或在回复/话题上下文中直接发送 /verifypass');
+      return true;
+    }
+
+    await adminApproveUserVerification(env, userId, formatAdminOperator(message.from), { notifyUser: true });
+    await sendAdminNotice(env, message, `已手动通过验证：${userId}`);
     return true;
   }
 
@@ -1021,6 +1046,13 @@ async function handleAdminActionCallback(callbackQuery, env) {
     await restartUserVerification(env, userId, formatAdminOperator(callbackQuery.from));
     await sendAdminNotice(env, sourceMessage, `已通过按钮要求用户重新验证：${userId}`);
     await answerCallback(env, callbackQuery.id, '已要求用户重新验证');
+    return;
+  }
+
+  if (action === 'verifypass') {
+    await adminApproveUserVerification(env, userId, formatAdminOperator(callbackQuery.from), { notifyUser: true });
+    await sendAdminNotice(env, sourceMessage, `已通过按钮手动放行验证：${userId}`);
+    await answerCallback(env, callbackQuery.id, '已手动放行验证');
     return;
   }
 
@@ -1321,10 +1353,6 @@ async function ensureUserVerifiedOrPrompt(message, env, publicBaseUrl = '') {
     return true;
   }
 
-  if (await tryHandleUserVerificationText(message, env)) {
-    return false;
-  }
-
   const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
   if (blockedUntilMs && blockedUntilMs > Date.now()) {
     const leftSec = Math.max(1, Math.ceil((blockedUntilMs - Date.now()) / 1000));
@@ -1335,27 +1363,10 @@ async function ensureUserVerifiedOrPrompt(message, env, publicBaseUrl = '') {
     return false;
   }
 
-  if (state?.challenge && isVerificationExpired(state.challenge, env)) {
-    await markUserVerificationFailed(env, userId, {
-      selectedAnswer: '',
-      correctAnswer: String(state.challenge.correct || ''),
-      blockMs: getVerificationTimeoutBlockMs(env),
-      countForBan: false,
-    });
-    await telegram(env, 'sendMessage', {
-      chat_id: userId,
-      text: '验证已过期，请等待 1 分钟后重新发送消息获取新题目。',
-    });
-    return false;
-  }
-
-  const nextState = await createOrRefreshUserVerification(
-    env,
-    userId,
-    !state?.challenge || Boolean(state?.answeredAt),
-  );
-
-  await sendUserVerificationPrompt(env, userId, nextState, publicBaseUrl);
+  const nextState = await createOrRefreshVerificationWebSession(env, userId, {
+    forceNew: false,
+  });
+  await sendVerificationWebPrompt(env, userId, nextState, publicBaseUrl);
   return false;
 }
 
@@ -1373,6 +1384,7 @@ async function syncTelegramCommands(env) {
     { command: 'trust', description: '设为信任用户：/trust 用户ID 备注' },
     { command: 'untrust', description: '取消信任用户：/untrust 用户ID' },
     { command: 'restart', description: '要求用户重新验证：/restart 用户ID' },
+    { command: 'verifypass', description: '手动放行验证：/verifypass 用户ID' },
     { command: 'user', description: '查看用户详情：/user 用户ID' },
     { command: 'users', description: '查看最近用户：/users 20' },
     { command: 'blacklist', description: '查看黑名单列表' },
@@ -2427,7 +2439,12 @@ async function listUsers(env, requestedLimit = 50) {
         trusted: Boolean(trust),
         trustNote: trust?.note || null,
         verified: Boolean(verifyState?.verified),
-        verificationStatus: verifyState?.verified ? 'verified' : verifyState?.challenge ? 'pending' : 'unknown',
+        verificationStatus:
+          verifyState?.verified
+            ? 'verified'
+            : verifyState?.challenge || verifyState?.sessionToken || verifyState?.stage
+              ? 'pending'
+              : 'unknown',
       };
     }),
   );
@@ -2785,6 +2802,714 @@ async function getUserVerificationState(env, userId) {
   return getJson(env.BOT_KV, verifyKey(userId));
 }
 
+async function createOrRefreshVerificationWebSession(env, userId, options = {}) {
+  ensureKv(env);
+  const forceNew = Boolean(options.forceNew);
+  const preserveToken = String(options.preserveToken || '').trim();
+  const existing = (await getUserVerificationState(env, userId)) || {};
+
+  if (existing?.verified) {
+    return existing;
+  }
+
+  const blockedUntilMs = existing?.blockedUntil ? new Date(existing.blockedUntil).getTime() : 0;
+  if (blockedUntilMs && blockedUntilMs > Date.now()) {
+    return existing;
+  }
+
+  const sessionExpiresAtMs = existing?.sessionExpiresAt ? new Date(existing.sessionExpiresAt).getTime() : 0;
+  const sessionValid = Boolean(
+    existing?.sessionToken &&
+      sessionExpiresAtMs > Date.now() &&
+      (existing?.stage === 'slider' || existing?.stage === 'grid') &&
+      existing?.slider &&
+      existing?.grid,
+  );
+
+  if (sessionValid && !forceNew) {
+    return existing;
+  }
+
+  const now = Date.now();
+  const nextState = {
+    ...(existing || {}),
+    userId: Number(userId),
+    verificationVersion: 'web-v2',
+    verified: false,
+    verifiedAt: null,
+    answeredAt: null,
+    blockedUntil: null,
+    selectedAnswer: null,
+    correctAnswer: null,
+    challenge: null,
+    failureCount: 0,
+    stage: 'slider',
+    sessionToken: preserveToken || createSessionToken(),
+    sessionIssuedAt: new Date(now).toISOString(),
+    sessionExpiresAt: new Date(now + getVerifyWebSessionExpireMs(env)).toISOString(),
+    slider: createSliderChallengeForWebVerification(),
+    grid: createGridChallengeForWebVerification(),
+    updatedAt: new Date(now).toISOString(),
+  };
+
+  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  return nextState;
+}
+
+function createSliderChallengeForWebVerification() {
+  const width = 320;
+  const height = 180;
+  const piece = 46;
+  const minX = 48;
+  const maxX = width - piece - 24;
+  const targetX = randomInt(minX, maxX);
+  const targetY = randomInt(28, height - piece - 16);
+  return {
+    width,
+    height,
+    piece,
+    minX,
+    maxX,
+    targetX,
+    targetY,
+    seed: createChallengeToken(),
+    attempts: 0,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function createGridChallengeForWebVerification() {
+  const symbolPool = ['🍎', '🚗', '🌲', '🏀', '🎧', '📷', '⏰', '🎲', '🎯', '🛳', '🎸', '🧩', '🏷', '🎁', '🛰'];
+  const symbols = shuffleArray(symbolPool).slice(0, 9);
+  const targetIndices = shuffleArray([0, 1, 2, 3, 4, 5, 6, 7, 8]).slice(0, 2).sort((a, b) => a - b);
+  const targetSymbols = targetIndices.map((idx) => symbols[idx]);
+  const cells = symbols.map((symbol, index) => ({
+    index,
+    symbol,
+    token: createChallengeToken().slice(-8),
+  }));
+  return {
+    attempts: 0,
+    targetIndices,
+    targetSymbols,
+    cells,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function buildVerificationWebUrl(state, userId, publicBaseUrl = '') {
+  const base = String(publicBaseUrl || '').trim().replace(/\/$/, '');
+  if (!base || !state?.sessionToken) return '';
+  const params = new URLSearchParams({
+    uid: String(userId),
+    token: String(state.sessionToken),
+  });
+  return `${base}${VERIFY_WEB_PATH}?${params.toString()}`;
+}
+
+function buildVerificationSessionPayload(state, env) {
+  if (state?.verified) {
+    return {
+      status: 'verified',
+      verifiedAt: state.verifiedAt || null,
+    };
+  }
+
+  const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
+  if (blockedUntilMs && blockedUntilMs > Date.now()) {
+    return {
+      status: 'blocked',
+      blockedUntil: state.blockedUntil,
+      retryAfterMs: Math.max(1000, blockedUntilMs - Date.now()),
+    };
+  }
+
+  const stage = state?.stage === 'grid' ? 'grid' : 'slider';
+  const maxAttempts = getVerifyStageMaxAttempts(env);
+  const payload = {
+    status: 'in_progress',
+    stage,
+    sessionExpiresAt: state?.sessionExpiresAt || null,
+    stageMaxAttempts: maxAttempts,
+    sliderAttemptsLeft: Math.max(0, maxAttempts - Number(state?.slider?.attempts || 0)),
+    gridAttemptsLeft: Math.max(0, maxAttempts - Number(state?.grid?.attempts || 0)),
+  };
+
+  if (stage === 'slider') {
+    const slider = state?.slider || createSliderChallengeForWebVerification();
+    payload.slider = {
+      width: Number(slider.width || 320),
+      height: Number(slider.height || 180),
+      piece: Number(slider.piece || 46),
+      targetY: Number(slider.targetY || 52),
+      maxX: Number(slider.maxX || 250),
+      background: buildSliderBackgroundDataUrl(slider),
+      attemptsUsed: Number(slider.attempts || 0),
+    };
+    return payload;
+  }
+
+  const grid = state?.grid || createGridChallengeForWebVerification();
+  payload.grid = {
+    promptSymbols: Array.isArray(grid.targetSymbols) ? grid.targetSymbols.slice(0, 2) : [],
+    requiredCount: 2,
+    attemptsUsed: Number(grid.attempts || 0),
+    cells: Array.isArray(grid.cells)
+      ? grid.cells.slice(0, 9).map((item, index) => ({
+          index,
+          symbol: String(item?.symbol || ''),
+          token: String(item?.token || ''),
+        }))
+      : [],
+  };
+  return payload;
+}
+
+function buildSliderBackgroundDataUrl(slider) {
+  const width = Number(slider?.width || 320);
+  const height = Number(slider?.height || 180);
+  const piece = Number(slider?.piece || 46);
+  const targetX = Number(slider?.targetX || 120);
+  const targetY = Number(slider?.targetY || 64);
+  const rand = createSeededRandom(String(slider?.seed || createChallengeToken()));
+  const shapes = [];
+
+  for (let i = 0; i < 24; i += 1) {
+    const cx = Math.floor(rand() * width);
+    const cy = Math.floor(rand() * height);
+    const radius = 6 + Math.floor(rand() * 18);
+    const hue = 180 + Math.floor(rand() * 120);
+    const alpha = (0.14 + rand() * 0.18).toFixed(3);
+    shapes.push(`<circle cx="${cx}" cy="${cy}" r="${radius}" fill="hsla(${hue},78%,70%,${alpha})" />`);
+  }
+
+  for (let i = 0; i < 12; i += 1) {
+    const x = Math.floor(rand() * (width - 64));
+    const y = Math.floor(rand() * (height - 20));
+    const w = 24 + Math.floor(rand() * 66);
+    const h = 8 + Math.floor(rand() * 22);
+    const alpha = (0.08 + rand() * 0.15).toFixed(3);
+    shapes.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="8" fill="rgba(255,255,255,${alpha})" />`);
+  }
+
+  const path = [
+    `M ${targetX} ${targetY + piece * 0.2}`,
+    `Q ${targetX + piece * 0.1} ${targetY} ${targetX + piece * 0.25} ${targetY + piece * 0.12}`,
+    `Q ${targetX + piece * 0.5} ${targetY - piece * 0.18} ${targetX + piece * 0.74} ${targetY + piece * 0.12}`,
+    `Q ${targetX + piece * 0.9} ${targetY} ${targetX + piece} ${targetY + piece * 0.2}`,
+    `L ${targetX + piece} ${targetY + piece * 0.82}`,
+    `Q ${targetX + piece * 0.86} ${targetY + piece} ${targetX + piece * 0.68} ${targetY + piece * 0.92}`,
+    `Q ${targetX + piece * 0.5} ${targetY + piece * 1.1} ${targetX + piece * 0.32} ${targetY + piece * 0.92}`,
+    `Q ${targetX + piece * 0.14} ${targetY + piece} ${targetX} ${targetY + piece * 0.82}`,
+    'Z',
+  ].join(' ');
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+    <defs>
+      <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#e3f4ff" />
+        <stop offset="50%" stop-color="#d5ffe8" />
+        <stop offset="100%" stop-color="#ffecc7" />
+      </linearGradient>
+      <filter id="softNoise" x="-20%" y="-20%" width="140%" height="140%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="${Math.floor(rand() * 1000)}" />
+        <feColorMatrix type="saturate" values="0.05"/>
+        <feComponentTransfer>
+          <feFuncA type="table" tableValues="0 0.07"/>
+        </feComponentTransfer>
+      </filter>
+    </defs>
+    <rect width="${width}" height="${height}" fill="url(#bg)" />
+    ${shapes.join('')}
+    <rect width="${width}" height="${height}" filter="url(#softNoise)" />
+    <path d="${path}" fill="rgba(255,255,255,0.16)" stroke="rgba(25,35,50,0.65)" stroke-width="2" stroke-dasharray="3 2"/>
+  </svg>`;
+
+  return `data:image/svg+xml;base64,${base64Encode(svg)}`;
+}
+
+function base64Encode(input) {
+  const text = String(input || '');
+  const bytes = new TextEncoder().encode(text);
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+async function sendVerificationWebPrompt(env, userId, state, publicBaseUrl = '') {
+  const verifyUrl = buildVerificationWebUrl(state, userId, publicBaseUrl || env.PUBLIC_BASE_URL || '');
+  const maxAttempts = getVerifyStageMaxAttempts(env);
+  const lines = [
+    '🔐 首次私聊验证（双重挑战）',
+    `1) 滑块拼图：最多 ${maxAttempts} 次`,
+    `2) 九宫格点选（九选二）：最多 ${maxAttempts} 次`,
+    `失败超过次数后会锁定 ${Math.round(getVerifyRetryBlockMs(env) / 60000)} 分钟`,
+  ];
+
+  if (!verifyUrl) {
+    lines.push('未找到可用验证链接，请联系管理员配置 PUBLIC_BASE_URL。');
+  } else {
+    lines.push('点击下方按钮打开验证页面。');
+  }
+
+  const payload = {
+    chat_id: userId,
+    text: lines.join('\n'),
+    reply_markup: verifyUrl
+      ? {
+          inline_keyboard: [[{ text: '打开验证页面', url: verifyUrl }]],
+        }
+      : undefined,
+  };
+
+  const promptMessageId = Number(state?.promptMessageId || 0);
+  if (promptMessageId) {
+    try {
+      await telegram(env, 'editMessageText', {
+        ...payload,
+        message_id: promptMessageId,
+      });
+      return;
+    } catch (error) {
+      // fall through and send a new message
+    }
+  }
+
+  const sent = await telegram(env, 'sendMessage', payload);
+  if (sent?.message_id) {
+    await setVerificationPromptMessageId(env, userId, sent.message_id);
+  }
+}
+
+async function handleVerificationApiRequest(request, url, env) {
+  if (!isUserVerificationEnabled(env)) {
+    throw new AppError(403, 'verification is disabled');
+  }
+  ensureKv(env);
+
+  const body = await readJsonBody(request);
+  const pathname = url.pathname;
+
+  if (pathname === `${VERIFY_API_PREFIX}/session`) {
+    const result = await handleVerificationSessionApi(env, body);
+    return json({ ok: true, ...result }, 200, {}, request);
+  }
+
+  if (pathname === `${VERIFY_API_PREFIX}/slider`) {
+    const result = await handleVerificationSliderApi(env, body);
+    return json({ ok: true, ...result }, 200, {}, request);
+  }
+
+  if (pathname === `${VERIFY_API_PREFIX}/grid`) {
+    const result = await handleVerificationGridApi(env, body);
+    return json({ ok: true, ...result }, 200, {}, request);
+  }
+
+  throw new AppError(404, 'verification api path not found');
+}
+
+function parseVerificationApiIdentity(body) {
+  const userId = Number(body?.userId ?? body?.uid);
+  if (!(Number.isInteger(userId) && userId > 0)) {
+    throw new AppError(400, 'invalid userId');
+  }
+  const token = String(body?.token || '').trim();
+  if (!token) {
+    throw new AppError(400, 'missing token');
+  }
+  return { userId, token };
+}
+
+function isVerificationSessionExpired(state) {
+  const expiresMs = state?.sessionExpiresAt ? new Date(state.sessionExpiresAt).getTime() : 0;
+  return !expiresMs || expiresMs <= Date.now();
+}
+
+async function handleVerificationSessionApi(env, body) {
+  const { userId, token } = parseVerificationApiIdentity(body);
+  const state = await getUserVerificationState(env, userId);
+  if (!state) {
+    throw new AppError(401, 'verification session not found');
+  }
+  if (state?.verified) {
+    return buildVerificationSessionPayload(state, env);
+  }
+  if (!state?.sessionToken) {
+    throw new AppError(401, 'verification session not found');
+  }
+  if (!timingSafeEqualText(token, state.sessionToken)) {
+    throw new AppError(401, 'verification token mismatch');
+  }
+
+  const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
+  if (blockedUntilMs && blockedUntilMs > Date.now()) {
+    return buildVerificationSessionPayload(state, env);
+  }
+
+  if (isVerificationSessionExpired(state)) {
+    const refreshed = await createOrRefreshVerificationWebSession(env, userId, {
+      forceNew: true,
+      preserveToken: token,
+    });
+    return buildVerificationSessionPayload(refreshed, env);
+  }
+
+  return buildVerificationSessionPayload(state, env);
+}
+
+async function handleVerificationSliderApi(env, body) {
+  const { userId, token } = parseVerificationApiIdentity(body);
+  const current = await getUserVerificationState(env, userId);
+  if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
+    throw new AppError(401, 'verification token mismatch');
+  }
+
+  if (current?.verified) {
+    return buildVerificationSessionPayload(current, env);
+  }
+
+  if (isVerificationSessionExpired(current)) {
+    throw new AppError(410, 'verification session expired');
+  }
+
+  if (current?.stage === 'grid') {
+    return buildVerificationSessionPayload(current, env);
+  }
+
+  const validation = validateSliderAttemptHuman(current?.slider, body, env);
+  if (validation.ok) {
+    const nextState = {
+      ...current,
+      stage: 'grid',
+      sessionExpiresAt: new Date(Date.now() + getVerifyWebSessionExpireMs(env)).toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+    return buildVerificationSessionPayload(nextState, env);
+  }
+
+  const maxAttempts = getVerifyStageMaxAttempts(env);
+  const nextAttempts = Number(current?.slider?.attempts || 0) + 1;
+  const nextState = {
+    ...current,
+    slider: {
+      ...(current?.slider || {}),
+      attempts: nextAttempts,
+      lastReason: validation.reason,
+      lastFailedAt: new Date().toISOString(),
+    },
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (nextAttempts >= maxAttempts) {
+    const locked = await lockVerificationAndReport(env, userId, nextState, {
+      stage: 'slider',
+      reason: validation.reason,
+    });
+    return buildVerificationSessionPayload(locked, env);
+  }
+
+  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  return {
+    ...buildVerificationSessionPayload(nextState, env),
+    status: 'slider_failed',
+    reason: validation.reason,
+  };
+}
+
+async function handleVerificationGridApi(env, body) {
+  const { userId, token } = parseVerificationApiIdentity(body);
+  const current = await getUserVerificationState(env, userId);
+  if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
+    throw new AppError(401, 'verification token mismatch');
+  }
+
+  if (current?.verified) {
+    return buildVerificationSessionPayload(current, env);
+  }
+
+  if (isVerificationSessionExpired(current)) {
+    throw new AppError(410, 'verification session expired');
+  }
+
+  if (current?.stage !== 'grid') {
+    return buildVerificationSessionPayload(current, env);
+  }
+
+  const selections = Array.isArray(body?.selections)
+    ? Array.from(new Set(body.selections.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item >= 0 && item <= 8)))
+    : [];
+  const expected = Array.isArray(current?.grid?.targetIndices)
+    ? current.grid.targetIndices.map((item) => Number(item)).filter((item) => Number.isInteger(item))
+    : [];
+
+  const passed = compareIndexSets(selections, expected);
+  if (passed) {
+    const nextState = await adminApproveUserVerification(env, userId, 'web-verification', {
+      notifyUser: true,
+      keepSession: false,
+    });
+    return buildVerificationSessionPayload(nextState, env);
+  }
+
+  const maxAttempts = getVerifyStageMaxAttempts(env);
+  const nextAttempts = Number(current?.grid?.attempts || 0) + 1;
+  const nextState = {
+    ...current,
+    grid: {
+      ...(current?.grid || {}),
+      attempts: nextAttempts,
+      lastFailedAt: new Date().toISOString(),
+    },
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (nextAttempts >= maxAttempts) {
+    const locked = await lockVerificationAndReport(env, userId, nextState, {
+      stage: 'grid',
+      reason: 'grid_selection_mismatch',
+      selections,
+    });
+    return buildVerificationSessionPayload(locked, env);
+  }
+
+  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  return {
+    ...buildVerificationSessionPayload(nextState, env),
+    status: 'grid_failed',
+    reason: 'grid_selection_mismatch',
+  };
+}
+
+function validateSliderAttemptHuman(slider, body, env) {
+  if (!slider) {
+    return { ok: false, reason: 'slider_missing' };
+  }
+
+  const value = Number(body?.value);
+  if (!Number.isFinite(value)) {
+    return { ok: false, reason: 'slider_value_invalid' };
+  }
+
+  const tolerance = getVerifySliderTolerance(env);
+  const targetX = Number(slider.targetX || 0);
+  if (Math.abs(value - targetX) > tolerance) {
+    return { ok: false, reason: 'slider_position_mismatch' };
+  }
+
+  const trace = normalizeSliderTrace(body?.trace);
+  if (trace.length < 6) {
+    return { ok: false, reason: 'trace_too_short' };
+  }
+
+  const durationMs = trace[trace.length - 1].t - trace[0].t;
+  if (durationMs < getVerifyMinSliderTimeMs(env)) {
+    return { ok: false, reason: 'trace_too_fast' };
+  }
+
+  let forwardMoves = 0;
+  let backwardMoves = 0;
+  let totalDistance = 0;
+  const speeds = [];
+  for (let i = 1; i < trace.length; i += 1) {
+    const dx = trace[i].x - trace[i - 1].x;
+    const dt = trace[i].t - trace[i - 1].t;
+    if (dt <= 0) continue;
+    if (dx >= 0) {
+      forwardMoves += 1;
+    } else {
+      backwardMoves += 1;
+    }
+    totalDistance += Math.abs(dx);
+    speeds.push(Math.abs(dx) / dt);
+  }
+
+  const totalMoves = forwardMoves + backwardMoves;
+  if (totalMoves < 5) {
+    return { ok: false, reason: 'trace_not_enough_segments' };
+  }
+  if (forwardMoves / totalMoves < 0.72) {
+    return { ok: false, reason: 'trace_direction_invalid' };
+  }
+
+  const expectedDistance = Math.max(20, Math.abs(value - trace[0].x));
+  if (totalDistance < expectedDistance * 0.88) {
+    return { ok: false, reason: 'trace_distance_invalid' };
+  }
+
+  if (backwardMoves === 0 && trace.length <= 8) {
+    return { ok: false, reason: 'trace_too_linear' };
+  }
+
+  const variance = computeVariance(speeds);
+  if (variance < 0.00008) {
+    return { ok: false, reason: 'trace_variance_too_low' };
+  }
+
+  return { ok: true, reason: 'ok' };
+}
+
+function normalizeSliderTrace(trace) {
+  if (!Array.isArray(trace)) return [];
+  const normalized = trace
+    .map((item) => ({
+      x: Number(item?.x),
+      t: Number(item?.t),
+    }))
+    .filter((item) => Number.isFinite(item.x) && Number.isFinite(item.t))
+    .sort((a, b) => a.t - b.t);
+
+  if (normalized.length === 0) return [];
+  const baseT = normalized[0].t;
+  return normalized.map((item) => ({
+    x: item.x,
+    t: Math.max(0, item.t - baseT),
+  }));
+}
+
+function computeVariance(values) {
+  if (!Array.isArray(values) || values.length === 0) return 0;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const sq = values.reduce((sum, value) => sum + (value - mean) * (value - mean), 0);
+  return sq / values.length;
+}
+
+function compareIndexSets(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right)) return false;
+  if (left.length !== right.length) return false;
+  const a = [...left].sort((x, y) => x - y);
+  const b = [...right].sort((x, y) => x - y);
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+async function lockVerificationAndReport(env, userId, state, detail = {}) {
+  const blockedUntil = new Date(Date.now() + getVerifyRetryBlockMs(env)).toISOString();
+  const nextState = {
+    ...(state || {}),
+    userId: Number(userId),
+    verified: false,
+    verifiedAt: null,
+    blockedUntil,
+    stage: 'blocked',
+    sessionExpiresAt: null,
+    lastLockReason: detail?.reason || 'verification_failed',
+    lastLockStage: detail?.stage || null,
+    lastLockAt: new Date().toISOString(),
+    lastLockDetail: detail || {},
+    updatedAt: new Date().toISOString(),
+  };
+
+  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+
+  try {
+    await telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text: `验证失败次数超过限制，已锁定。请在 ${blockedUntil} 后重试。`,
+    });
+  } catch (error) {
+    // ignore notification failure
+  }
+
+  await reportVerificationFailureToTopic(env, userId, nextState);
+  return nextState;
+}
+
+async function reportVerificationFailureToTopic(env, userId, state) {
+  try {
+    const adminChatId = toChatId(env.ADMIN_CHAT_ID);
+    const profile = await getUserProfile(env, userId);
+    const topicId = getVerifyFailTopicId(env);
+    const stage = String(state?.lastLockStage || state?.stage || 'unknown');
+    const reason = String(state?.lastLockReason || 'verification_failed');
+    const text = [
+      '🚨 Verification failed and locked',
+      `User: ${profile?.displayName || 'Unknown'}${profile?.username ? ` @${profile.username}` : ''}`,
+      `User ID: ${userId}`,
+      `Stage: ${stage}`,
+      `Reason: ${reason}`,
+      `Blocked until: ${state?.blockedUntil || 'unknown'}`,
+      `Slider attempts: ${Number(state?.slider?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
+      `Grid attempts: ${Number(state?.grid?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
+    ].join('\n');
+
+    await telegramWithThreadFallback(env, 'sendMessage', {
+      chat_id: adminChatId,
+      message_thread_id: topicId || undefined,
+      text,
+      reply_markup: buildVerificationFailureAdminKeyboard(userId),
+    });
+  } catch (error) {
+    // keep locked state even if report fails
+  }
+}
+
+function buildVerificationFailureAdminKeyboard(userId) {
+  return {
+    inline_keyboard: [
+      [{ text: '✅ 验证放行', callback_data: `adm:verifypass:${userId}` }],
+      [
+        { text: '💔 重置验证', callback_data: `adm:restart:${userId}` },
+        { text: '🚫 拉黑', callback_data: `adm:ban:${userId}` },
+      ],
+      [{ text: '👁 用户资料', callback_data: `adm:user:${userId}` }],
+    ],
+  };
+}
+
+async function adminApproveUserVerification(env, userId, operator = 'unknown', options = {}) {
+  ensureKv(env);
+  const notifyUser = options.notifyUser !== false;
+  const keepSession = Boolean(options.keepSession);
+  const existing = (await getUserVerificationState(env, userId)) || {};
+  const nowIso = new Date().toISOString();
+  const nextState = {
+    ...(existing || {}),
+    userId: Number(userId),
+    verificationVersion: 'web-v2',
+    verified: true,
+    verifiedAt: nowIso,
+    answeredAt: nowIso,
+    blockedUntil: null,
+    stage: keepSession ? existing?.stage || 'grid' : 'passed',
+    sessionToken: keepSession ? existing?.sessionToken || null : null,
+    sessionExpiresAt: keepSession ? existing?.sessionExpiresAt || null : null,
+    sessionIssuedAt: keepSession ? existing?.sessionIssuedAt || null : null,
+    challenge: null,
+    failureCount: 0,
+    selectedAnswer: null,
+    correctAnswer: null,
+    postVerifyRemaining: getVerifyObserveMessageCount(env),
+    approvedBy: operator,
+    approvedAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+
+  const promptMessageId = Number(nextState?.promptMessageId || 0);
+  if (promptMessageId) {
+    await clearVerificationPromptMessage(env, userId, promptMessageId, '✅ 验证通过，已解除发送限制。');
+  }
+
+  if (notifyUser) {
+    try {
+      await telegram(env, 'sendMessage', {
+        chat_id: userId,
+        text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n✅ 验证通过，现在可以正常发消息。`,
+      });
+    } catch (error) {
+      // ignore user notification failure
+    }
+  }
+
+  return nextState;
+}
+
 async function createOrRefreshUserVerification(env, userId, forceNew = false) {
   ensureKv(env);
   const existing = await getUserVerificationState(env, userId);
@@ -2831,14 +3556,22 @@ async function markUserVerified(env, userId) {
   const state = {
     ...(existing || {}),
     userId: Number(userId),
+    verificationVersion: 'web-v2',
     verified: true,
     verifiedAt: new Date().toISOString(),
     answeredAt: new Date().toISOString(),
     blockedUntil: null,
+    stage: 'passed',
+    sessionToken: null,
+    sessionIssuedAt: null,
+    sessionExpiresAt: null,
+    slider: null,
+    grid: null,
     selectedAnswer: null,
     correctAnswer: null,
     challenge: null,
     failureCount: 0,
+    postVerifyRemaining: getVerifyObserveMessageCount(env),
     updatedAt: new Date().toISOString(),
   };
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
@@ -2908,14 +3641,22 @@ async function restartUserVerification(env, userId, operator = 'unknown') {
   const state = {
     ...(existing || {}),
     userId: Number(userId),
+    verificationVersion: 'web-v2',
     verified: false,
     verifiedAt: null,
     answeredAt: null,
     blockedUntil: null,
+    stage: null,
+    sessionToken: null,
+    sessionIssuedAt: null,
+    sessionExpiresAt: null,
+    slider: null,
+    grid: null,
     selectedAnswer: null,
     correctAnswer: null,
     challenge: null,
     failureCount: 0,
+    postVerifyRemaining: 0,
     updatedAt: new Date().toISOString(),
     restartedBy: operator,
   };
@@ -3046,6 +3787,36 @@ function getVerificationCaptchaEnabled(env) {
   return String(env.VERIFY_CAPTCHA_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
 }
 
+function getVerifyWebSessionExpireMs(env) {
+  return parsePositiveInt(env.VERIFY_WEB_SESSION_EXPIRE_MS, VERIFY_WEB_SESSION_EXPIRE_MS);
+}
+
+function getVerifyRetryBlockMs(env) {
+  return parsePositiveInt(env.VERIFY_RETRY_BLOCK_MS, VERIFY_RETRY_BLOCK_MS);
+}
+
+function getVerifyStageMaxAttempts(env) {
+  return clamp(parsePositiveInt(env.VERIFY_STAGE_MAX_ATTEMPTS, VERIFY_STAGE_MAX_ATTEMPTS), 1, 10);
+}
+
+function getVerifyMinSliderTimeMs(env) {
+  return parsePositiveInt(env.VERIFY_MIN_SLIDER_TIME_MS, VERIFY_MIN_SLIDER_TIME_MS);
+}
+
+function getVerifySliderTolerance(env) {
+  return clamp(parsePositiveInt(env.VERIFY_SLIDER_TOLERANCE, VERIFY_SLIDER_TOLERANCE), 1, 60);
+}
+
+function getVerifyObserveMessageCount(env) {
+  return clamp(parsePositiveInt(env.VERIFY_OBSERVE_MESSAGE_COUNT, VERIFY_OBSERVE_MESSAGE_COUNT), 0, 20);
+}
+
+function getVerifyFailTopicId(env) {
+  const raw = Number(env.VERIFY_FAIL_TOPIC_ID);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return Math.floor(raw);
+}
+
 function isUserVerificationEnabled(env) {
   const raw = String(env.USER_VERIFICATION ?? 'true').trim().toLowerCase();
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
@@ -3069,6 +3840,63 @@ function matchKeywordFilter(env, message) {
   if (!textPool) return null;
 
   return keywords.find((item) => textPool.includes(String(item).toLowerCase())) || null;
+}
+
+async function applyPostVerifyObservationLayer(message, env, adminChatId) {
+  if (!env.BOT_KV || !isUserVerificationEnabled(env)) {
+    return true;
+  }
+
+  const userId = Number(message?.chat?.id || 0);
+  if (!(Number.isFinite(userId) && userId > 0)) {
+    return true;
+  }
+
+  const state = await getUserVerificationState(env, userId);
+  if (!state?.verified) {
+    return true;
+  }
+
+  const maxObserveCount = getVerifyObserveMessageCount(env);
+  if (maxObserveCount <= 0) {
+    return true;
+  }
+
+  const remaining = Number(state.postVerifyRemaining);
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    return true;
+  }
+
+  const trustEntry = await getTrustEntry(env, userId);
+  const keywordHit = trustEntry ? null : matchKeywordFilter(env, message);
+  if (keywordHit) {
+    const entry = await setBlacklistEntry(env, userId, {
+      reason: `命中关键词过滤：${keywordHit}`,
+      createdAt: new Date().toISOString(),
+      createdBy: 'keyword-observation',
+    });
+    await reportKeywordBan(env, adminChatId, message, keywordHit, entry);
+    await telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text: env.BLOCKED_TEXT || DEFAULT_BLOCKED_TEXT,
+    });
+
+    const nextState = {
+      ...state,
+      postVerifyRemaining: 0,
+      updatedAt: new Date().toISOString(),
+    };
+    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+    return false;
+  }
+
+  const nextState = {
+    ...state,
+    postVerifyRemaining: Math.max(0, remaining - 1),
+    updatedAt: new Date().toISOString(),
+  };
+  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  return true;
 }
 
 async function reportKeywordBan(env, adminChatId, message, keyword, entry) {
@@ -3132,6 +3960,13 @@ async function getRuntimeEnv(env) {
     'VERIFY_MAX_FAILURES',
     'VERIFY_MATH_ENABLED',
     'VERIFY_CAPTCHA_ENABLED',
+    'VERIFY_WEB_SESSION_EXPIRE_MS',
+    'VERIFY_RETRY_BLOCK_MS',
+    'VERIFY_STAGE_MAX_ATTEMPTS',
+    'VERIFY_MIN_SLIDER_TIME_MS',
+    'VERIFY_SLIDER_TOLERANCE',
+    'VERIFY_OBSERVE_MESSAGE_COUNT',
+    'VERIFY_FAIL_TOPIC_ID',
     'BOT_TOKEN',
     'ADMIN_CHAT_ID',
     'ADMIN_IDS',
@@ -3279,6 +4114,19 @@ async function getEffectiveSystemConfig(env) {
     'WEBHOOK_PATH',
     'TOPIC_MODE',
     'USER_VERIFICATION',
+    'VERIFY_EXPIRE_MS',
+    'VERIFY_FAIL_BLOCK_MS',
+    'VERIFY_TIMEOUT_BLOCK_MS',
+    'VERIFY_MAX_FAILURES',
+    'VERIFY_MATH_ENABLED',
+    'VERIFY_CAPTCHA_ENABLED',
+    'VERIFY_WEB_SESSION_EXPIRE_MS',
+    'VERIFY_RETRY_BLOCK_MS',
+    'VERIFY_STAGE_MAX_ATTEMPTS',
+    'VERIFY_MIN_SLIDER_TIME_MS',
+    'VERIFY_SLIDER_TOLERANCE',
+    'VERIFY_OBSERVE_MESSAGE_COUNT',
+    'VERIFY_FAIL_TOPIC_ID',
     'WELCOME_TEXT',
     'BLOCKED_TEXT',
     'ADMIN_API_KEY',
@@ -3497,6 +4345,13 @@ async function updateSystemConfig(env, payload) {
     'VERIFY_MAX_FAILURES',
     'VERIFY_MATH_ENABLED',
     'VERIFY_CAPTCHA_ENABLED',
+    'VERIFY_WEB_SESSION_EXPIRE_MS',
+    'VERIFY_RETRY_BLOCK_MS',
+    'VERIFY_STAGE_MAX_ATTEMPTS',
+    'VERIFY_MIN_SLIDER_TIME_MS',
+    'VERIFY_SLIDER_TOLERANCE',
+    'VERIFY_OBSERVE_MESSAGE_COUNT',
+    'VERIFY_FAIL_TOPIC_ID',
     'BOT_TOKEN',
     'ADMIN_CHAT_ID',
     'ADMIN_IDS',
@@ -3545,6 +4400,13 @@ function buildSystemConfigView(config) {
     VERIFY_MAX_FAILURES: config.VERIFY_MAX_FAILURES || '',
     VERIFY_MATH_ENABLED: config.VERIFY_MATH_ENABLED || '',
     VERIFY_CAPTCHA_ENABLED: config.VERIFY_CAPTCHA_ENABLED || '',
+    VERIFY_WEB_SESSION_EXPIRE_MS: config.VERIFY_WEB_SESSION_EXPIRE_MS || '',
+    VERIFY_RETRY_BLOCK_MS: config.VERIFY_RETRY_BLOCK_MS || '',
+    VERIFY_STAGE_MAX_ATTEMPTS: config.VERIFY_STAGE_MAX_ATTEMPTS || '',
+    VERIFY_MIN_SLIDER_TIME_MS: config.VERIFY_MIN_SLIDER_TIME_MS || '',
+    VERIFY_SLIDER_TOLERANCE: config.VERIFY_SLIDER_TOLERANCE || '',
+    VERIFY_OBSERVE_MESSAGE_COUNT: config.VERIFY_OBSERVE_MESSAGE_COUNT || '',
+    VERIFY_FAIL_TOPIC_ID: config.VERIFY_FAIL_TOPIC_ID || '',
     WELCOME_TEXT: config.WELCOME_TEXT || '',
     BLOCKED_TEXT: config.BLOCKED_TEXT || '',
     ADMIN_API_KEY: maskSecret(config.ADMIN_API_KEY),
@@ -4295,6 +5157,533 @@ function getBaseDomain(host = '') {
   const parts = normalized.split('.').filter(Boolean);
   if (parts.length < 2) return normalized;
   return parts.slice(-2).join('.');
+}
+
+function renderVerificationWebPage() {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>安全验证</title>
+  <style>
+    :root{
+      --bg:#f6f9fc;
+      --card:#ffffff;
+      --line:#d9e2ec;
+      --text:#12263a;
+      --muted:#486581;
+      --ok:#12733c;
+      --warn:#b06b00;
+      --err:#b00020;
+      --accent:#0b84ff;
+      --accent-2:#005cc5;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+      background:
+        radial-gradient(circle at 0 0,rgba(11,132,255,.08),transparent 40%),
+        radial-gradient(circle at 100% 100%,rgba(0,92,197,.12),transparent 45%),
+        var(--bg);
+      min-height:100vh;
+      color:var(--text);
+      display:flex;
+      justify-content:center;
+      padding:18px;
+    }
+    .shell{
+      width:min(760px,100%);
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:16px;
+      box-shadow:0 18px 42px rgba(16,42,67,.12);
+      overflow:hidden;
+    }
+    .head{
+      padding:18px 20px 14px;
+      border-bottom:1px solid var(--line);
+      background:linear-gradient(120deg,#f6fbff,#eef8ff 48%,#f8fffb);
+    }
+    .head h1{
+      margin:0 0 4px;
+      font-size:22px;
+      font-weight:700;
+      letter-spacing:.2px;
+    }
+    .head p{
+      margin:0;
+      color:var(--muted);
+      font-size:13px;
+      line-height:1.6;
+    }
+    .content{
+      padding:18px 20px 22px;
+      display:grid;
+      gap:16px;
+    }
+    .panel{
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:14px;
+      background:#fff;
+    }
+    .panel h2{
+      margin:0 0 10px;
+      font-size:17px;
+    }
+    .meta{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      margin-bottom:12px;
+    }
+    .chip{
+      font-size:12px;
+      border:1px solid #c8d6e5;
+      padding:4px 9px;
+      border-radius:999px;
+      color:#334e68;
+      background:#f9fcff;
+    }
+    .status{
+      border-radius:10px;
+      padding:10px 12px;
+      border:1px solid #d8e2ec;
+      background:#f8fbff;
+      color:#334e68;
+      font-size:13px;
+      line-height:1.6;
+      white-space:pre-wrap;
+    }
+    .status.ok{border-color:#abd9c3;background:#f2fbf6;color:var(--ok)}
+    .status.warn{border-color:#ffd488;background:#fff9ef;color:var(--warn)}
+    .status.err{border-color:#ffb6c1;background:#fff3f5;color:var(--err)}
+    .puzzle-wrap{
+      position:relative;
+      border:1px solid var(--line);
+      border-radius:10px;
+      background:#eef4fb;
+      overflow:hidden;
+      margin-bottom:10px;
+      touch-action:none;
+    }
+    .puzzle-bg{
+      width:100%;
+      height:100%;
+      display:block;
+      object-fit:cover;
+      user-select:none;
+      pointer-events:none;
+    }
+    .piece{
+      position:absolute;
+      border:2px solid rgba(13,36,68,.75);
+      background:rgba(255,255,255,.36);
+      border-radius:10px;
+      box-shadow:0 2px 8px rgba(20,40,80,.28);
+      pointer-events:none;
+      transition:left .04s linear;
+    }
+    .slider-row{
+      display:grid;
+      gap:9px;
+      margin-top:8px;
+    }
+    .slider-row input[type=range]{width:100%}
+    .actions{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-top:10px;
+    }
+    button{
+      border:0;
+      border-radius:10px;
+      background:linear-gradient(135deg,var(--accent),var(--accent-2));
+      color:#fff;
+      padding:10px 14px;
+      font-size:14px;
+      font-weight:700;
+      cursor:pointer;
+    }
+    button[disabled]{
+      cursor:not-allowed;
+      opacity:.5;
+    }
+    .grid{
+      display:grid;
+      grid-template-columns:repeat(3,minmax(0,1fr));
+      gap:10px;
+      margin-top:8px;
+    }
+    .grid button{
+      min-height:76px;
+      background:#eef4fb;
+      color:#102a43;
+      border:1px solid #c8d6e5;
+      font-size:28px;
+      font-weight:600;
+      transition:transform .08s ease,border-color .08s ease,background .08s ease;
+    }
+    .grid button:active{transform:scale(.98)}
+    .grid button.selected{
+      border-color:#0b84ff;
+      background:#d9ecff;
+      box-shadow:inset 0 0 0 1px rgba(11,132,255,.25);
+    }
+    .tiny{font-size:12px;color:#627d98;line-height:1.6}
+    .hide{display:none}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="head">
+      <h1>两步安全验证</h1>
+      <p>先完成滑块拼图，再完成九宫格九选二。每一步最多 3 次，超限将锁定 60 分钟。</p>
+    </header>
+    <section class="content">
+      <div id="status" class="status">正在加载验证会话...</div>
+
+      <section id="sliderPanel" class="panel hide">
+        <h2>第一步：滑块拼图</h2>
+        <div class="meta">
+          <span id="sliderAttemptChip" class="chip"></span>
+          <span class="chip">需检测滑动轨迹</span>
+        </div>
+        <div id="puzzleWrap" class="puzzle-wrap">
+          <img id="puzzleBg" class="puzzle-bg" alt="slider puzzle" />
+          <div id="piece" class="piece"></div>
+        </div>
+        <div class="slider-row">
+          <input id="sliderInput" type="range" min="0" step="1" value="0" />
+          <div class="tiny">拖动滑块使拼图块与缺口对齐，然后提交。</div>
+        </div>
+        <div class="actions">
+          <button id="sliderSubmitBtn" type="button">提交第一步</button>
+        </div>
+      </section>
+
+      <section id="gridPanel" class="panel hide">
+        <h2>第二步：九宫格点选（九选二）</h2>
+        <div class="meta">
+          <span id="gridAttemptChip" class="chip"></span>
+          <span id="gridPromptChip" class="chip"></span>
+        </div>
+        <div id="gridCells" class="grid"></div>
+        <div class="actions">
+          <button id="gridSubmitBtn" type="button" disabled>提交第二步</button>
+        </div>
+        <div id="gridHint" class="tiny"></div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      const API_PREFIX = '${VERIFY_API_PREFIX}';
+      const params = new URLSearchParams(window.location.search);
+      const userId = Number(params.get('uid'));
+      const token = String(params.get('token') || '');
+      const state = {
+        payload: null,
+        sliderTrace: [],
+        sliderDragStart: 0,
+        sliderDragging: false,
+        selected: new Set(),
+        blockedTimer: null,
+      };
+
+      const el = {
+        status: document.getElementById('status'),
+        sliderPanel: document.getElementById('sliderPanel'),
+        sliderInput: document.getElementById('sliderInput'),
+        sliderSubmitBtn: document.getElementById('sliderSubmitBtn'),
+        sliderAttemptChip: document.getElementById('sliderAttemptChip'),
+        puzzleWrap: document.getElementById('puzzleWrap'),
+        puzzleBg: document.getElementById('puzzleBg'),
+        piece: document.getElementById('piece'),
+        gridPanel: document.getElementById('gridPanel'),
+        gridCells: document.getElementById('gridCells'),
+        gridSubmitBtn: document.getElementById('gridSubmitBtn'),
+        gridAttemptChip: document.getElementById('gridAttemptChip'),
+        gridPromptChip: document.getElementById('gridPromptChip'),
+        gridHint: document.getElementById('gridHint'),
+      };
+
+      if (!Number.isFinite(userId) || userId <= 0 || !token) {
+        setStatus('链接参数无效，请返回 Telegram 重新打开验证按钮。', 'err');
+        return;
+      }
+
+      bindSliderEvents();
+      bindGridEvents();
+      loadSession();
+
+      async function loadSession() {
+        try {
+          const payload = await callApi('/session', {});
+          state.payload = payload;
+          renderByPayload(payload);
+        } catch (error) {
+          setStatus('加载失败：' + String(error.message || error), 'err');
+        }
+      }
+
+      function setStatus(text, tone) {
+        el.status.className = 'status' + (tone ? ' ' + tone : '');
+        el.status.textContent = text;
+      }
+
+      function clearBlockedTimer() {
+        if (state.blockedTimer) {
+          clearInterval(state.blockedTimer);
+          state.blockedTimer = null;
+        }
+      }
+
+      function renderByPayload(payload) {
+        clearBlockedTimer();
+        hidePanels();
+
+        if (!payload || typeof payload !== 'object') {
+          setStatus('返回数据异常，请关闭页面后重试。', 'err');
+          return;
+        }
+
+        if (payload.status === 'verified') {
+          setStatus('验证已通过，你可以返回 Telegram 继续发送消息。', 'ok');
+          return;
+        }
+
+        if (payload.status === 'blocked') {
+          startBlockedCountdown(payload.blockedUntil);
+          return;
+        }
+
+        if (payload.stage === 'slider') {
+          renderSlider(payload);
+          return;
+        }
+
+        if (payload.stage === 'grid') {
+          renderGrid(payload);
+          return;
+        }
+
+        setStatus('未知状态，请返回 Telegram 重新发起验证。', 'err');
+      }
+
+      function hidePanels() {
+        el.sliderPanel.classList.add('hide');
+        el.gridPanel.classList.add('hide');
+      }
+
+      function renderSlider(payload) {
+        const slider = payload.slider || {};
+        const width = Number(slider.width || 320);
+        const height = Number(slider.height || 180);
+        const piece = Number(slider.piece || 46);
+        const maxX = Number(slider.maxX || 250);
+        const targetY = Number(slider.targetY || 56);
+        const attemptsLeft = Number(payload.sliderAttemptsLeft || 0);
+
+        el.sliderPanel.classList.remove('hide');
+        el.sliderAttemptChip.textContent = '剩余次数：' + attemptsLeft;
+        el.sliderInput.max = String(maxX);
+        el.sliderInput.value = '0';
+        el.puzzleWrap.style.width = width + 'px';
+        el.puzzleWrap.style.height = height + 'px';
+        el.puzzleBg.src = String(slider.background || '');
+
+        el.piece.style.width = piece + 'px';
+        el.piece.style.height = piece + 'px';
+        el.piece.style.top = targetY + 'px';
+        el.piece.style.left = '0px';
+
+        state.sliderTrace = [];
+        state.sliderDragging = false;
+
+        if (payload.status === 'slider_failed') {
+          setStatus('第一步未通过，请继续重试。剩余次数：' + attemptsLeft, 'err');
+        } else {
+          setStatus('第一步：拖动滑块并提交。', 'warn');
+        }
+      }
+
+      function renderGrid(payload) {
+        const grid = payload.grid || {};
+        const cells = Array.isArray(grid.cells) ? grid.cells : [];
+        const promptSymbols = Array.isArray(grid.promptSymbols) ? grid.promptSymbols : [];
+        const attemptsLeft = Number(payload.gridAttemptsLeft || 0);
+
+        el.gridPanel.classList.remove('hide');
+        el.gridAttemptChip.textContent = '剩余次数：' + attemptsLeft;
+        el.gridPromptChip.textContent = '请选择：' + promptSymbols.join(' 与 ');
+        el.gridCells.innerHTML = '';
+        state.selected = new Set();
+        el.gridSubmitBtn.disabled = true;
+        el.gridHint.textContent = '当前已选择 0/2';
+
+        cells.forEach((item) => {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.dataset.index = String(item.index);
+          btn.textContent = String(item.symbol || '?');
+          el.gridCells.appendChild(btn);
+        });
+
+        if (payload.status === 'grid_failed') {
+          setStatus('第二步未通过，请重新点选。剩余次数：' + attemptsLeft, 'err');
+        } else {
+          setStatus('第二步：在 9 个格子中点选 2 个目标。', 'warn');
+        }
+      }
+
+      function startBlockedCountdown(blockedUntil) {
+        const untilMs = blockedUntil ? new Date(blockedUntil).getTime() : 0;
+        if (!untilMs || Number.isNaN(untilMs)) {
+          setStatus('当前验证处于锁定状态，请稍后重试。', 'err');
+          return;
+        }
+        const tick = () => {
+          const left = untilMs - Date.now();
+          if (left <= 0) {
+            clearBlockedTimer();
+            setStatus('锁定已到期，请回到 Telegram 发送任意消息重新获取验证入口。', 'warn');
+            return;
+          }
+          const minutes = Math.floor(left / 60000);
+          const seconds = Math.floor((left % 60000) / 1000);
+          setStatus('验证锁定中，请 ' + minutes + ' 分 ' + seconds + ' 秒后重试。\\n到期时间：' + new Date(untilMs).toLocaleString(), 'err');
+        };
+        tick();
+        state.blockedTimer = setInterval(tick, 1000);
+      }
+
+      function bindSliderEvents() {
+        const begin = () => {
+          state.sliderDragging = true;
+          state.sliderTrace = [];
+          state.sliderDragStart = performance.now();
+          pushTrace();
+        };
+        const end = () => {
+          if (!state.sliderDragging) return;
+          pushTrace();
+          state.sliderDragging = false;
+        };
+        const onInput = () => {
+          movePieceByInput();
+          if (state.sliderDragging) pushTrace();
+        };
+
+        el.sliderInput.addEventListener('pointerdown', begin);
+        el.sliderInput.addEventListener('mousedown', begin);
+        el.sliderInput.addEventListener('touchstart', begin, { passive: true });
+        el.sliderInput.addEventListener('input', onInput);
+        window.addEventListener('pointerup', end);
+        window.addEventListener('mouseup', end);
+        window.addEventListener('touchend', end);
+        el.sliderSubmitBtn.addEventListener('click', submitSlider);
+      }
+
+      function movePieceByInput() {
+        const x = Number(el.sliderInput.value || 0);
+        el.piece.style.left = x + 'px';
+      }
+
+      function pushTrace() {
+        const now = performance.now();
+        state.sliderTrace.push({
+          x: Number(el.sliderInput.value || 0),
+          t: Math.round(now - state.sliderDragStart),
+        });
+      }
+
+      async function submitSlider() {
+        el.sliderSubmitBtn.disabled = true;
+        try {
+          if (state.sliderTrace.length < 2) {
+            state.sliderTrace = [
+              { x: 0, t: 0 },
+              { x: Number(el.sliderInput.value || 0), t: 1200 },
+            ];
+          }
+          const payload = await callApi('/slider', {
+            value: Number(el.sliderInput.value || 0),
+            trace: state.sliderTrace.slice(-80),
+          });
+          state.payload = payload;
+          renderByPayload(payload);
+        } catch (error) {
+          setStatus('第一步提交失败：' + String(error.message || error), 'err');
+        } finally {
+          el.sliderSubmitBtn.disabled = false;
+        }
+      }
+
+      function bindGridEvents() {
+        el.gridCells.addEventListener('click', (event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLButtonElement)) return;
+          const index = Number(target.dataset.index);
+          if (!Number.isInteger(index)) return;
+
+          if (state.selected.has(index)) {
+            state.selected.delete(index);
+            target.classList.remove('selected');
+          } else {
+            if (state.selected.size >= 2) return;
+            state.selected.add(index);
+            target.classList.add('selected');
+          }
+
+          const count = state.selected.size;
+          el.gridHint.textContent = '当前已选择 ' + count + '/2';
+          el.gridSubmitBtn.disabled = count !== 2;
+        });
+
+        el.gridSubmitBtn.addEventListener('click', submitGrid);
+      }
+
+      async function submitGrid() {
+        el.gridSubmitBtn.disabled = true;
+        try {
+          const selections = Array.from(state.selected.values());
+          const payload = await callApi('/grid', { selections });
+          state.payload = payload;
+          renderByPayload(payload);
+        } catch (error) {
+          setStatus('第二步提交失败：' + String(error.message || error), 'err');
+        } finally {
+          if (state.payload && state.payload.stage === 'grid') {
+            el.gridSubmitBtn.disabled = state.selected.size !== 2;
+          }
+        }
+      }
+
+      async function callApi(path, extra) {
+        const resp = await fetch(API_PREFIX + path, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json;charset=UTF-8' },
+          body: JSON.stringify({
+            userId,
+            token,
+            ...(extra || {}),
+          }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || !data.ok) {
+          throw new Error(data.error || 'request_failed_' + resp.status);
+        }
+        return data;
+      }
+    })();
+  </script>
+</body>
+</html>`;
 }
 
 function renderAdminPage(url, env, webhookPath, publicBaseUrl) {
