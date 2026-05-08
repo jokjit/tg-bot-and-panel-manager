@@ -36,8 +36,42 @@ function getPrivateWranglerPath(env = {}) {
   return env.TG_BOT_PRIVATE_WRANGLER || path.join(getRepoRoot(), '.wrangler.private.toml')
 }
 
-function getPagesProjectName(env = {}) {
-  return String(env.PAGES_PROJECT_NAME || 'tg-admin-panel').trim() || 'tg-admin-panel'
+function normalizePagesProjectName(raw) {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 58)
+    .replace(/-+$/g, '')
+}
+
+function normalizePagesBranch(raw) {
+  const text = String(raw || '').trim()
+  return text || 'main'
+}
+
+function normalizeWorkerName(raw) {
+  return String(raw || '').trim()
+}
+
+function normalizeKvNamespaceTitle(raw) {
+  return String(raw || '').trim()
+}
+
+function normalizeD1DatabaseName(raw) {
+  return String(raw || '').trim()
+}
+
+function getPagesProjectName(env = {}, params = {}) {
+  const fromParams = normalizePagesProjectName(params?.pagesProjectName || params?.projectName || '')
+  if (fromParams) return fromParams
+  return normalizePagesProjectName(env.PAGES_PROJECT_NAME || 'tg-admin-panel') || 'tg-admin-panel'
+}
+
+function getPagesDeployBranch(env = {}, params = {}) {
+  return normalizePagesBranch(params?.pagesBranch || params?.branch || env.PAGES_BRANCH || 'main')
 }
 
 // accounts
@@ -76,13 +110,23 @@ function normalizeDeployPrefs(input = {}) {
   const verifyPublicBaseUrl = normalizeHttpUrl(input.verifyPublicBaseUrl)
   const panelUrl = normalizePanelUrl(input.panelUrl)
   const panelEntryUrl = normalizePanelUrl(input.panelEntryUrl)
+  const workerName = normalizeWorkerName(input.workerName || '')
+  const kvNamespaceTitle = normalizeKvNamespaceTitle(input.kvNamespaceTitle || input.kvNamespaceName || '')
+  const d1DatabaseName = normalizeD1DatabaseName(input.d1DatabaseName || '')
+  const pagesProjectName = normalizePagesProjectName(input.pagesProjectName || input.projectName || '')
+  const pagesBranch = normalizePagesBranch(input.pagesBranch || input.branch || 'main')
   return {
     botToken: asText(input.botToken),
     adminChatId: asText(input.adminChatId),
+    workerName,
+    kvNamespaceTitle,
+    d1DatabaseName,
     workerUrl,
     verifyPublicBaseUrl,
     panelUrl,
     panelEntryUrl: panelEntryUrl || buildAdminPanelEntryUrl(workerUrl) || panelUrl,
+    pagesProjectName,
+    pagesBranch,
     openPanelInClient,
   }
 }
@@ -127,6 +171,7 @@ function buildEnv(account) {
     NODE_PATH: app.isPackaged ? path.join(process.resourcesPath, 'node_modules') : path.join(__dirname, '..', 'electron-app', 'node_modules')
   }
   if (account) {
+    const deployPrefs = normalizeDeployPrefs(account.deployPrefs || {})
     const configDir = getAccountConfigDir(account)
     fs.mkdirSync(configDir, { recursive: true })
     env.TG_BOT_ACCOUNT_CONFIG_DIR = configDir
@@ -141,6 +186,22 @@ function buildEnv(account) {
     if (account.accountId) {
       env.CLOUDFLARE_ACCOUNT_ID = account.accountId
       env.CF_ACCOUNT_ID = account.accountId
+    }
+    if (deployPrefs.pagesProjectName) {
+      env.PAGES_PROJECT_NAME = deployPrefs.pagesProjectName
+    }
+    if (deployPrefs.pagesBranch) {
+      env.PAGES_BRANCH = deployPrefs.pagesBranch
+    }
+    if (deployPrefs.workerName) {
+      env.WORKER_NAME = deployPrefs.workerName
+    }
+    if (deployPrefs.kvNamespaceTitle) {
+      env.KV_NAMESPACE_TITLE = deployPrefs.kvNamespaceTitle
+      env.KV_NAMESPACE_NAME = deployPrefs.kvNamespaceTitle
+    }
+    if (deployPrefs.d1DatabaseName) {
+      env.D1_DATABASE_NAME = deployPrefs.d1DatabaseName
     }
   }
   const fakeBin = getFakeBinDir()
@@ -2330,8 +2391,27 @@ function runScript(scriptName, args = [], env) {
     env: { ...env, ELECTRON_RUN_AS_NODE: '1' }
   })
 }
+
+function applyDeployParamsToEnv(env = {}, params = {}) {
+  const next = { ...(env || {}) }
+  const workerName = normalizeWorkerName(params?.workerName || '')
+  const kvNamespaceTitle = normalizeKvNamespaceTitle(params?.kvNamespaceTitle || params?.kvNamespaceName || '')
+  const d1DatabaseName = normalizeD1DatabaseName(params?.d1DatabaseName || '')
+  const pagesProjectName = normalizePagesProjectName(params?.pagesProjectName || params?.projectName || '')
+  const pagesBranch = normalizePagesBranch(params?.pagesBranch || params?.branch || '')
+  if (workerName) next.WORKER_NAME = workerName
+  if (kvNamespaceTitle) {
+    next.KV_NAMESPACE_TITLE = kvNamespaceTitle
+    next.KV_NAMESPACE_NAME = kvNamespaceTitle
+  }
+  if (d1DatabaseName) next.D1_DATABASE_NAME = d1DatabaseName
+  if (pagesProjectName) next.PAGES_PROJECT_NAME = pagesProjectName
+  if (pagesBranch) next.PAGES_BRANCH = pagesBranch
+  return next
+}
 // actions
 async function runAction(action, params, env) {
+  env = applyDeployParamsToEnv(env, params)
   const send = (msg) => BrowserWindow.getAllWindows()[0]?.webContents.send('output', msg + '\n')
   send(`部署工具版本：${DEPLOY_TOOL_VERSION}`)
 
@@ -2400,6 +2480,9 @@ async function runAction(action, params, env) {
         await ensureVerifyDomainBinding(env, workerConfigPath, effectiveWorkerUrl, effectiveVerifyPublicBaseUrl, send)
       }
       saveActiveDeployPrefsPatch({
+        workerName: normalizeWorkerName(params?.workerName || env.WORKER_NAME || '') || undefined,
+        kvNamespaceTitle: normalizeKvNamespaceTitle(params?.kvNamespaceTitle || env.KV_NAMESPACE_TITLE || env.KV_NAMESPACE_NAME || '') || undefined,
+        d1DatabaseName: normalizeD1DatabaseName(params?.d1DatabaseName || env.D1_DATABASE_NAME || '') || undefined,
         workerUrl: effectiveWorkerUrl || undefined,
         verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl || undefined,
         panelUrl: effectivePanelUrl || undefined,
@@ -2416,6 +2499,8 @@ async function runAction(action, params, env) {
     case 'deploy-panel': {
       const workerUrl = normalizeHttpUrl(params?.workerUrl || '')
       const panelUrl = normalizePanelUrl(params?.panelUrl || '')
+      const projectName = getPagesProjectName(env, params)
+      const branch = getPagesDeployBranch(env, params)
       const runtimeVarUpdates = buildVerificationRuntimeVarUpdates(params)
       const tempDist = path.join(os.tmpdir(), 'tg-bot-panel-dist-' + Date.now())
       const viteBin = path.join(getAdminPanelDir(), 'node_modules', 'vite', 'bin', 'vite.js')
@@ -2424,7 +2509,6 @@ async function runAction(action, params, env) {
       send('正在构建 admin-panel...\n')
       await runProc(process.execPath, [viteBin, 'build', '--outDir', tempDist], { env: viteEnv, cwd: getAdminPanelDir() })
       send('正在上传到 Cloudflare Pages...\n')
-      const projectName = getPagesProjectName(env)
       const projectBeforeDeploy = await getPagesProject(env, projectName)
       if (!projectBeforeDeploy?.ok) {
         if (String(projectBeforeDeploy.reason || '').includes('8000007')) {
@@ -2458,7 +2542,7 @@ async function runAction(action, params, env) {
       const beforeDeploymentIds = new Set((beforeDeployments.deployments || []).map((item) => String(item.id || '')).filter(Boolean))
       let deployment
       try {
-        const directDeployment = await deployPagesViaDirectUpload(tempDist, projectName, params?.branch || 'main', env, send)
+        const directDeployment = await deployPagesViaDirectUpload(tempDist, projectName, branch, env, send)
         const directCheck = await verifyPagesDeployment(env, projectName, beforeDeploymentIds, {
           deployOutput: directDeployment.url || '',
           projectUrl: directDeployment.url || deployedPanelUrl,
@@ -2496,17 +2580,22 @@ async function runAction(action, params, env) {
         send(`Worker /admin target synced: ${effectivePanelUrl}`)
       }
       saveActiveDeployPrefsPatch({
+        workerName: normalizeWorkerName(params?.workerName || env.WORKER_NAME || '') || undefined,
+        kvNamespaceTitle: normalizeKvNamespaceTitle(params?.kvNamespaceTitle || env.KV_NAMESPACE_TITLE || env.KV_NAMESPACE_NAME || '') || undefined,
+        d1DatabaseName: normalizeD1DatabaseName(params?.d1DatabaseName || env.D1_DATABASE_NAME || '') || undefined,
         workerUrl: workerUrl || undefined,
         verifyPublicBaseUrl: runtimeVarUpdates.VERIFY_PUBLIC_BASE_URL || undefined,
         panelUrl: effectivePanelUrl || undefined,
         panelEntryUrl: panelEntryUrl || undefined,
+        pagesProjectName: projectName || undefined,
+        pagesBranch: branch || undefined,
       })
 
       try { fs.rmSync(tempDist, { recursive: true }) } catch {}
       if (panelEntryUrl && panelEntryUrl !== effectivePanelUrl) {
         send(`面板入口地址：${panelEntryUrl}`)
       }
-      return { projectName, panelUrl: effectivePanelUrl, panelEntryUrl, subdomain }
+      return { projectName, branch, panelUrl: effectivePanelUrl, panelEntryUrl, subdomain }
     }
     case 'deploy-all': {
       const workerResult = await runAction('deploy-worker', params, env)
@@ -2597,7 +2686,13 @@ async function runAction(action, params, env) {
       send('步骤 4/4：部署 Pages 面板...')
       const panelResult = await runAction(
         'deploy-panel',
-        { workerUrl: effectiveWorkerUrl, verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl, panelUrl: effectivePanelUrl },
+        {
+          workerUrl: effectiveWorkerUrl,
+          verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl,
+          panelUrl: effectivePanelUrl,
+          pagesProjectName: params?.pagesProjectName,
+          pagesBranch: params?.pagesBranch,
+        },
         env,
       )
       if (panelResult?.panelUrl) {
@@ -2673,10 +2768,15 @@ async function runAction(action, params, env) {
       saveActiveDeployPrefsPatch({
         botToken: botToken || undefined,
         adminChatId: adminChatId || undefined,
+        workerName: normalizeWorkerName(params?.workerName || env.WORKER_NAME || '') || undefined,
+        kvNamespaceTitle: normalizeKvNamespaceTitle(params?.kvNamespaceTitle || env.KV_NAMESPACE_TITLE || env.KV_NAMESPACE_NAME || '') || undefined,
+        d1DatabaseName: normalizeD1DatabaseName(params?.d1DatabaseName || env.D1_DATABASE_NAME || '') || undefined,
         workerUrl: effectiveWorkerUrl || undefined,
         verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl || undefined,
         panelUrl: finalPanelUrl || undefined,
         panelEntryUrl: finalPanelEntryUrl || undefined,
+        pagesProjectName: normalizePagesProjectName(params?.pagesProjectName || env.PAGES_PROJECT_NAME || '') || undefined,
+        pagesBranch: normalizePagesBranch(params?.pagesBranch || env.PAGES_BRANCH || 'main') || undefined,
         openPanelInClient: Boolean(params?.openPanelInClient),
       })
       send('\n首次部署完成。')

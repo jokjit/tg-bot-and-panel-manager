@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">TG Bot Deploy</string>
+    <string name="title_activity_main">TG Bot Deploy</string>
+    <string name="package_name">com.tgbot.deploy</string>
+    <string name="custom_url_scheme">com.tgbot.deploy</string>
+</resources>

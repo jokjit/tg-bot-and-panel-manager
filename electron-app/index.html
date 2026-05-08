@@ -346,16 +346,24 @@ body[data-theme="dark"] {
   inset: 0;
   background: rgba(0, 0, 0, 0.4);
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 16px;
   z-index: 100;
 }
 .modal {
   background: var(--surface);
   border-radius: 20px;
   padding: 24px;
-  width: 440px;
-  max-width: 90vw;
+  width: min(440px, 100%);
+  max-width: 100%;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 0 auto;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
 }
 .modal h2 {
@@ -520,6 +528,18 @@ body[data-theme="dark"] {
     <details class="field">
       <summary id="wizard-advanced-summary" style="font-size:12px;color:var(--text-2);cursor:pointer;">Advanced (optional)</summary>
       <div style="margin-top:8px;">
+        <label id="w-worker-name-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Worker Name</label>
+        <input id="w-worker-name" placeholder="telegram-private-chatbot" />
+      </div>
+      <div style="margin-top:10px;">
+        <label id="w-kv-namespace-title-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">KV Namespace Title</label>
+        <input id="w-kv-namespace-title" placeholder="tg-bot-kv" />
+      </div>
+      <div style="margin-top:10px;">
+        <label id="w-d1-database-name-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">D1 Database Name</label>
+        <input id="w-d1-database-name" placeholder="tg-bot-history" />
+      </div>
+      <div style="margin-top:8px;">
         <label id="w-worker-url-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Worker URL</label>
         <input id="w-worker-url" placeholder="https://your-worker.example.com" />
       </div>
@@ -530,6 +550,14 @@ body[data-theme="dark"] {
       <div style="margin-top:10px;">
         <label id="w-panel-url-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Panel URL</label>
         <input id="w-panel-url" placeholder="Cloudflare Pages default URL" readonly />
+      </div>
+      <div style="margin-top:10px;">
+        <label id="w-pages-project-name-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Pages Project Name</label>
+        <input id="w-pages-project-name" placeholder="tg-admin-panel" />
+      </div>
+      <div style="margin-top:10px;">
+        <label id="w-pages-branch-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Pages Branch</label>
+        <input id="w-pages-branch" placeholder="main" />
       </div>
     </details>
 
@@ -549,9 +577,14 @@ const statusDot = document.getElementById("status-dot")
 const statusText = document.getElementById("status-text")
 const cards = document.querySelectorAll(".card[data-action]")
 const wizardModal = document.getElementById("wizard-modal")
+const wizardWorkerName = document.getElementById("w-worker-name")
+const wizardKvNamespaceTitle = document.getElementById("w-kv-namespace-title")
+const wizardD1DatabaseName = document.getElementById("w-d1-database-name")
 const wizardWorkerUrl = document.getElementById("w-worker-url")
 const wizardVerifyPublicBaseUrl = document.getElementById("w-verify-public-base-url")
 const wizardPanelUrl = document.getElementById("w-panel-url")
+const wizardPagesProjectName = document.getElementById("w-pages-project-name")
+const wizardPagesBranch = document.getElementById("w-pages-branch")
 const wizardOpenPanelInClient = document.getElementById("w-open-panel-in-client")
 
 const panelWrap = document.getElementById("embedded-panel-wrap")
@@ -625,11 +658,21 @@ const i18n = {
     w_admin_label: "ADMIN_CHAT_ID",
     w_admin_ph: "管理员用户 ID 或群组 ID",
     wizard_advanced: "高级选项（可选）",
+    w_worker_name_label: "Worker 名称",
+    w_worker_name_ph: "默认 telegram-private-chatbot，可按账号自定义",
+    w_kv_namespace_title_label: "KV 命名空间名称",
+    w_kv_namespace_title_ph: "默认 tg-bot-kv，可按账号自定义",
+    w_d1_database_name_label: "D1 数据库名称",
+    w_d1_database_name_ph: "默认 tg-bot-history，可按账号自定义",
     w_worker_label: "Worker 地址（Webhook / 面板入口）",
     w_verify_base_label: "验证页面域名（可选）",
     w_verify_base_ph: "留空则使用 Worker 地址（PUBLIC_BASE_URL）",
     w_panel_label: "Pages 面板地址（只读，/admin 跳转目标）",
     w_panel_ph: "部署后自动读取 Cloudflare 分配的 pages.dev 地址",
+    w_pages_project_label: "Pages 项目名称",
+    w_pages_project_ph: "默认 tg-admin-panel，可按账号自定义",
+    w_pages_branch_label: "Pages 分支",
+    w_pages_branch_ph: "默认 main",
     w_open_panel: "部署完成后在客户端打开面板",
     start_deploy: "开始部署",
     error_prefix: "错误",
@@ -691,11 +734,21 @@ const i18n = {
     w_admin_label: "ADMIN_CHAT_ID",
     w_admin_ph: "Admin user ID or group ID",
     wizard_advanced: "Advanced (optional)",
+    w_worker_name_label: "Worker Name",
+    w_worker_name_ph: "Default telegram-private-chatbot, customizable per account",
+    w_kv_namespace_title_label: "KV Namespace Title",
+    w_kv_namespace_title_ph: "Default tg-bot-kv, customizable per account",
+    w_d1_database_name_label: "D1 Database Name",
+    w_d1_database_name_ph: "Default tg-bot-history, customizable per account",
     w_worker_label: "Worker URL (webhook / panel entry)",
     w_verify_base_label: "Verification URL base (optional)",
     w_verify_base_ph: "Leave empty to use Worker URL (PUBLIC_BASE_URL)",
     w_panel_label: "Pages panel URL (read-only /admin target)",
     w_panel_ph: "Auto-detect the Cloudflare-assigned pages.dev URL after deploy",
+    w_pages_project_label: "Pages Project Name",
+    w_pages_project_ph: "Default tg-admin-panel, customizable per account",
+    w_pages_branch_label: "Pages Branch",
+    w_pages_branch_ph: "Default main",
     w_open_panel: "Open panel in app after deploy",
     start_deploy: "Start Deploy",
     error_prefix: "Error",
@@ -772,9 +825,14 @@ function applyLocale() {
   document.getElementById("w-bot-token-label").textContent = t("w_bot_token_label")
   document.getElementById("w-admin-chat-id-label").textContent = t("w_admin_label")
   document.getElementById("wizard-advanced-summary").textContent = t("wizard_advanced")
+  document.getElementById("w-worker-name-label").textContent = t("w_worker_name_label")
+  document.getElementById("w-kv-namespace-title-label").textContent = t("w_kv_namespace_title_label")
+  document.getElementById("w-d1-database-name-label").textContent = t("w_d1_database_name_label")
   document.getElementById("w-worker-url-label").textContent = t("w_worker_label")
   document.getElementById("w-verify-public-base-url-label").textContent = t("w_verify_base_label")
   document.getElementById("w-panel-url-label").textContent = t("w_panel_label")
+  document.getElementById("w-pages-project-name-label").textContent = t("w_pages_project_label")
+  document.getElementById("w-pages-branch-label").textContent = t("w_pages_branch_label")
   document.getElementById("w-open-panel-in-client-text").textContent = t("w_open_panel")
   document.getElementById("cancel-wizard").textContent = t("cancel")
   document.getElementById("confirm-wizard").textContent = t("start_deploy")
@@ -785,8 +843,13 @@ function applyLocale() {
   document.getElementById("f-email").placeholder = t("f_email_ph")
   document.getElementById("w-bot-token").placeholder = t("w_bot_token_ph")
   document.getElementById("w-admin-chat-id").placeholder = t("w_admin_ph")
+  document.getElementById("w-worker-name").placeholder = t("w_worker_name_ph")
+  document.getElementById("w-kv-namespace-title").placeholder = t("w_kv_namespace_title_ph")
+  document.getElementById("w-d1-database-name").placeholder = t("w_d1_database_name_ph")
   document.getElementById("w-verify-public-base-url").placeholder = t("w_verify_base_ph")
   document.getElementById("w-panel-url").placeholder = t("w_panel_ph")
+  document.getElementById("w-pages-project-name").placeholder = t("w_pages_project_ph")
+  document.getElementById("w-pages-branch").placeholder = t("w_pages_branch_ph")
 
   langToggleBtn.textContent = t("language_toggle")
   themeToggleBtn.textContent = currentTheme === "dark" ? t("theme_toggle_light") : t("theme_toggle_dark")
@@ -815,6 +878,34 @@ function normalizePanelUrl(raw) {
   const normalized = normalizeHttpUrl(raw)
   if (!normalized || normalized === LEGACY_DEFAULT_PAGES_PANEL_URL) return ""
   return normalized
+}
+
+function normalizePagesProjectName(raw) {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 58)
+    .replace(/-+$/g, "")
+}
+
+function normalizePagesBranch(raw) {
+  const text = String(raw || "").trim()
+  return text || "main"
+}
+
+function normalizeWorkerName(raw) {
+  return String(raw || "").trim()
+}
+
+function normalizeKvNamespaceTitle(raw) {
+  return String(raw || "").trim()
+}
+
+function normalizeD1DatabaseName(raw) {
+  return String(raw || "").trim()
 }
 
 function getDeployedPanelUrl(result) {
@@ -853,10 +944,15 @@ function getActivePanelUrl() {
 function getSavedDeployParams() {
   const prefs = currentActiveAccount?.deployPrefs || {}
   return {
+    workerName: normalizeWorkerName(prefs.workerName || "") || "telegram-private-chatbot",
+    kvNamespaceTitle: normalizeKvNamespaceTitle(prefs.kvNamespaceTitle || prefs.kvNamespaceName || "") || "tg-bot-kv",
+    d1DatabaseName: normalizeD1DatabaseName(prefs.d1DatabaseName || "") || "tg-bot-history",
     workerUrl: String(prefs.workerUrl || "").trim(),
     verifyPublicBaseUrl: normalizeHttpUrl(prefs.verifyPublicBaseUrl || ""),
     panelUrl: normalizePanelUrl(prefs.panelUrl),
     panelEntryUrl: String(prefs.panelEntryUrl || "").trim(),
+    pagesProjectName: normalizePagesProjectName(prefs.pagesProjectName || "") || "tg-admin-panel",
+    pagesBranch: normalizePagesBranch(prefs.pagesBranch || "main"),
   }
 }
 
@@ -864,9 +960,14 @@ function applyWizardPrefsFromActiveAccount() {
   const prefs = currentActiveAccount?.deployPrefs || {}
   document.getElementById("w-bot-token").value = prefs.botToken || ""
   document.getElementById("w-admin-chat-id").value = prefs.adminChatId || ""
+  wizardWorkerName.value = normalizeWorkerName(prefs.workerName || "") || "telegram-private-chatbot"
+  wizardKvNamespaceTitle.value = normalizeKvNamespaceTitle(prefs.kvNamespaceTitle || prefs.kvNamespaceName || "") || "tg-bot-kv"
+  wizardD1DatabaseName.value = normalizeD1DatabaseName(prefs.d1DatabaseName || "") || "tg-bot-history"
   wizardWorkerUrl.value = prefs.workerUrl || ""
   wizardVerifyPublicBaseUrl.value = normalizeHttpUrl(prefs.verifyPublicBaseUrl || "")
   wizardPanelUrl.value = normalizePanelUrl(prefs.panelUrl)
+  wizardPagesProjectName.value = normalizePagesProjectName(prefs.pagesProjectName || "") || "tg-admin-panel"
+  wizardPagesBranch.value = normalizePagesBranch(prefs.pagesBranch || "main")
   wizardOpenPanelInClient.checked = Boolean(prefs.openPanelInClient ?? prefs.useBuiltinPanel)
 }
 
@@ -874,9 +975,14 @@ function getWizardParams() {
   return {
     botToken: document.getElementById("w-bot-token").value.trim(),
     adminChatId: document.getElementById("w-admin-chat-id").value.trim(),
+    workerName: normalizeWorkerName(wizardWorkerName.value) || "telegram-private-chatbot",
+    kvNamespaceTitle: normalizeKvNamespaceTitle(wizardKvNamespaceTitle.value) || "tg-bot-kv",
+    d1DatabaseName: normalizeD1DatabaseName(wizardD1DatabaseName.value) || "tg-bot-history",
     workerUrl: wizardWorkerUrl.value.trim(),
     verifyPublicBaseUrl: normalizeHttpUrl(wizardVerifyPublicBaseUrl.value),
     panelUrl: normalizePanelUrl(wizardPanelUrl.value),
+    pagesProjectName: normalizePagesProjectName(wizardPagesProjectName.value) || "tg-admin-panel",
+    pagesBranch: normalizePagesBranch(wizardPagesBranch.value),
     openPanelInClient: Boolean(wizardOpenPanelInClient.checked),
   }
 }

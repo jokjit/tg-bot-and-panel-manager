@@ -6,6 +6,7 @@ const basePath = resolve(cwd, 'wrangler.toml');
 const localPath = resolve(cwd, process.env.TG_BOT_LOCAL_WRANGLER || 'wrangler.local.toml');
 const outputPath = resolve(cwd, process.env.TG_BOT_PRIVATE_WRANGLER || '.wrangler.private.toml');
 const accountId = String(process.env.CLOUDFLARE_ACCOUNT_ID || process.env.CF_ACCOUNT_ID || '').trim();
+const workerName = String(process.env.WORKER_NAME || '').trim();
 
 if (!existsSync(basePath)) {
   throw new Error(`Missing base config: ${basePath}`);
@@ -111,6 +112,17 @@ if (existsSync(localPath)) {
         });
       }
     }
+  }
+}
+
+if (workerName) {
+  const line = `name = ${JSON.stringify(workerName)}`;
+  if (/^[ \t]*name[ \t]*=.*$/m.test(merged)) {
+    merged = merged.replace(/^[ \t]*name[ \t]*=.*$/m, line);
+  } else if (/^[ \t]*main[ \t]*=.*$/m.test(merged)) {
+    merged = merged.replace(/^[ \t]*main[ \t]*=.*$/m, (hit) => `${line}\n${hit}`);
+  } else {
+    merged = `${line}\n${merged}`;
   }
 }
 

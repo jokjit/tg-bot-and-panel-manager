@@ -7,6 +7,9 @@ admin-panel/node_modules/
 admin-panel/dist/
 electron-app/node_modules/
 electron-app/dist/
+mobile-app/dist/
+mobile-app/public/deploy-assets/
+mobile-app/release-apk/
 npm-debug.log*
 
 # Wrangler / Cloudflare
