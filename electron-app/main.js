@@ -1386,30 +1386,54 @@ async function ensureWorkerCustomDomain(env, configPath, workerUrl, onProgress) 
     return { ok: true, skipped: true, reason: 'worker_url_is_not_custom_domain' }
   }
 
+  return ensureWorkerCustomDomainByHostname(env, configPath, hostname, onProgress, 'Worker 自定义域名')
+}
+
+async function ensureWorkerCustomDomainByHostname(env, configPath, hostname, onProgress, label = 'Worker 自定义域名') {
+  const normalizedHost = String(hostname || '').trim().toLowerCase()
+  if (!normalizedHost) {
+    return { ok: true, skipped: true, reason: 'custom_domain_hostname_empty' }
+  }
+
   const workerName = getWorkerNameFromConfig(configPath)
   if (!workerName) {
-    throw new Error('Worker custom domain binding failed: missing_worker_name_in_config')
+    throw new Error(`${label}绑定失败：missing_worker_name_in_config`)
   }
 
-  const zone = await findZoneForHostname(env, hostname, onProgress)
+  const zone = await findZoneForHostname(env, normalizedHost, onProgress)
   if (!zone.ok) {
-    throw new Error(`Worker custom domain binding failed (${hostname} -> ${workerName}): ${zone.reason}`)
+    throw new Error(`${label}绑定失败（${normalizedHost} -> ${workerName}）：${zone.reason}`)
   }
 
-  const primary = await putWorkerCustomDomain(env, workerName, hostname, zone.zoneId)
+  const primary = await putWorkerCustomDomain(env, workerName, normalizedHost, zone.zoneId)
   if (primary.ok) {
-    onProgress?.(`Worker 自定义域名已绑定：${hostname} -> ${workerName}`)
-    return { ok: true, hostname, workerName, zoneId: zone.zoneId, method: 'workers-domains' }
+    onProgress?.(`${label}已绑定：${normalizedHost} -> ${workerName}`)
+    return { ok: true, hostname: normalizedHost, workerName, zoneId: zone.zoneId, method: 'workers-domains' }
   }
 
-  onProgress?.(`Worker 自定义域名主接口失败（${primary.reason || 'unknown'}），尝试覆盖绑定接口...`)
-  const fallback = await putWorkerCustomDomainRecords(env, workerName, hostname, zone.zoneId)
+  onProgress?.(`${label}主接口失败（${primary.reason || 'unknown'}），尝试覆盖绑定接口...`)
+  const fallback = await putWorkerCustomDomainRecords(env, workerName, normalizedHost, zone.zoneId)
   if (fallback.ok) {
-    onProgress?.(`Worker 自定义域名已通过覆盖接口绑定：${hostname} -> ${workerName}`)
-    return { ok: true, hostname, workerName, zoneId: zone.zoneId, method: 'domains-records' }
+    onProgress?.(`${label}已通过覆盖接口绑定：${normalizedHost} -> ${workerName}`)
+    return { ok: true, hostname: normalizedHost, workerName, zoneId: zone.zoneId, method: 'domains-records' }
   }
 
-  throw new Error(`Worker custom domain binding failed (${hostname} -> ${workerName}): ${primary.reason || 'unknown'}; fallback=${fallback.reason || 'unknown'}`)
+  throw new Error(`${label}绑定失败（${normalizedHost} -> ${workerName}）：${primary.reason || 'unknown'}; fallback=${fallback.reason || 'unknown'}`)
+}
+
+async function ensureVerifyDomainBinding(env, configPath, workerUrl, verifyPublicBaseUrl, onProgress) {
+  const verifyHost = getWorkerCustomDomainHost(verifyPublicBaseUrl)
+  if (!verifyHost) {
+    return { ok: true, skipped: true, reason: 'verify_public_base_url_is_not_custom_domain' }
+  }
+
+  const workerHost = getWorkerCustomDomainHost(workerUrl)
+  if (workerHost && workerHost === verifyHost) {
+    onProgress?.(`验证域名与 Worker 域名一致，复用已有绑定：${verifyHost}`)
+    return { ok: true, skipped: true, reason: 'verify_domain_same_as_worker_domain', hostname: verifyHost }
+  }
+
+  return ensureWorkerCustomDomainByHostname(env, configPath, verifyHost, onProgress, '验证域名')
 }
 
 async function createPagesProject(env, projectName) {
@@ -2341,6 +2365,9 @@ async function runAction(action, params, env) {
       let effectiveWorkerUrl = normalizeHttpUrl(params?.workerUrl || '')
       const effectivePanelUrl = normalizePanelUrl(params?.panelUrl || '')
       const runtimeVarUpdates = buildVerificationRuntimeVarUpdates(params)
+      const effectiveVerifyPublicBaseUrl = normalizeHttpUrl(
+        runtimeVarUpdates.VERIFY_PUBLIC_BASE_URL || params?.verifyPublicBaseUrl || '',
+      )
       const runtimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
       if (runtimeUpdates.length > 0) send(`已更新账号运行配置：${runtimeUpdates.join(', ')}`)
       send('正在初始化 KV 和 D1...')
@@ -2369,9 +2396,12 @@ async function runAction(action, params, env) {
         throw new Error(`Worker deployment verification failed (${check.workerName || 'unknown'}): ${check.reason}`)
       }
       send(`Worker 已验证：${check.workerName}${check.method ? ` (${check.method})` : ''}`)
+      if (effectiveVerifyPublicBaseUrl) {
+        await ensureVerifyDomainBinding(env, workerConfigPath, effectiveWorkerUrl, effectiveVerifyPublicBaseUrl, send)
+      }
       saveActiveDeployPrefsPatch({
         workerUrl: effectiveWorkerUrl || undefined,
-        verifyPublicBaseUrl: runtimeVarUpdates.VERIFY_PUBLIC_BASE_URL || undefined,
+        verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl || undefined,
         panelUrl: effectivePanelUrl || undefined,
         panelEntryUrl: buildAdminPanelEntryUrl(effectiveWorkerUrl) || effectivePanelUrl || undefined,
       })
@@ -2611,6 +2641,15 @@ async function runAction(action, params, env) {
             send('Worker 机器人配置警告：缺少 Worker URL，已跳过运行时检查。')
           }
         }
+      }
+      if (effectiveVerifyPublicBaseUrl) {
+        await ensureVerifyDomainBinding(
+          env,
+          workerConfigPath,
+          effectiveWorkerUrl,
+          effectiveVerifyPublicBaseUrl,
+          send,
+        )
       }
       if (effectiveWorkerUrl) {
         await waitForWorkerHealth(effectiveWorkerUrl, send, 'Worker 入口')
