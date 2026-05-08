@@ -41,15 +41,24 @@ npm run build
 
 ### 首次部署
 
+### 电脑端
 1. 打开客户端，在左侧添加 Cloudflare 账号，填写 API Token 和 Account ID。
+
 cloudflare api设置
 <img width="1108" height="517" alt="image" src="https://github.com/user-attachments/assets/ec8a1aa4-40e9-40c7-8f3e-72a4910fd427" />
 
-下边的选择包含你的cloudflare账户
+  下边的选择包含你的cloudflare账户
 
-2. 打开首次部署向导，填写 `BOT_TOKEN`、`ADMIN_CHAT_ID`，并在高级选项中按需填写 Worker 地址、验证页面域名（`VERIFY_PUBLIC_BASE_URL`）。
+2. 打开首次部署向导，填写 `BOT_TOKEN`、`ADMIN_CHAT_ID`，并在高级选项中按需填写 Worker 地址、验证页面域名（`VERIFY_PUBLIC_BASE_URL`）、pages域名建议不填写使用cf默认分配的即可（已改为只读状态）。
 3. 点击开始部署，客户端会自动初始化 KV/D1、上传 Worker、写入 Secrets、绑定 Worker 自定义域名、部署 Pages 面板。
-4. 推荐入口为 `https://你的Worker域名/admin`，Worker 会把 `/admin` 跳转到 Pages 面板。
+4. 面板入口为 `https://你的Worker域名/admin`，Worker 会自动重定向跳转到 Pages 管理面板。
+5. 面板登录密码，在部署完成后会发送到你绑定的tg上，没收到可以使用机器人命令获取当前的临时密码，还可以强制重新生成
+6. 使用临时密码登录面板后，会让修改密码，改密码为永久密码，存储在kv里，后续可以在面板当中修改
+
+### 手机端
+跟电脑一样填写好变量，点击开始部署即可一键部署
+pages域名一样建议不填使用默认分配好的即可
+
 ### tg设置
 1. 创建一个群聊，并开启话题模式
 2. 把创建好的机器人bot拉进群聊，并授予管理员权限
