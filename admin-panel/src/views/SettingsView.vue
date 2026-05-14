@@ -157,6 +157,91 @@
                 </div>
               </div>
             </div>
+
+            <div class="maintenance-block">
+              <div class="panel-heading compact">
+                <div>
+                  <h3>{{ t('settings.maintenanceTitle') }}</h3>
+                  <p>{{ t('settings.maintenanceDesc') }}</p>
+                </div>
+                <div class="panel-toolbar">
+                  <n-button secondary :loading="cleanupRunning" @click="runCleanupNow">
+                    {{ t('settings.runCleanupNow') }}
+                  </n-button>
+                </div>
+              </div>
+
+              <div class="verify-grid">
+                <n-form-item :label="t('settings.dataRetentionDays')">
+                  <n-input-number
+                    v-model:value="form.DATA_RETENTION_DAYS"
+                    :min="7"
+                    :max="3650"
+                    :step="1"
+                    clearable
+                    style="width: 100%"
+                  />
+                </n-form-item>
+
+                <n-form-item :label="t('settings.cleanupBatchSize')">
+                  <n-input-number
+                    v-model:value="form.DATA_CLEANUP_BATCH_SIZE"
+                    :min="20"
+                    :max="1000"
+                    :step="10"
+                    clearable
+                    style="width: 100%"
+                  />
+                </n-form-item>
+              </div>
+
+              <div class="switch-stack compact-stack">
+                <div class="switch-tile">
+                  <div>
+                    <strong>{{ t('settings.cleanupAuto') }}</strong>
+                    <span>{{ form.DATA_CLEANUP_AUTO_BOOL ? t('app.enabled') : t('app.disabled') }}</span>
+                  </div>
+                  <n-switch v-model:value="form.DATA_CLEANUP_AUTO_BOOL" />
+                </div>
+              </div>
+
+              <div class="maintenance-sub-block">
+                <div class="panel-heading compact">
+                  <div>
+                    <h3>{{ t('settings.deletedSweepTitle') }}</h3>
+                    <p>{{ t('settings.deletedSweepDesc') }}</p>
+                  </div>
+                  <div class="panel-toolbar">
+                    <n-button secondary :loading="deletedSweepRunning" @click="runDeletedSweepNow">
+                      {{ t('settings.runDeletedSweepNow') }}
+                    </n-button>
+                  </div>
+                </div>
+
+                <div class="verify-grid">
+                  <n-form-item :label="t('settings.deletedSweepBatchSize')">
+                    <n-input-number
+                      v-model:value="form.DELETED_ACCOUNT_SWEEP_BATCH_SIZE"
+                      :min="20"
+                      :max="1000"
+                      :step="10"
+                      clearable
+                      style="width: 100%"
+                    />
+                  </n-form-item>
+                </div>
+
+                <div class="switch-stack compact-stack">
+                  <div class="switch-tile">
+                    <div>
+                      <strong>{{ t('settings.deletedSweepAuto') }}</strong>
+                      <span>{{ form.DELETED_ACCOUNT_SWEEP_AUTO_BOOL ? t('app.enabled') : t('app.disabled') }}</span>
+                    </div>
+                    <n-switch v-model:value="form.DELETED_ACCOUNT_SWEEP_AUTO_BOOL" />
+                  </div>
+                </div>
+              </div>
+            </div>
           </n-card>
         </n-gi>
       </n-grid>
@@ -181,18 +266,23 @@ import {
   useMessage,
 } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
-import { fetchSystemConfig, saveSystemConfig } from '../services/api';
+import { fetchSystemConfig, runDeletedAccountSweep, runMaintenanceCleanup, saveSystemConfig } from '../services/api';
 import { setMotion, uiStore } from '../stores/ui';
 
 const DEFAULT_VERIFY_EXPIRE_MS = 15 * 60 * 1000;
 const DEFAULT_VERIFY_FAIL_BLOCK_MS = 60 * 1000;
 const DEFAULT_VERIFY_TIMEOUT_BLOCK_MS = 60 * 1000;
 const DEFAULT_VERIFY_MAX_FAILURES = 2;
+const DEFAULT_DATA_RETENTION_DAYS = 90;
+const DEFAULT_DATA_CLEANUP_BATCH_SIZE = 200;
+const DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE = 120;
 
 const message = useMessage();
 const { t } = useI18n();
 const loading = ref(false);
 const saving = ref(false);
+const cleanupRunning = ref(false);
+const deletedSweepRunning = ref(false);
 const motionLevel = ref(uiStore.motion);
 
 const motionOptions = computed(() => [
@@ -214,6 +304,11 @@ const form = reactive({
   VERIFY_FAIL_BLOCK_SECONDS: 60,
   VERIFY_TIMEOUT_BLOCK_SECONDS: 60,
   VERIFY_MAX_FAILURES: DEFAULT_VERIFY_MAX_FAILURES,
+  DATA_RETENTION_DAYS: DEFAULT_DATA_RETENTION_DAYS,
+  DATA_CLEANUP_BATCH_SIZE: DEFAULT_DATA_CLEANUP_BATCH_SIZE,
+  DATA_CLEANUP_AUTO_BOOL: true,
+  DELETED_ACCOUNT_SWEEP_BATCH_SIZE: DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE,
+  DELETED_ACCOUNT_SWEEP_AUTO_BOOL: true,
 });
 
 function toPositiveNumber(value, fallback) {
@@ -246,6 +341,14 @@ function assignConfig(cfg = {}) {
   form.VERIFY_FAIL_BLOCK_SECONDS = msToSeconds(cfg.VERIFY_FAIL_BLOCK_MS, DEFAULT_VERIFY_FAIL_BLOCK_MS);
   form.VERIFY_TIMEOUT_BLOCK_SECONDS = msToSeconds(cfg.VERIFY_TIMEOUT_BLOCK_MS, DEFAULT_VERIFY_TIMEOUT_BLOCK_MS);
   form.VERIFY_MAX_FAILURES = toPositiveNumber(cfg.VERIFY_MAX_FAILURES, DEFAULT_VERIFY_MAX_FAILURES);
+  form.DATA_RETENTION_DAYS = toPositiveNumber(cfg.DATA_RETENTION_DAYS, DEFAULT_DATA_RETENTION_DAYS);
+  form.DATA_CLEANUP_BATCH_SIZE = toPositiveNumber(cfg.DATA_CLEANUP_BATCH_SIZE, DEFAULT_DATA_CLEANUP_BATCH_SIZE);
+  form.DATA_CLEANUP_AUTO_BOOL = String(cfg.DATA_CLEANUP_AUTO ?? 'true') !== 'false';
+  form.DELETED_ACCOUNT_SWEEP_BATCH_SIZE = toPositiveNumber(
+    cfg.DELETED_ACCOUNT_SWEEP_BATCH_SIZE,
+    DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE,
+  );
+  form.DELETED_ACCOUNT_SWEEP_AUTO_BOOL = String(cfg.DELETED_ACCOUNT_SWEEP_AUTO ?? 'true') !== 'false';
   form.BOT_TOKEN = '';
 }
 
@@ -276,6 +379,16 @@ async function save() {
       VERIFY_FAIL_BLOCK_MS: String(Math.max(1, Number(form.VERIFY_FAIL_BLOCK_SECONDS) || 60) * 1000),
       VERIFY_TIMEOUT_BLOCK_MS: String(Math.max(1, Number(form.VERIFY_TIMEOUT_BLOCK_SECONDS) || 60) * 1000),
       VERIFY_MAX_FAILURES: String(Math.max(1, Number(form.VERIFY_MAX_FAILURES) || DEFAULT_VERIFY_MAX_FAILURES)),
+      DATA_RETENTION_DAYS: String(Math.max(7, Number(form.DATA_RETENTION_DAYS) || DEFAULT_DATA_RETENTION_DAYS)),
+      DATA_CLEANUP_BATCH_SIZE: String(Math.max(20, Number(form.DATA_CLEANUP_BATCH_SIZE) || DEFAULT_DATA_CLEANUP_BATCH_SIZE)),
+      DATA_CLEANUP_AUTO: form.DATA_CLEANUP_AUTO_BOOL ? 'true' : 'false',
+      DELETED_ACCOUNT_SWEEP_BATCH_SIZE: String(
+        Math.max(
+          20,
+          Number(form.DELETED_ACCOUNT_SWEEP_BATCH_SIZE) || DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE,
+        ),
+      ),
+      DELETED_ACCOUNT_SWEEP_AUTO: form.DELETED_ACCOUNT_SWEEP_AUTO_BOOL ? 'true' : 'false',
     };
 
     if (form.BOT_TOKEN) payload.BOT_TOKEN = form.BOT_TOKEN;
@@ -287,6 +400,44 @@ async function save() {
     message.error(error.message || t('settings.saveFailed'));
   } finally {
     saving.value = false;
+  }
+}
+
+async function runCleanupNow() {
+  cleanupRunning.value = true;
+  try {
+    const response = await runMaintenanceCleanup({
+      retentionDays: Math.max(7, Number(form.DATA_RETENTION_DAYS) || DEFAULT_DATA_RETENTION_DAYS),
+      batchSize: Math.max(20, Number(form.DATA_CLEANUP_BATCH_SIZE) || DEFAULT_DATA_CLEANUP_BATCH_SIZE),
+    });
+    const result = response?.result || {};
+    message.success(
+      `${t('settings.cleanupDone')} ${t('settings.cleanupDeletedUsers')}: ${result?.kv?.deletedUsers || 0}, ${t('settings.cleanupDeletedMessages')}: ${result?.d1?.deletedMessages || 0}`,
+    );
+  } catch (error) {
+    message.error(error.message || t('settings.cleanupFailed'));
+  } finally {
+    cleanupRunning.value = false;
+  }
+}
+
+async function runDeletedSweepNow() {
+  deletedSweepRunning.value = true;
+  try {
+    const response = await runDeletedAccountSweep({
+      batchSize: Math.max(
+        20,
+        Number(form.DELETED_ACCOUNT_SWEEP_BATCH_SIZE) || DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE,
+      ),
+    });
+    const result = response?.result || {};
+    message.success(
+      `${t('settings.deletedSweepDone')} ${t('settings.deletedSweepHitUsers')}: ${result?.detections?.length || 0}, ${t('settings.cleanupDeletedUsers')}: ${result?.kv?.deletedUsers || 0}`,
+    );
+  } catch (error) {
+    message.error(error.message || t('settings.deletedSweepFailed'));
+  } finally {
+    deletedSweepRunning.value = false;
   }
 }
 
@@ -351,6 +502,18 @@ onMounted(() => {
   margin-top: 18px;
   padding-top: 18px;
   border-top: 1px solid var(--panel-border);
+}
+
+.maintenance-block {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.maintenance-sub-block {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px dashed var(--panel-border);
 }
 
 .settings-grid :deep(.n-form-item),

@@ -1,5 +1,5 @@
 ﻿<template>
-  <n-layout position="absolute" style="inset: 0" class="layout-root">
+  <n-layout class="layout-root">
     <div class="console-shell">
       <aside class="desktop-sider">
         <div class="sider-panel glass-card">
@@ -16,7 +16,9 @@
             <div class="brand-chip">{{ t('app.pageStyle') }}</div>
           </div>
 
-          <n-menu class="nav-menu" :options="menuOptions" :value="activeKey" @update:value="handleMenuSelect" />
+          <div class="nav-scroll">
+            <n-menu class="nav-menu" :options="menuOptions" :value="activeKey" @update:value="handleMenuSelect" />
+          </div>
 
           <div class="sider-footer">
             <n-tag round :type="statusTagType">{{ adminStore.loggedIn ? t('app.login') : t('app.offline') }}</n-tag>
@@ -45,7 +47,9 @@
                 <div class="brand-chip">{{ t('app.pageStyle') }}</div>
               </div>
 
-              <n-menu class="nav-menu" :options="menuOptions" :value="activeKey" @update:value="handleMenuSelect" />
+              <div class="nav-scroll">
+                <n-menu class="nav-menu" :options="menuOptions" :value="activeKey" @update:value="handleMenuSelect" />
+              </div>
 
               <div class="sider-footer">
                 <n-tag round :type="statusTagType">{{ adminStore.loggedIn ? t('app.login') : t('app.offline') }}</n-tag>
@@ -262,12 +266,27 @@ onBeforeUnmount(() => {
   overflow-x: hidden;
 }
 
+.layout-root {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
 .console-shell {
   width: 100%;
-  height: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   grid-template-columns: 292px minmax(0, 1fr);
   gap: 6px;
+}
+
+.main-shell {
+  min-height: 0;
+}
+
+.content-shell {
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .desktop-sider {
@@ -276,6 +295,9 @@ onBeforeUnmount(() => {
 
 .sider-panel {
   height: calc(100vh - 32px);
+  height: calc(100dvh - 32px);
+  min-height: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -285,11 +307,12 @@ onBeforeUnmount(() => {
 
 .drawer-panel {
   padding: 10px;
+  height: 100%;
 }
 
 .drawer-panel__inner {
-  min-height: calc(100vh - 120px);
-  height: auto;
+  min-height: 0;
+  height: 100%;
 }
 
 .brand {
@@ -297,6 +320,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 12px;
   padding: 4px 6px 0;
+  flex-shrink: 0;
 }
 
 .brand-badge {
@@ -348,6 +372,23 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  flex-shrink: 0;
+}
+
+.nav-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.nav-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.nav-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
 }
 
 .user-chip {

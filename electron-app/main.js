@@ -14,10 +14,16 @@ function findRepoRoot() {
   return process.resourcesPath
 }
 
-let _repoRoot, _scriptsDir, _adminPanelDir
+let _repoRoot, _scriptsDir, _adminPanelDistDir
 function getRepoRoot() { return _repoRoot || (_repoRoot = findRepoRoot()) }
 function getScriptsDir() { return _scriptsDir || (_scriptsDir = app.isPackaged ? path.join(process.resourcesPath, 'scripts') : path.join(__dirname, '..', 'scripts')) }
-function getAdminPanelDir() { return _adminPanelDir || (_adminPanelDir = app.isPackaged ? path.join(process.resourcesPath, 'admin-panel') : path.join(__dirname, '..', 'admin-panel')) }
+function getAdminPanelDistDir() {
+  return _adminPanelDistDir || (
+    _adminPanelDistDir = app.isPackaged
+      ? path.join(process.resourcesPath, 'admin-panel-dist')
+      : path.join(__dirname, '..', 'admin-panel', 'dist')
+  )
+}
 
 function safePathSegment(value) {
   return String(value || 'default').replace(/[^a-z0-9._-]+/gi, '_').slice(0, 80) || 'default'
@@ -242,6 +248,39 @@ function getUrlOrigin(raw) {
 function buildAdminPanelEntryUrl(workerUrl) {
   const origin = getUrlOrigin(workerUrl)
   return origin ? `${origin}/admin` : ''
+}
+
+function buildPanelTargetUrl(panelUrl, workerUrl) {
+  const normalizedPanelUrl = normalizeHttpUrl(panelUrl)
+  if (!normalizedPanelUrl) return ''
+
+  const workerOrigin = getUrlOrigin(workerUrl)
+  if (!workerOrigin) return normalizedPanelUrl
+
+  try {
+    const url = new URL(normalizedPanelUrl)
+    if (!url.searchParams.get('worker_origin')) {
+      url.searchParams.set('worker_origin', workerOrigin)
+    }
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return normalizedPanelUrl
+  }
+}
+
+function emitPostDeployCheckHints(onProgress, options = {}) {
+  const workerUrl = normalizeHttpUrl(options.workerUrl || '')
+  const panelEntryUrl = normalizeHttpUrl(options.panelEntryUrl || '')
+
+  onProgress?.('Post-deploy check: verify availability before production use.')
+  if (workerUrl) {
+    onProgress?.(`- Worker health: ${workerUrl}/health`)
+  }
+  onProgress?.('- Telegram bot: send /start and confirm admin relay works.')
+  if (panelEntryUrl) {
+    onProgress?.(`- Admin panel: open and login test: ${panelEntryUrl}`)
+  }
+  onProgress?.('- If any check fails, review token/domain/route settings and redeploy.')
 }
 
 function normalizeWebhookPath(value) {
@@ -488,6 +527,529 @@ async function cfApiTextRequest(env, resource, options = {}) {
     reason: json ? buildCfErrorReason(json, response.status) : `http_${response.status}${text ? `:${text.slice(0, 180)}` : ''}`,
     text,
     json,
+  }
+}
+
+function parseNumber(value, fallback = 0) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+function pickResultInfoCount(resultInfo) {
+  const candidates = [resultInfo?.total_count, resultInfo?.totalCount, resultInfo?.count, resultInfo?.total]
+  for (const value of candidates) {
+    const number = Number(value)
+    if (Number.isFinite(number) && number >= 0) return number
+  }
+  return null
+}
+
+function escapeGraphqlString(value) {
+  return String(value || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, ' ')
+    .replace(/\n/g, ' ')
+}
+
+async function requestGraphql(env, query) {
+  const { token } = getCfTokenAndAccount(env, false)
+  const response = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ query }),
+  })
+  const json = await response.json().catch(() => null)
+  const errorsRaw = Array.isArray(json?.errors) ? json.errors : []
+  const errors = errorsRaw
+    .map((item) => String(item?.message || 'unknown').trim())
+    .filter(Boolean)
+  if (errors.length > 0) {
+    return { data: null, errors }
+  }
+  return { data: json?.data ?? null, errors: [] }
+}
+
+function getDashboardWorkerName(env = {}, account = null) {
+  const saved = normalizeWorkerName(account?.deployPrefs?.workerName || '')
+  if (saved) return saved
+  const fromEnv = normalizeWorkerName(env.WORKER_NAME || '')
+  if (fromEnv) return fromEnv
+
+  const workerUrl = normalizeHttpUrl(account?.deployPrefs?.workerUrl || env.PUBLIC_BASE_URL || '')
+  if (!workerUrl) return ''
+  try {
+    const host = new URL(workerUrl).hostname.toLowerCase()
+    if (!host.endsWith('.workers.dev')) return ''
+    const left = host.replace(/\.workers\.dev$/i, '')
+    const parts = left.split('.').filter(Boolean)
+    // script.subdomain.workers.dev
+    if (parts.length >= 2) return normalizeWorkerName(parts[0])
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+async function countWorkersScriptsViaApi(env) {
+  const listed = await listWorkerScripts(env)
+  if (!listed.ok) {
+    throw new Error(`workers count failed: ${listed.reason || 'unknown'}`)
+  }
+  return Array.isArray(listed.names) ? listed.names.length : 0
+}
+
+async function countKvNamespacesViaApi(env) {
+  const namespaces = await listKvNamespacesViaApi(env)
+  return namespaces.length
+}
+
+async function countD1DatabasesViaApi(env) {
+  const databases = await listD1DatabasesViaApi(env)
+  return databases.length
+}
+
+async function countPagesProjectsViaApi(env) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const response = await cfApiRequest(env, `/accounts/${accountId}/pages/projects`)
+  if (!response.ok) {
+    throw new Error(`pages count failed: ${response.reason || 'unknown'}`)
+  }
+  const fastCount = pickResultInfoCount(response.resultInfo)
+  if (fastCount !== null) return fastCount
+  return Array.isArray(response.result) ? response.result.length : 0
+}
+
+async function fetchWorkerRequests24hViaGraphql(env, workerName) {
+  const name = String(workerName || '').trim()
+  if (!name) {
+    return { value: null, warning: 'missing worker name' }
+  }
+
+  const { accountId } = getCfTokenAndAccount(env)
+  const now = new Date()
+  const from = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+  const account = escapeGraphqlString(accountId)
+  const script = escapeGraphqlString(name)
+
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          workersInvocationsAdaptive(
+            limit: 1000
+            filter: {
+              scriptName: "${script}"
+              datetime_geq: "${from.toISOString()}"
+              datetime_leq: "${now.toISOString()}"
+            }
+          ) {
+            sum {
+              requests
+            }
+          }
+        }
+      }
+    }
+  `
+
+  const result = await requestGraphql(env, query)
+  if (result.errors.length > 0) {
+    return { value: null, warning: result.errors.join('; ') || 'workers graphql query failed' }
+  }
+
+  const rows = result.data?.viewer?.accounts?.[0]?.workersInvocationsAdaptive
+  if (!Array.isArray(rows)) {
+    return { value: null, warning: 'workers analytics unavailable' }
+  }
+
+  let total = 0
+  for (const row of rows) {
+    total += parseNumber(row?.sum?.requests, 0)
+  }
+  return { value: Math.max(0, Math.round(total)), warning: '' }
+}
+
+async function fetchKvRequests24hViaGraphql(env) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const now = new Date()
+  const from = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+  const account = escapeGraphqlString(accountId)
+  const dateStart = from.toISOString().slice(0, 10)
+  const dateEnd = now.toISOString().slice(0, 10)
+
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          kvOperationsAdaptiveGroups(
+            limit: 10000
+            filter: { date_geq: "${dateStart}", date_leq: "${dateEnd}" }
+          ) {
+            dimensions {
+              actionType
+            }
+            sum {
+              requests
+            }
+          }
+        }
+      }
+    }
+  `
+
+  const result = await requestGraphql(env, query)
+  if (result.errors.length > 0) {
+    return {
+      readRequests24h: null,
+      writeRequests24h: null,
+      warning: result.errors.join('; ') || 'kv operations graphql query failed',
+    }
+  }
+
+  const rows = result.data?.viewer?.accounts?.[0]?.kvOperationsAdaptiveGroups
+  if (!Array.isArray(rows)) {
+    return { readRequests24h: null, writeRequests24h: null, warning: 'kv analytics unavailable' }
+  }
+
+  let read = 0
+  let write = 0
+  for (const row of rows) {
+    const action = String(row?.dimensions?.actionType || '').trim().toLowerCase()
+    const requests = Math.max(0, parseNumber(row?.sum?.requests, 0))
+    if (action === 'read') read += requests
+    if (action === 'write') write += requests
+  }
+
+  return {
+    readRequests24h: Math.round(read),
+    writeRequests24h: Math.round(write),
+    warning: '',
+  }
+}
+
+async function fetchKvStorageBytesViaGraphql(env) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const now = new Date()
+  const from = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000)
+  const account = escapeGraphqlString(accountId)
+  const dateStart = from.toISOString().slice(0, 10)
+  const dateEnd = now.toISOString().slice(0, 10)
+
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          kvStorageAdaptiveGroups(
+            filter: { date_geq: "${dateStart}", date_leq: "${dateEnd}" }
+            limit: 10000
+            orderBy: [date_DESC]
+          ) {
+            max {
+              byteCount
+            }
+            dimensions {
+              date
+              namespaceId
+            }
+          }
+        }
+      }
+    }
+  `
+
+  const result = await requestGraphql(env, query)
+  if (result.errors.length > 0) {
+    return {
+      storageBytes: null,
+      warning: result.errors.join('; ') || 'kv storage graphql query failed',
+    }
+  }
+
+  const rows = result.data?.viewer?.accounts?.[0]?.kvStorageAdaptiveGroups
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return { storageBytes: null, warning: 'kv storage analytics unavailable' }
+  }
+
+  let latestDate = ''
+  for (const row of rows) {
+    const date = String(row?.dimensions?.date || '').trim()
+    if (!date) continue
+    if (!latestDate || date > latestDate) latestDate = date
+  }
+
+  let totalBytes = 0
+  let hasValue = false
+  for (const row of rows) {
+    const date = String(row?.dimensions?.date || '').trim()
+    if (latestDate && date && date !== latestDate) continue
+    const value = Number(row?.max?.byteCount ?? NaN)
+    if (!Number.isFinite(value) || value < 0) continue
+    totalBytes += value
+    hasValue = true
+  }
+
+  if (!hasValue) {
+    return { storageBytes: null, warning: 'kv storage byteCount missing' }
+  }
+
+  return { storageBytes: Math.max(0, Math.round(totalBytes)), warning: '' }
+}
+
+async function fetchD1Rows24hMapViaGraphql(env) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const now = new Date()
+  const from = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+  const account = escapeGraphqlString(accountId)
+  const dateStart = from.toISOString().slice(0, 10)
+  const dateEnd = now.toISOString().slice(0, 10)
+
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          d1AnalyticsAdaptiveGroups(
+            limit: 10000
+            filter: { date_geq: "${dateStart}", date_leq: "${dateEnd}" }
+          ) {
+            dimensions {
+              databaseId
+            }
+            sum {
+              rowsRead
+              rowsWritten
+            }
+          }
+        }
+      }
+    }
+  `
+
+  const result = await requestGraphql(env, query)
+  if (result.errors.length > 0) {
+    return {
+      rowsMap: new Map(),
+      warning: result.errors.join('; ') || 'd1 analytics graphql query failed',
+    }
+  }
+
+  const rows = result.data?.viewer?.accounts?.[0]?.d1AnalyticsAdaptiveGroups
+  if (!Array.isArray(rows)) {
+    return { rowsMap: new Map(), warning: 'd1 analytics unavailable' }
+  }
+
+  const rowsMap = new Map()
+  for (const row of rows) {
+    const databaseId = String(row?.dimensions?.databaseId || '').trim()
+    if (!databaseId) continue
+
+    const read = Math.max(0, Math.round(parseNumber(row?.sum?.rowsRead, 0)))
+    const write = Math.max(0, Math.round(parseNumber(row?.sum?.rowsWritten, 0)))
+    const existing = rowsMap.get(databaseId)
+    if (!existing) {
+      rowsMap.set(databaseId, { rowsRead24h: read, rowsWritten24h: write })
+      continue
+    }
+    existing.rowsRead24h += read
+    existing.rowsWritten24h += write
+  }
+  return { rowsMap, warning: '' }
+}
+
+async function fetchD1DatabaseMetaViaApi(env, databaseId) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const response = await cfApiRequest(env, `/accounts/${accountId}/d1/database/${encodeURIComponent(databaseId)}`)
+  if (!response.ok) {
+    throw new Error(`d1 database meta failed: ${response.reason || 'unknown'}`)
+  }
+
+  const fileSizeRaw = Number(response.result?.file_size ?? response.result?.fileSize ?? NaN)
+  const numTablesRaw = Number(response.result?.num_tables ?? response.result?.numTables ?? NaN)
+  return {
+    fileSizeBytes: Number.isFinite(fileSizeRaw) && fileSizeRaw >= 0 ? Math.round(fileSizeRaw) : null,
+    numTables: Number.isFinite(numTablesRaw) && numTablesRaw >= 0 ? Math.round(numTablesRaw) : null,
+  }
+}
+
+async function fetchD1DatabasesUsageSnapshotViaApi(env) {
+  const databases = await listD1DatabasesViaApi(env)
+  if (databases.length === 0) {
+    return { items: [], warning: '' }
+  }
+
+  const [analytics, metaResults] = await Promise.all([
+    fetchD1Rows24hMapViaGraphql(env),
+    Promise.allSettled(databases.map((item) => fetchD1DatabaseMetaViaApi(env, getD1DatabaseId(item)))),
+  ])
+
+  const items = []
+  let failedMetaCount = 0
+  for (let i = 0; i < databases.length; i += 1) {
+    const database = databases[i]
+    const meta = metaResults[i]
+    let fileSizeBytes = null
+    let numTables = null
+    if (meta?.status === 'fulfilled') {
+      fileSizeBytes = meta.value.fileSizeBytes
+      numTables = meta.value.numTables
+    } else {
+      failedMetaCount += 1
+    }
+
+    const databaseId = getD1DatabaseId(database)
+    const rows = analytics.rowsMap.get(databaseId)
+    items.push({
+      id: databaseId,
+      name: String(database?.name || '').trim(),
+      fileSizeBytes,
+      rowsRead24h: rows ? rows.rowsRead24h : null,
+      rowsWritten24h: rows ? rows.rowsWritten24h : null,
+      numTables,
+    })
+  }
+
+  items.sort((a, b) => {
+    const aSize = a.fileSizeBytes === null ? -1 : a.fileSizeBytes
+    const bSize = b.fileSizeBytes === null ? -1 : b.fileSizeBytes
+    if (aSize !== bSize) return bSize - aSize
+    return String(a.name || '').localeCompare(String(b.name || ''))
+  })
+
+  const warnings = []
+  if (analytics.warning) warnings.push(`d1 analytics: ${analytics.warning}`)
+  if (failedMetaCount > 0) warnings.push(`d1 meta: ${failedMetaCount}/${databases.length} failed`)
+  return { items, warning: warnings.join('; ') }
+}
+
+async function fetchDashboardSnapshotViaApi(env, account = null) {
+  let workerName = getDashboardWorkerName(env, account)
+  const warnings = []
+
+  if (!workerName) {
+    try {
+      const listed = await listWorkerScripts(env)
+      if (listed?.ok && Array.isArray(listed.names)) {
+        const names = listed.names
+          .map((item) => normalizeWorkerName(item))
+          .filter(Boolean)
+        if (names.length === 1) {
+          workerName = names[0]
+        } else if (names.length > 1) {
+          const preferred = names.find((name) => /telegram-private-chatbot/i.test(name))
+          workerName = preferred || names[0]
+        }
+      }
+    } catch {
+      // ignore worker-name inference failures
+    }
+  }
+
+  const [
+    workersCount,
+    kvCount,
+    kvUsage,
+    kvStorage,
+    d1Usage,
+    pagesCount,
+    workerReq,
+    d1Count,
+  ] = await Promise.allSettled([
+    countWorkersScriptsViaApi(env),
+    countKvNamespacesViaApi(env),
+    fetchKvRequests24hViaGraphql(env),
+    fetchKvStorageBytesViaGraphql(env),
+    fetchD1DatabasesUsageSnapshotViaApi(env),
+    countPagesProjectsViaApi(env),
+    fetchWorkerRequests24hViaGraphql(env, workerName),
+    countD1DatabasesViaApi(env),
+  ])
+
+  const workersScriptCount = workersCount.status === 'fulfilled' ? workersCount.value : null
+  if (workersCount.status === 'rejected') {
+    warnings.push(`workers: ${workersCount.reason instanceof Error ? workersCount.reason.message : String(workersCount.reason)}`)
+  }
+
+  const kvNamespaceCount = kvCount.status === 'fulfilled' ? kvCount.value : null
+  if (kvCount.status === 'rejected') {
+    warnings.push(`kv: ${kvCount.reason instanceof Error ? kvCount.reason.message : String(kvCount.reason)}`)
+  }
+
+  let kvReadRequests24h = null
+  let kvWriteRequests24h = null
+  if (kvUsage.status === 'fulfilled') {
+    kvReadRequests24h = kvUsage.value.readRequests24h
+    kvWriteRequests24h = kvUsage.value.writeRequests24h
+    if (kvUsage.value.warning) warnings.push(`kv analytics: ${kvUsage.value.warning}`)
+  } else {
+    warnings.push(`kv analytics: ${kvUsage.reason instanceof Error ? kvUsage.reason.message : String(kvUsage.reason)}`)
+  }
+
+  let kvStorageBytes = null
+  if (kvStorage.status === 'fulfilled') {
+    kvStorageBytes = kvStorage.value.storageBytes
+    if (kvStorage.value.warning) warnings.push(`kv storage: ${kvStorage.value.warning}`)
+  } else {
+    warnings.push(`kv storage: ${kvStorage.reason instanceof Error ? kvStorage.reason.message : String(kvStorage.reason)}`)
+  }
+
+  let d1DatabasesUsage = []
+  if (d1Usage.status === 'fulfilled') {
+    d1DatabasesUsage = d1Usage.value.items
+    if (d1Usage.value.warning) warnings.push(d1Usage.value.warning)
+  } else {
+    warnings.push(`d1: ${d1Usage.reason instanceof Error ? d1Usage.reason.message : String(d1Usage.reason)}`)
+  }
+
+  const d1DatabaseCount = d1Count.status === 'fulfilled' ? d1Count.value : (d1DatabasesUsage.length || null)
+  if (d1Count.status === 'rejected') {
+    warnings.push(`d1 count: ${d1Count.reason instanceof Error ? d1Count.reason.message : String(d1Count.reason)}`)
+  }
+
+  const pagesProjectCount = pagesCount.status === 'fulfilled' ? pagesCount.value : null
+  if (pagesCount.status === 'rejected') {
+    warnings.push(`pages: ${pagesCount.reason instanceof Error ? pagesCount.reason.message : String(pagesCount.reason)}`)
+  }
+
+  let workerRequests24h = null
+  if (workerReq.status === 'fulfilled') {
+    workerRequests24h = workerReq.value.value
+    if (workerReq.value.warning) warnings.push(`requests: ${workerReq.value.warning}`)
+  } else {
+    warnings.push(`requests: ${workerReq.reason instanceof Error ? workerReq.reason.message : String(workerReq.reason)}`)
+  }
+
+  const d1StorageBytes = d1DatabasesUsage.reduce(
+    (sum, item) => sum + (Number.isFinite(item?.fileSizeBytes) ? Number(item.fileSizeBytes) : 0),
+    0,
+  )
+  const d1ReadRequests24h = d1DatabasesUsage.reduce(
+    (sum, item) => sum + (Number.isFinite(item?.rowsRead24h) ? Number(item.rowsRead24h) : 0),
+    0,
+  )
+  const d1WriteRequests24h = d1DatabasesUsage.reduce(
+    (sum, item) => sum + (Number.isFinite(item?.rowsWritten24h) ? Number(item.rowsWritten24h) : 0),
+    0,
+  )
+
+  return {
+    workerName,
+    workerRequests24h,
+    workersScriptCount,
+    kvNamespaceCount,
+    kvReadRequests24h,
+    kvWriteRequests24h,
+    kvStorageBytes,
+    d1DatabaseCount,
+    d1DatabasesUsage,
+    d1StorageBytes: Number.isFinite(d1StorageBytes) ? d1StorageBytes : null,
+    d1ReadRequests24h: Number.isFinite(d1ReadRequests24h) ? d1ReadRequests24h : null,
+    d1WriteRequests24h: Number.isFinite(d1WriteRequests24h) ? d1WriteRequests24h : null,
+    pagesProjectCount,
+    fetchedAt: new Date().toISOString(),
+    warnings,
   }
 }
 
@@ -2146,6 +2708,21 @@ async function checkWorkerHealth(rawUrl) {
   }
 }
 
+function isConnectivityFetchError(reason) {
+  const text = String(reason || '').toLowerCase()
+  return (
+    text.includes('fetch failed') ||
+    text.includes('network') ||
+    text.includes('timed out') ||
+    text.includes('timeout') ||
+    text.includes('abort') ||
+    text.includes('econnrefused') ||
+    text.includes('ehostunreach') ||
+    text.includes('enotfound') ||
+    text.includes('socket hang up')
+  )
+}
+
 async function waitForWorkerEndpointWarmup(endpointInfo, onProgress) {
   const endpointType = String(endpointInfo?.endpointType || '').trim()
   const endpointMethod = String(endpointInfo?.method || '').trim()
@@ -2160,11 +2737,14 @@ async function waitForWorkerEndpointWarmup(endpointInfo, onProgress) {
   return { ok: true, warmed: true }
 }
 
-async function waitForWorkerHealth(rawUrl, onProgress, label = 'Worker custom domain') {
+async function waitForWorkerHealth(rawUrl, onProgress, label = 'Worker custom domain', options = {}) {
   const normalized = normalizeHttpUrl(rawUrl)
   if (!normalized) return { ok: false, reason: 'missing_worker_url' }
 
-  const delays = [2000, 4000, 8000, 12000, 18000, 25000]
+  const delays = Array.isArray(options.delays) && options.delays.length > 0
+    ? options.delays
+    : [2000, 4000, 8000, 12000, 18000, 25000]
+  const stopOnNetworkFailure = options.stopOnNetworkFailure !== false
   let lastReason = 'unknown'
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
     const health = await checkWorkerHealth(normalized)
@@ -2173,6 +2753,10 @@ async function waitForWorkerHealth(rawUrl, onProgress, label = 'Worker custom do
       return health
     }
     lastReason = health.reason || 'unknown'
+    if (stopOnNetworkFailure && isConnectivityFetchError(lastReason)) {
+      onProgress?.(`${label} runtime probe skipped due to local network: ${lastReason}`)
+      return { ok: false, reason: lastReason, skipped: true, unreachable: true }
+    }
     if (attempt < delays.length) {
       const delayMs = delays[attempt]
       onProgress?.(`${label} 暂未就绪（${lastReason}）。${Math.round(delayMs / 1000)} 秒后重试...`)
@@ -2205,12 +2789,15 @@ async function getWorkerRuntimeStatus(workerUrl) {
   }
 }
 
-async function waitForWorkerBotConfig(workerUrl, expectedAdminChatId, onProgress) {
+async function waitForWorkerBotConfig(workerUrl, expectedAdminChatId, onProgress, options = {}) {
   const origin = getUrlOrigin(workerUrl)
   if (!origin) return { ok: false, reason: 'missing_worker_url' }
 
   const expectedChatId = String(expectedAdminChatId || '').trim()
-  const delays = [2000, 4000, 8000, 12000, 18000, 25000, 30000]
+  const delays = Array.isArray(options.delays) && options.delays.length > 0
+    ? options.delays
+    : [2000, 4000, 8000, 12000, 18000, 25000, 30000]
+  const stopOnNetworkFailure = options.stopOnNetworkFailure !== false
   let lastReason = 'unknown'
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
     const result = await getWorkerRuntimeStatus(origin)
@@ -2226,6 +2813,10 @@ async function waitForWorkerBotConfig(workerUrl, expectedAdminChatId, onProgress
       lastReason = `hasToken=${hasToken}; adminChatId=${adminChatId || 'missing'}`
     } else {
       lastReason = result.reason || 'unknown'
+      if (stopOnNetworkFailure && isConnectivityFetchError(lastReason)) {
+        onProgress?.(`Worker runtime status check skipped due to local network: ${lastReason}`)
+        return { ok: false, reason: lastReason, skipped: true, unreachable: true }
+      }
     }
 
     if (attempt < delays.length) {
@@ -2237,13 +2828,16 @@ async function waitForWorkerBotConfig(workerUrl, expectedAdminChatId, onProgress
   return { ok: false, reason: lastReason }
 }
 
-async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress) {
+async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress, options = {}) {
   const origin = getUrlOrigin(workerUrl)
   const token = String(bootstrapToken || '').trim()
   if (!origin || !token) return { ok: false, reason: 'missing_worker_url_or_bootstrap_token' }
 
   const bootstrapUrl = `${origin}/deploy/bootstrap`
-  const delays = [2000, 4000, 8000, 12000, 18000, 25000]
+  const delays = Array.isArray(options.delays) && options.delays.length > 0
+    ? options.delays
+    : [2000, 4000, 8000, 12000, 18000, 25000]
+  const stopOnNetworkFailure = options.stopOnNetworkFailure !== false
   let lastReason = 'unknown'
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
     const controller = new AbortController()
@@ -2276,6 +2870,10 @@ async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress) {
       }
     } catch (error) {
       lastReason = error instanceof Error ? error.message : String(error)
+      if (stopOnNetworkFailure && isConnectivityFetchError(lastReason)) {
+        onProgress?.(`Worker bootstrap request skipped due to local network: ${lastReason}`)
+        return { ok: false, reason: lastReason, unreachable: true }
+      }
     } finally {
       clearTimeout(timer)
     }
@@ -2314,7 +2912,10 @@ async function verifyWorkerDeployment(env, configPath, onProgress, options = {})
     if (health.ok) {
       return { ok: true, workerName, method: 'health', url: health.url }
     }
-    onProgress?.(`Worker 健康检查未通过（${candidate}）：${health.reason}`)
+    const networkHint = isConnectivityFetchError(health.reason)
+      ? '（本机网络无法访问该域名，将继续使用 API 校验）'
+      : ''
+    onProgress?.(`Worker 健康检查未通过（${candidate}）：${health.reason}${networkHint}`)
   }
 
   const delays = [1200, 2200, 4000, 7000]
@@ -2502,12 +3103,11 @@ async function runAction(action, params, env) {
       const projectName = getPagesProjectName(env, params)
       const branch = getPagesDeployBranch(env, params)
       const runtimeVarUpdates = buildVerificationRuntimeVarUpdates(params)
-      const tempDist = path.join(os.tmpdir(), 'tg-bot-panel-dist-' + Date.now())
-      const viteBin = path.join(getAdminPanelDir(), 'node_modules', 'vite', 'bin', 'vite.js')
-      const viteEnv = { ...env, ELECTRON_RUN_AS_NODE: '1', VITE_WORKER_BASE_URL: workerUrl }
-      try { if (panelUrl) viteEnv.VITE_CANONICAL_HOST = new URL(panelUrl).host } catch {}
-      send('正在构建 admin-panel...\n')
-      await runProc(process.execPath, [viteBin, 'build', '--outDir', tempDist], { env: viteEnv, cwd: getAdminPanelDir() })
+      const panelDistDir = getAdminPanelDistDir()
+      if (!fs.existsSync(panelDistDir) || !fs.statSync(panelDistDir).isDirectory()) {
+        throw new Error(`admin_panel_dist_not_found:${panelDistDir}; run: npm --prefix admin-panel run build`)
+      }
+      send(`使用预构建 admin-panel 资源：${panelDistDir}\n`)
       send('正在上传到 Cloudflare Pages...\n')
       const projectBeforeDeploy = await getPagesProject(env, projectName)
       if (!projectBeforeDeploy?.ok) {
@@ -2542,7 +3142,7 @@ async function runAction(action, params, env) {
       const beforeDeploymentIds = new Set((beforeDeployments.deployments || []).map((item) => String(item.id || '')).filter(Boolean))
       let deployment
       try {
-        const directDeployment = await deployPagesViaDirectUpload(tempDist, projectName, branch, env, send)
+        const directDeployment = await deployPagesViaDirectUpload(panelDistDir, projectName, branch, env, send)
         const directCheck = await verifyPagesDeployment(env, projectName, beforeDeploymentIds, {
           deployOutput: directDeployment.url || '',
           projectUrl: directDeployment.url || deployedPanelUrl,
@@ -2563,21 +3163,26 @@ async function runAction(action, params, env) {
         send(`Pages 部署列表警告：${deployment.warning}`)
       }
 
-      const effectivePanelUrl = panelUrl || deployedPanelUrl || deployment.url
-      const panelEntryUrl = buildAdminPanelEntryUrl(workerUrl) || effectivePanelUrl
+      const resolvedPanelUrl = deployedPanelUrl || deployment.url || panelUrl
+      const panelTargetUrl = buildPanelTargetUrl(resolvedPanelUrl, workerUrl)
+      const runtimePanelUrl = panelTargetUrl || resolvedPanelUrl
+      const panelEntryUrl = buildAdminPanelEntryUrl(workerUrl) || runtimePanelUrl
       let updatedVars = []
-      if (workerUrl || effectivePanelUrl || Object.keys(runtimeVarUpdates).length > 0) {
-        updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, effectivePanelUrl, env, runtimeVarUpdates)
+      if (workerUrl || runtimePanelUrl || Object.keys(runtimeVarUpdates).length > 0) {
+        updatedVars = syncRuntimeUrlsToLocalConfig(workerUrl, '', env, {
+          ...runtimeVarUpdates,
+          ADMIN_PANEL_URL: runtimePanelUrl || '',
+        })
         if (updatedVars.length > 0) {
           send(`已更新账号变量配置：${updatedVars.join(', ')}`)
           await runScript('merge-wrangler-config.mjs', [], env)
         }
       }
-      if (workerUrl && effectivePanelUrl) {
+      if (workerUrl && runtimePanelUrl) {
         const workerConfigPath = getPrivateWranglerPath(env)
         validatePrivateWranglerConfig(workerConfigPath)
         await uploadWorkerViaApi(env, workerConfigPath, send)
-        send(`Worker /admin target synced: ${effectivePanelUrl}`)
+        send(`Worker /admin target synced: ${runtimePanelUrl}`)
       }
       saveActiveDeployPrefsPatch({
         workerName: normalizeWorkerName(params?.workerName || env.WORKER_NAME || '') || undefined,
@@ -2585,17 +3190,15 @@ async function runAction(action, params, env) {
         d1DatabaseName: normalizeD1DatabaseName(params?.d1DatabaseName || env.D1_DATABASE_NAME || '') || undefined,
         workerUrl: workerUrl || undefined,
         verifyPublicBaseUrl: runtimeVarUpdates.VERIFY_PUBLIC_BASE_URL || undefined,
-        panelUrl: effectivePanelUrl || undefined,
+        panelUrl: resolvedPanelUrl || undefined,
         panelEntryUrl: panelEntryUrl || undefined,
         pagesProjectName: projectName || undefined,
         pagesBranch: branch || undefined,
       })
-
-      try { fs.rmSync(tempDist, { recursive: true }) } catch {}
-      if (panelEntryUrl && panelEntryUrl !== effectivePanelUrl) {
+      if (panelEntryUrl && panelEntryUrl !== runtimePanelUrl) {
         send(`面板入口地址：${panelEntryUrl}`)
       }
-      return { projectName, branch, panelUrl: effectivePanelUrl, panelEntryUrl, subdomain }
+      return { projectName, branch, panelUrl: resolvedPanelUrl, panelEntryUrl, subdomain }
     }
     case 'deploy-all': {
       const workerResult = await runAction('deploy-worker', params, env)
@@ -2612,7 +3215,7 @@ async function runAction(action, params, env) {
       const runtimeVarUpdates = effectiveVerifyPublicBaseUrl
         ? { VERIFY_PUBLIC_BASE_URL: effectiveVerifyPublicBaseUrl }
         : {}
-      const effectivePanelUrl = normalizePanelUrl(panelUrl || '')
+      let effectivePanelUrl = ''
       const deployBootstrapToken = crypto.randomBytes(24).toString('hex')
       const workerSecrets = {
         BOT_TOKEN: botToken,
@@ -2675,8 +3278,13 @@ async function runAction(action, params, env) {
       if (botToken || adminChatId) {
         await updateWorkerSecretsViaApi(env, workerConfigPath, workerSecrets, send)
         if (effectiveWorkerUrl) {
-          const configReady = await waitForWorkerBotConfig(effectiveWorkerUrl, adminChatId, send)
-          if (!configReady.ok) {
+          const configReady = await waitForWorkerBotConfig(
+            effectiveWorkerUrl,
+            adminChatId,
+            send,
+            { delays: [2000, 4000], stopOnNetworkFailure: true },
+          )
+          if (!configReady.ok && !configReady.unreachable) {
             send(`Worker 机器人配置警告：${configReady.reason || 'unknown'}`)
           }
         } else {
@@ -2702,8 +3310,12 @@ async function runAction(action, params, env) {
         send(`面板入口地址：${panelResult.panelEntryUrl}`)
       }
       const finalPanelUrl = panelResult?.panelUrl || effectivePanelUrl
-      const finalPanelEntryUrl = panelResult?.panelEntryUrl || buildAdminPanelEntryUrl(effectiveWorkerUrl) || finalPanelUrl
-      const finalRuntimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, finalPanelUrl, env, runtimeVarUpdates)
+      const finalPanelRuntimeUrl = buildPanelTargetUrl(finalPanelUrl, effectiveWorkerUrl)
+      const finalPanelEntryUrl = panelResult?.panelEntryUrl || buildAdminPanelEntryUrl(effectiveWorkerUrl) || finalPanelRuntimeUrl || finalPanelUrl
+      const finalRuntimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, '', env, {
+        ...runtimeVarUpdates,
+        ADMIN_PANEL_URL: finalPanelRuntimeUrl || '',
+      })
       if (finalRuntimeUpdates.length > 0) {
         send(`Pages 部署后正在更新 Worker 运行变量：${finalRuntimeUpdates.join(', ')}`)
         await runScript('merge-wrangler-config.mjs', [], env)
@@ -2712,7 +3324,11 @@ async function runAction(action, params, env) {
         await waitForWorkerEndpointWarmup(publicEndpoint, send)
         effectiveWorkerUrl = normalizeHttpUrl(publicEndpoint.workerUrl || effectiveWorkerUrl || '')
         if (effectiveWorkerUrl) {
-          const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
+          const refreshedPanelRuntimeUrl = buildPanelTargetUrl(finalPanelUrl, effectiveWorkerUrl)
+          const endpointUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, '', env, {
+            ...runtimeVarUpdates,
+            ADMIN_PANEL_URL: refreshedPanelRuntimeUrl || '',
+          })
           if (endpointUpdates.length > 0) {
             await runScript('merge-wrangler-config.mjs', [], env)
           }
@@ -2728,8 +3344,13 @@ async function runAction(action, params, env) {
         if (botToken || adminChatId) {
           await updateWorkerSecretsViaApi(env, workerConfigPath, workerSecrets, send)
           if (effectiveWorkerUrl) {
-            const configReady = await waitForWorkerBotConfig(effectiveWorkerUrl, adminChatId, send)
-            if (!configReady.ok) {
+            const configReady = await waitForWorkerBotConfig(
+              effectiveWorkerUrl,
+              adminChatId,
+              send,
+              { delays: [2000, 4000], stopOnNetworkFailure: true },
+            )
+            if (!configReady.ok && !configReady.unreachable) {
               send(`Worker 机器人配置警告：${configReady.reason || 'unknown'}`)
             }
           } else {
@@ -2747,10 +3368,18 @@ async function runAction(action, params, env) {
         )
       }
       if (effectiveWorkerUrl) {
-        await waitForWorkerHealth(effectiveWorkerUrl, send, 'Worker 入口')
+        await waitForWorkerHealth(effectiveWorkerUrl, send, 'Worker 入口', {
+          delays: [2000, 4000],
+          stopOnNetworkFailure: true,
+        })
       }
       if (botToken && effectiveWorkerUrl) {
-        const bootstrap = await triggerDeployBootstrap(effectiveWorkerUrl, deployBootstrapToken, send)
+        const bootstrap = await triggerDeployBootstrap(
+          effectiveWorkerUrl,
+          deployBootstrapToken,
+          send,
+          { delays: [2000, 4000], stopOnNetworkFailure: true },
+        )
         if (!bootstrap.ok) {
           send(`Worker \u90e8\u7f72\u5f15\u5bfc\u4e3b\u94fe\u8def\u5931\u8d25\uff1a${bootstrap.reason || 'unknown'}`)
           send('\u6b63\u5728\u5207\u6362\u5230 Cloudflare API + Telegram API \u515c\u5e95\u521d\u59cb\u5316...')
@@ -2801,6 +3430,24 @@ ipcMain.handle('run-action', async (_, action, params) => {
   const account = getActiveAccount()
   const env = buildEnv(account)
   return await runAction(action, params, env)
+})
+
+ipcMain.handle('dashboard:snapshot', async () => {
+  const account = getActiveAccount()
+  if (!account) {
+    return { ok: false, reason: 'no_active_account', snapshot: null }
+  }
+  const env = buildEnv(account)
+  try {
+    const snapshot = await fetchDashboardSnapshotViaApi(env, account)
+    return { ok: true, snapshot }
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error),
+      snapshot: null,
+    }
+  }
 })
 
 ipcMain.handle('accounts:list', () => loadAccounts())

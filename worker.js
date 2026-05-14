@@ -28,9 +28,39 @@ const VERIFY_STAGE_MAX_ATTEMPTS = 3;
 const VERIFY_MIN_SLIDER_TIME_MS = 900;
 const VERIFY_SLIDER_TOLERANCE = 8;
 const VERIFY_OBSERVE_MESSAGE_COUNT = 5;
+const DEFAULT_DATA_RETENTION_DAYS = 90;
+const DEFAULT_DATA_CLEANUP_BATCH_SIZE = 200;
+const DATA_RETENTION_MIN_DAYS = 7;
+const DATA_RETENTION_MAX_DAYS = 3650;
+const DATA_CLEANUP_MIN_BATCH = 20;
+const DATA_CLEANUP_MAX_BATCH = 1000;
+const DATA_CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const DATA_CLEANUP_CHECK_MIN_INTERVAL_MS = 5 * 60 * 1000;
+const LAST_DATA_CLEANUP_KEY = 'sys:last_cleanup';
+const LAST_DELETED_ACCOUNT_SWEEP_KEY = 'sys:last_deleted_account_sweep';
+const DEFAULT_DELETED_ACCOUNT_SWEEP_INTERVAL_DAYS = 7;
+const DELETED_ACCOUNT_SWEEP_INTERVAL_MS = DEFAULT_DELETED_ACCOUNT_SWEEP_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
+const DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE = 120;
+const DELETED_ACCOUNT_SWEEP_MIN_BATCH = 20;
+const DELETED_ACCOUNT_SWEEP_MAX_BATCH = 1000;
+const DELETED_ACCOUNT_SWEEP_CHECK_MIN_INTERVAL_MS = 5 * 60 * 1000;
+const WELCOME_TYPE_TEXT = 'text';
+const WELCOME_TYPE_PHOTO = 'photo';
+const WELCOME_TYPE_VIDEO = 'video';
+const WELCOME_TYPE_DOCUMENT = 'document';
+const SYSTEM_CONFIG_CACHE_TTL_MS = 5 * 1000;
+const GROUP_ADMIN_MEMBER_CACHE_TTL_MS = 90 * 1000;
+const GROUP_ADMIN_LIST_CACHE_TTL_MS = 60 * 1000;
+const LOCAL_CACHE_MAX_ENTRIES = 2048;
+
+const groupAdminMembershipCache = new Map();
+const groupAdminListCache = new Map();
+let systemConfigCache = { value: null, expiresAt: 0 };
+let lastAutoCleanupCheckAt = 0;
+let lastDeletedAccountSweepCheckAt = 0;
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     try {
       if (request.method === 'OPTIONS') {
         return new Response(null, {
@@ -43,6 +73,12 @@ export default {
       const runtimeEnv = await getRuntimeEnv(env);
       const webhookPath = normalizeWebhookPath(runtimeEnv.WEBHOOK_PATH);
       const publicBaseUrl = getPublicBaseUrl(url, runtimeEnv);
+      if (ctx && isDataCleanupAutoEnabled(runtimeEnv) && shouldScheduleAutoCleanupCheck()) {
+        ctx.waitUntil(runDataCleanupIfDue(runtimeEnv).catch(() => {}));
+      }
+      if (ctx && isDeletedAccountSweepAutoEnabled(runtimeEnv) && shouldScheduleDeletedAccountSweepCheck()) {
+        ctx.waitUntil(runDeletedAccountSweepIfDue(runtimeEnv).catch(() => {}));
+      }
 
       if (request.method === 'GET' && url.pathname === '/') {
         return json(await getAdminStatus(url, runtimeEnv, webhookPath, publicBaseUrl), 200, {}, request);
@@ -78,7 +114,7 @@ export default {
       }
 
       if (request.method === 'GET' && url.pathname === ADMIN_PANEL_PATH) {
-        const panelUrl = buildAdminPanelUrl(runtimeEnv, publicBaseUrl);
+        const panelUrl = buildAdminPanelRedirectUrl(runtimeEnv, publicBaseUrl, request);
         if (isAbsoluteHttpUrl(panelUrl)) {
           return Response.redirect(panelUrl, 302);
         }
@@ -118,6 +154,29 @@ export default {
         const body = await readJsonBody(request);
         await updateSystemConfig(runtimeEnv, body);
         return json({ ok: true, config: buildSystemConfigView(await getEffectiveSystemConfig(runtimeEnv)) }, 200, {}, request);
+      }
+
+      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/maintenance/cleanup`) {
+        await requireHttpAdmin(request, runtimeEnv);
+        const body = await readJsonBody(request);
+        const result = await runDataCleanup(runtimeEnv, {
+          retentionDays: body?.retentionDays,
+          batchSize: body?.batchSize,
+          source: 'admin-api',
+          force: true,
+        });
+        return json({ ok: true, result }, 200, {}, request);
+      }
+
+      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/maintenance/deleted-account-sweep`) {
+        await requireHttpAdmin(request, runtimeEnv);
+        const body = await readJsonBody(request);
+        const result = await runDeletedAccountSweep(runtimeEnv, {
+          batchSize: body?.batchSize,
+          source: 'admin-api',
+          force: true,
+        });
+        return json({ ok: true, result }, 200, {}, request);
       }
 
       if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/users`) {
@@ -388,6 +447,16 @@ export default {
       );
     }
   },
+
+  async scheduled(event, env, ctx) {
+    const runtimeEnv = await getRuntimeEnv(env);
+    const task = runScheduledMaintenance(runtimeEnv);
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(task.catch(() => {}));
+      return;
+    }
+    await task.catch(() => {});
+  },
 };
 
 class AppError extends Error {
@@ -395,6 +464,150 @@ class AppError extends Error {
     super(message);
     this.status = status;
   }
+}
+
+function shouldScheduleAutoCleanupCheck(nowMs = Date.now()) {
+  if (nowMs - lastAutoCleanupCheckAt < DATA_CLEANUP_CHECK_MIN_INTERVAL_MS) {
+    return false;
+  }
+  lastAutoCleanupCheckAt = nowMs;
+  return true;
+}
+
+function shouldScheduleDeletedAccountSweepCheck(nowMs = Date.now()) {
+  if (nowMs - lastDeletedAccountSweepCheckAt < DELETED_ACCOUNT_SWEEP_CHECK_MIN_INTERVAL_MS) {
+    return false;
+  }
+  lastDeletedAccountSweepCheckAt = nowMs;
+  return true;
+}
+
+function readTimedCacheValue(cache, key, nowMs = Date.now()) {
+  const hit = cache.get(key);
+  if (!hit) return null;
+  if (!Number.isFinite(hit.expiresAt) || hit.expiresAt <= nowMs) {
+    cache.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+function writeTimedCacheValue(cache, key, value, ttlMs, nowMs = Date.now()) {
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) return;
+  cache.set(key, {
+    value,
+    expiresAt: nowMs + ttlMs,
+  });
+  pruneTimedCache(cache, LOCAL_CACHE_MAX_ENTRIES, nowMs);
+}
+
+function pruneTimedCache(cache, maxEntries, nowMs = Date.now()) {
+  if (cache.size <= maxEntries) {
+    return;
+  }
+  for (const [key, value] of cache.entries()) {
+    if (!value || !Number.isFinite(value.expiresAt) || value.expiresAt <= nowMs) {
+      cache.delete(key);
+    }
+  }
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (typeof oldestKey === 'undefined') {
+      break;
+    }
+    cache.delete(oldestKey);
+  }
+}
+
+function readSystemConfigCache(nowMs = Date.now()) {
+  if (!systemConfigCache?.value) {
+    return null;
+  }
+  if (!Number.isFinite(systemConfigCache.expiresAt) || systemConfigCache.expiresAt <= nowMs) {
+    systemConfigCache = { value: null, expiresAt: 0 };
+    return null;
+  }
+  return systemConfigCache.value;
+}
+
+function writeSystemConfigCache(config, nowMs = Date.now()) {
+  const normalized = config && typeof config === 'object' ? { ...config } : {};
+  systemConfigCache = {
+    value: normalized,
+    expiresAt: nowMs + SYSTEM_CONFIG_CACHE_TTL_MS,
+  };
+}
+
+async function setSystemConfig(env, config) {
+  ensureKv(env);
+  const normalized = config && typeof config === 'object' ? { ...config } : {};
+  await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(normalized));
+  writeSystemConfigCache(normalized);
+}
+
+async function runScheduledMaintenance(env) {
+  const tasks = [];
+  if (isDataCleanupAutoEnabled(env)) {
+    tasks.push(runDataCleanupIfDue(env));
+  }
+  if (isDeletedAccountSweepAutoEnabled(env)) {
+    tasks.push(runDeletedAccountSweepIfDue(env));
+  }
+  if (tasks.length === 0) {
+    return { ok: true, skipped: 'disabled' };
+  }
+  const results = await Promise.allSettled(tasks);
+  return {
+    ok: true,
+    results,
+  };
+}
+
+function buildGroupAdminMemberCacheKey(chatId, userId) {
+  return `${Number(chatId)}:${Number(userId)}`;
+}
+
+function getGroupAdminStatusFromCachedList(chatId, userId) {
+  const cachedMembers = readTimedCacheValue(groupAdminListCache, String(Number(chatId)));
+  if (!Array.isArray(cachedMembers)) return null;
+  const match = cachedMembers.find((item) => Number(item?.user?.id) === Number(userId));
+  if (!match) return false;
+  const status = String(match?.status || '').toLowerCase();
+  return status === 'creator' || status === 'administrator';
+}
+
+async function getAdminChatMembers(env, chatId) {
+  const numericChatId = Number(chatId);
+  if (!(Number.isFinite(numericChatId) && numericChatId < 0) || !env.BOT_TOKEN) {
+    return [];
+  }
+
+  const cacheKey = String(numericChatId);
+  const cached = readTimedCacheValue(groupAdminListCache, cacheKey);
+  if (Array.isArray(cached)) {
+    return cached;
+  }
+
+  const members = await telegram(env, 'getChatAdministrators', {
+    chat_id: numericChatId,
+  });
+  const normalized = Array.isArray(members) ? members : [];
+  writeTimedCacheValue(groupAdminListCache, cacheKey, normalized, GROUP_ADMIN_LIST_CACHE_TTL_MS);
+
+  for (const item of normalized) {
+    const memberUserId = Number(item?.user?.id);
+    if (!(Number.isFinite(memberUserId) && memberUserId > 0)) continue;
+    const status = String(item?.status || '').toLowerCase();
+    const isAdmin = status === 'creator' || status === 'administrator';
+    writeTimedCacheValue(
+      groupAdminMembershipCache,
+      buildGroupAdminMemberCacheKey(numericChatId, memberUserId),
+      isAdmin,
+      GROUP_ADMIN_MEMBER_CACHE_TTL_MS,
+    );
+  }
+
+  return normalized;
 }
 
 async function handleUpdate(update, env, publicBaseUrl = '') {
@@ -440,12 +653,20 @@ async function handleUpdate(update, env, publicBaseUrl = '') {
     return;
   }
 
-  const verified = await ensureUserVerifiedOrPrompt(message, env, publicBaseUrl);
+  const verificationStateRef = { value: null };
+  const verified = await ensureUserVerifiedOrPrompt(message, env, publicBaseUrl, {
+    stateRef: verificationStateRef,
+  });
   if (!verified) {
     return;
   }
 
-  const observationAllowed = await applyPostVerifyObservationLayer(message, env, adminChatId);
+  const observationAllowed = await applyPostVerifyObservationLayer(
+    message,
+    env,
+    adminChatId,
+    verificationStateRef.value,
+  );
   if (!observationAllowed) {
     return;
   }
@@ -557,10 +778,7 @@ async function handleUserMessage(message, env, adminChatId) {
   }
 
   if (typeof message.text === 'string' && message.text.startsWith('/start')) {
-    await telegram(env, 'sendMessage', {
-      chat_id: message.chat.id,
-      text: env.WELCOME_TEXT || DEFAULT_WELCOME,
-    });
+    await sendWelcomeMessage(env, Number(message.chat.id));
   }
 
   await saveMessageHistory(env, {
@@ -577,10 +795,11 @@ async function handleUserMessage(message, env, adminChatId) {
   });
 }
 
-async function handleAdminMessage(message, env, adminChatId, preAuthorized = false, publicBaseUrl = '') {
+async function handleAdminMessage(message, env, adminChatId, preAuthorized = null, publicBaseUrl = '') {
   const senderId = message.from?.id ? Number(message.from.id) : null;
   const chatId = Number(message.chat.id);
-  let authorized = preAuthorized || (senderId ? await isAuthorizedAdmin(env, senderId) : false);
+  const hasPreAuthorized = preAuthorized === true || preAuthorized === false;
+  let authorized = hasPreAuthorized ? preAuthorized : senderId ? await isAuthorizedAdmin(env, senderId) : false;
 
   // 兼容“匿名管理员”发言（sender_chat = 当前管理员群）。
   if (!authorized && isAnonymousAdminMessage(message, adminChatId)) {
@@ -722,6 +941,8 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
         '11. 重发当前临时密码：/panelpass',
         '12. 强制生成新的临时密码：/panelreset',
         '13. 手动放行验证：/verifypass 用户ID',
+        '14. 清理历史数据：/cleanup （按保留期）或 /cleanup 天数',
+        '15. 检测已注销账户并清理：/sweepdeleted',
       ].join('\n'),
     );
     return true;
@@ -859,6 +1080,57 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
 
     await adminApproveUserVerification(env, userId, formatAdminOperator(message.from), { notifyUser: true });
     await sendAdminNotice(env, message, `已手动通过验证：${userId}`);
+    return true;
+  }
+
+  const cleanupMatch = trimmed.match(/^\/cleanup(?:\s+(\d+))?\s*$/i);
+  if (cleanupMatch) {
+    const retentionDays = cleanupMatch[1] ? Number(cleanupMatch[1]) : undefined;
+    const result = await runDataCleanup(env, {
+      retentionDays,
+      source: 'telegram-admin',
+      force: true,
+    });
+    const lines = [
+      '清理完成：',
+      `保留天数：${result.retentionDays}`,
+      `扫描用户：${result.kv.scannedUsers}`,
+      `删除用户档案：${result.kv.deletedUsers}`,
+      `删除验证状态：${result.kv.deletedVerifyStates}`,
+      `删除话题映射：${result.kv.deletedTopicMappings}`,
+      `删除历史消息：${result.d1.deletedMessages}`,
+      `删除空会话：${result.d1.deletedConversations}`,
+      result.kv.protectedUsers > 0 ? `保护跳过：${result.kv.protectedUsers}` : '',
+      result.kv.errors > 0 ? `异常条数：${result.kv.errors}` : '',
+    ].filter(Boolean);
+    await sendAdminNotice(env, message, lines.join('\n'));
+    return true;
+  }
+
+  const sweepDeletedMatch = trimmed.match(/^\/(?:sweepdeleted|deletedsweep|sweepdeleteds)\s*(\d+)?\s*$/i);
+  if (sweepDeletedMatch) {
+    const batchSize = sweepDeletedMatch[1] ? Number(sweepDeletedMatch[1]) : undefined;
+    const result = await runDeletedAccountSweep(env, {
+      batchSize,
+      source: 'telegram-admin',
+      force: true,
+    });
+    const lines = [
+      '注销账户巡检完成：',
+      `扫描用户：${result.kv.scannedUsers}`,
+      `命中：${result.detections.length}`,
+      `删除用户档案：${result.kv.deletedUsers}`,
+      `删除验证状态：${result.kv.deletedVerifyStates}`,
+      `删除话题映射：${result.kv.deletedTopicMappings}`,
+      `删除黑名单：${result.kv.deletedBlacklistEntries}`,
+      `删除信任：${result.kv.deletedTrustEntries}`,
+      `删除管理员：${result.kv.deletedAdminEntries}`,
+      `删除历史消息：${result.d1.deletedMessages}`,
+      `删除空会话：${result.d1.deletedConversations}`,
+      result.kv.protectedUsers > 0 ? `保护跳过：${result.kv.protectedUsers}` : '',
+      result.kv.probeErrors > 0 ? `探测失败：${result.kv.probeErrors}` : '',
+    ].filter(Boolean);
+    await sendAdminNotice(env, message, lines.join('\n'));
     return true;
   }
 
@@ -1086,9 +1358,8 @@ async function handleUserVerificationCallback(callbackQuery, env, publicBaseUrl 
   if (result.status === 'verified') {
     await clearVerificationPromptMessage(env, userId, callbackQuery.message?.message_id, '✅ 验证通过，已解除限制。');
 
-    await telegram(env, 'sendMessage', {
-      chat_id: userId,
-      text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n你已完成首次验证，现在可以正常发送消息了。`,
+    await sendWelcomeMessage(env, userId, {
+      extraText: '你已完成首次验证，现在可以正常发送消息了。',
     });
 
     await answerCallback(env, callbackQuery.id, '验证通过');
@@ -1177,9 +1448,8 @@ async function tryHandleUserVerificationText(message, env) {
       await clearVerificationPromptMessage(env, userId, promptMessageId, '✅ 验证通过，已解除限制。');
     }
 
-    await telegram(env, 'sendMessage', {
-      chat_id: userId,
-      text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n你已完成首次验证，现在可以正常发送消息了。`,
+    await sendWelcomeMessage(env, userId, {
+      extraText: '你已完成首次验证，现在可以正常发送消息了。',
     });
     return true;
   }
@@ -1329,6 +1599,61 @@ function isUserPrivateCommand(message) {
   return typeof message?.text === 'string' && /^\/\S+/.test(String(message.text).trim());
 }
 
+function getWelcomeType(env) {
+  const raw = String(env?.WELCOME_TYPE || WELCOME_TYPE_TEXT).trim().toLowerCase();
+  if (raw === WELCOME_TYPE_PHOTO) return WELCOME_TYPE_PHOTO;
+  if (raw === WELCOME_TYPE_VIDEO) return WELCOME_TYPE_VIDEO;
+  if (raw === WELCOME_TYPE_DOCUMENT) return WELCOME_TYPE_DOCUMENT;
+  return WELCOME_TYPE_TEXT;
+}
+
+function buildWelcomeText(env, extraText = '') {
+  const base = String(env?.WELCOME_TEXT || DEFAULT_WELCOME).trim() || DEFAULT_WELCOME;
+  const extra = String(extraText || '').trim();
+  if (!extra) return base;
+  return `${base}\n\n${extra}`;
+}
+
+async function sendWelcomeMessage(env, chatId, options = {}) {
+  const userId = Number(chatId);
+  if (!Number.isFinite(userId)) return;
+  const welcomeType = getWelcomeType(env);
+  const media = String(env?.WELCOME_MEDIA || '').trim();
+  const text = buildWelcomeText(env, options.extraText || '');
+
+  if (welcomeType === WELCOME_TYPE_PHOTO && media) {
+    await telegram(env, 'sendPhoto', {
+      chat_id: userId,
+      photo: media,
+      caption: trimText(text, 1024),
+    });
+    return;
+  }
+
+  if (welcomeType === WELCOME_TYPE_VIDEO && media) {
+    await telegram(env, 'sendVideo', {
+      chat_id: userId,
+      video: media,
+      caption: trimText(text, 1024),
+    });
+    return;
+  }
+
+  if (welcomeType === WELCOME_TYPE_DOCUMENT && media) {
+    await telegram(env, 'sendDocument', {
+      chat_id: userId,
+      document: media,
+      caption: trimText(text, 1024),
+    });
+    return;
+  }
+
+  await telegram(env, 'sendMessage', {
+    chat_id: userId,
+    text,
+  });
+}
+
 async function handleUserPrivateCommand(message, env, publicBaseUrl = '') {
   const raw = String(message.text || '').trim();
   const command = raw.split(/\s+/)[0].split('@')[0].toLowerCase();
@@ -1337,10 +1662,7 @@ async function handleUserPrivateCommand(message, env, publicBaseUrl = '') {
     const verified = await ensureUserVerifiedOrPrompt(message, env, publicBaseUrl);
     if (!verified) return;
 
-    await telegram(env, 'sendMessage', {
-      chat_id: message.chat.id,
-      text: env.WELCOME_TEXT || DEFAULT_WELCOME,
-    });
+    await sendWelcomeMessage(env, Number(message.chat.id));
     return;
   }
 
@@ -1350,14 +1672,17 @@ async function handleUserPrivateCommand(message, env, publicBaseUrl = '') {
   });
 }
 
-async function ensureUserVerifiedOrPrompt(message, env, publicBaseUrl = '') {
+async function ensureUserVerifiedOrPrompt(message, env, publicBaseUrl = '', options = {}) {
+  const stateRef = options?.stateRef && typeof options.stateRef === 'object' ? options.stateRef : null;
   if (!isUserVerificationEnabled(env)) {
+    if (stateRef) stateRef.value = null;
     return true;
   }
 
   ensureKv(env);
   const userId = Number(message.chat.id);
   const state = await getUserVerificationState(env, userId);
+  if (stateRef) stateRef.value = state || null;
   if (state?.verified) {
     return true;
   }
@@ -1376,6 +1701,7 @@ async function ensureUserVerifiedOrPrompt(message, env, publicBaseUrl = '') {
     // 一次一码：每次触发验证入口都强制刷新会话令牌，避免旧链接/缓存复用
     forceNew: true,
   });
+  if (stateRef) stateRef.value = nextState;
   await sendVerificationWebPrompt(env, userId, nextState, publicBaseUrl);
   return false;
 }
@@ -1403,6 +1729,7 @@ async function syncTelegramCommands(env) {
     { command: 'admindel', description: '移除管理员：/admindel 用户ID' },
     { command: 'panelpass', description: '重发当前面板临时密码' },
     { command: 'panelreset', description: '生成新的面板临时密码' },
+    { command: 'sweepdeleted', description: '巡检已注销账户并清理' },
   ];
 
   const applied = [];
@@ -2417,6 +2744,7 @@ async function upsertUserProfile(env, message) {
     existing: baseRecord,
     user: sender,
     chat: message.chat,
+    persist: false,
   });
 
   await env.BOT_KV.put(userKey(userId), JSON.stringify(record));
@@ -2673,9 +3001,7 @@ async function getDynamicGroupAdminEntries(env) {
   }
 
   try {
-    const members = await telegram(env, 'getChatAdministrators', {
-      chat_id: adminChatId,
-    });
+    const members = await getAdminChatMembers(env, adminChatId);
 
     const result = [];
     for (const item of members) {
@@ -2724,9 +3050,7 @@ async function getCommandAdminUserIds(env) {
   const adminChatId = env.ADMIN_CHAT_ID ? Number(env.ADMIN_CHAT_ID) : 0;
   if (Number.isFinite(adminChatId) && adminChatId < 0 && env.BOT_TOKEN) {
     try {
-      const members = await telegram(env, 'getChatAdministrators', {
-        chat_id: adminChatId,
-      });
+      const members = await getAdminChatMembers(env, adminChatId);
       groupAdminIds.push(
         ...members
           .map((item) => Number(item?.user?.id))
@@ -3567,9 +3891,8 @@ async function adminApproveUserVerification(env, userId, operator = 'unknown', o
 
   if (notifyUser) {
     try {
-      await telegram(env, 'sendMessage', {
-        chat_id: userId,
-        text: `${env.WELCOME_TEXT || DEFAULT_WELCOME}\n\n✅ 验证通过，现在可以正常发消息。`,
+      await sendWelcomeMessage(env, userId, {
+        extraText: '✅ 验证通过，现在可以正常发消息。',
       });
     } catch (error) {
       // ignore user notification failure
@@ -3751,6 +4074,439 @@ async function collectKvKeys(kv, prefix, maxKeys) {
   return names.slice(0, maxKeys);
 }
 
+async function runDataCleanupIfDue(env) {
+  if (!env?.BOT_KV) {
+    return { ok: false, skipped: 'missing_kv' };
+  }
+  const now = Date.now();
+  const lastState = (await getJson(env.BOT_KV, LAST_DATA_CLEANUP_KEY)) || {};
+  const lastRunMs = lastState?.finishedAt ? new Date(lastState.finishedAt).getTime() : 0;
+  if (lastRunMs && now - lastRunMs < DATA_CLEANUP_INTERVAL_MS) {
+    return { ok: false, skipped: 'not_due', lastFinishedAt: lastState.finishedAt || null };
+  }
+  return runDataCleanup(env, { source: 'auto' });
+}
+
+async function runDeletedAccountSweepIfDue(env) {
+  if (!env?.BOT_KV || !env?.BOT_TOKEN) {
+    return { ok: false, skipped: 'missing_binding' };
+  }
+  const now = Date.now();
+  const lastState = (await getJson(env.BOT_KV, LAST_DELETED_ACCOUNT_SWEEP_KEY)) || {};
+  const lastRunMs = lastState?.finishedAt ? new Date(lastState.finishedAt).getTime() : 0;
+  if (lastRunMs && now - lastRunMs < DELETED_ACCOUNT_SWEEP_INTERVAL_MS) {
+    return { ok: false, skipped: 'not_due', lastFinishedAt: lastState.finishedAt || null };
+  }
+  return runDeletedAccountSweep(env, { source: 'auto' });
+}
+
+async function runDataCleanup(env, options = {}) {
+  ensureKv(env);
+  const retentionDays = clamp(
+    parsePositiveInt(options.retentionDays ?? env.DATA_RETENTION_DAYS, getDataRetentionDays(env)),
+    DATA_RETENTION_MIN_DAYS,
+    DATA_RETENTION_MAX_DAYS,
+  );
+  const batchSize = clamp(
+    parsePositiveInt(options.batchSize ?? env.DATA_CLEANUP_BATCH_SIZE, getDataCleanupBatchSize(env)),
+    DATA_CLEANUP_MIN_BATCH,
+    DATA_CLEANUP_MAX_BATCH,
+  );
+  const cutoffTime = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const cutoffIso = new Date(cutoffTime).toISOString();
+  const startedAt = new Date().toISOString();
+  const rootAdminIds = new Set(getRootAdminIds(env).map((id) => Number(id)));
+  const metrics = {
+    ok: true,
+    source: String(options.source || 'manual'),
+    startedAt,
+    finishedAt: null,
+    retentionDays,
+    cutoffIso,
+    batchSize,
+    kv: {
+      scannedUsers: 0,
+      staleUsers: 0,
+      deletedUsers: 0,
+      deletedVerifyStates: 0,
+      deletedTopicMappings: 0,
+      skippedNoTimestamp: 0,
+      protectedUsers: 0,
+      errors: 0,
+    },
+    d1: {
+      deletedMessages: 0,
+      deletedConversations: 0,
+      errors: 0,
+    },
+  };
+
+  let staleTargets = [];
+  try {
+    const userNames = await collectKvKeys(env.BOT_KV, 'user:', Math.max(batchSize * 3, batchSize));
+    metrics.kv.scannedUsers = userNames.length;
+    for (const keyName of userNames) {
+      if (staleTargets.length >= batchSize) break;
+      const profile = await getJson(env.BOT_KV, keyName);
+      if (!profile || typeof profile !== 'object') continue;
+      const userId = Number(profile.userId);
+      if (!(Number.isFinite(userId) && userId > 0)) continue;
+      const seenMs = Date.parse(String(profile.lastSeenAt || profile.firstSeenAt || ''));
+      if (!Number.isFinite(seenMs)) {
+        metrics.kv.skippedNoTimestamp += 1;
+        continue;
+      }
+      if (seenMs >= cutoffTime) continue;
+      if (rootAdminIds.has(userId)) {
+        metrics.kv.protectedUsers += 1;
+        continue;
+      }
+      const [blacklistEntry, trustEntry, adminEntry] = await Promise.all([
+        getBlacklistEntry(env, userId),
+        getTrustEntry(env, userId),
+        getAuthorizedAdminEntry(env, userId),
+      ]);
+      if (blacklistEntry || trustEntry || adminEntry) {
+        metrics.kv.protectedUsers += 1;
+        continue;
+      }
+      staleTargets.push({ userId });
+    }
+    metrics.kv.staleUsers = staleTargets.length;
+
+    for (const item of staleTargets) {
+      const userId = Number(item.userId);
+      const topicRecord = await getTopicByUser(env, userId);
+      try {
+        await env.BOT_KV.delete(userKey(userId));
+        metrics.kv.deletedUsers += 1;
+      } catch (error) {
+        metrics.kv.errors += 1;
+      }
+
+      try {
+        await env.BOT_KV.delete(verifyKey(userId));
+        metrics.kv.deletedVerifyStates += 1;
+      } catch (error) {
+        metrics.kv.errors += 1;
+      }
+
+      try {
+        await env.BOT_KV.delete(topicUserKey(userId));
+        if (Number.isFinite(Number(topicRecord?.threadId))) {
+          await env.BOT_KV.delete(topicThreadKey(Number(topicRecord.threadId)));
+          metrics.kv.deletedTopicMappings += 1;
+        }
+      } catch (error) {
+        metrics.kv.errors += 1;
+      }
+    }
+  } catch (error) {
+    metrics.kv.errors += 1;
+  }
+
+  if (env.DB) {
+    try {
+      const deletedMessages = await env.DB.prepare(
+        `DELETE FROM messages
+         WHERE id IN (
+           SELECT id FROM messages
+           WHERE created_at < ?1
+           ORDER BY created_at ASC
+           LIMIT ?2
+         )`,
+      )
+        .bind(cutoffIso, batchSize * 20)
+        .run();
+      metrics.d1.deletedMessages = Number(deletedMessages?.meta?.changes || 0);
+    } catch (error) {
+      metrics.d1.errors += 1;
+    }
+
+    try {
+      const deletedConversations = await env.DB.prepare(
+        `DELETE FROM conversations
+         WHERE id IN (
+           SELECT c.id
+           FROM conversations c
+           LEFT JOIN messages m ON m.conversation_id = c.id
+           WHERE m.id IS NULL
+             AND (c.last_message_at IS NULL OR c.last_message_at < ?1)
+           LIMIT ?2
+         )`,
+      )
+        .bind(cutoffIso, batchSize * 2)
+        .run();
+      metrics.d1.deletedConversations = Number(deletedConversations?.meta?.changes || 0);
+    } catch (error) {
+      metrics.d1.errors += 1;
+    }
+  }
+
+  metrics.finishedAt = new Date().toISOString();
+  try {
+    await env.BOT_KV.put(LAST_DATA_CLEANUP_KEY, JSON.stringify(metrics));
+  } catch (error) {
+    // ignore cleanup state write failure
+  }
+  return metrics;
+}
+
+async function runDeletedAccountSweep(env, options = {}) {
+  ensureKv(env);
+  if (!env.BOT_TOKEN) {
+    return { ok: false, skipped: 'missing_bot_token' };
+  }
+
+  const batchSize = clamp(
+    parsePositiveInt(options.batchSize ?? env.DELETED_ACCOUNT_SWEEP_BATCH_SIZE, getDeletedAccountSweepBatchSize(env)),
+    DELETED_ACCOUNT_SWEEP_MIN_BATCH,
+    DELETED_ACCOUNT_SWEEP_MAX_BATCH,
+  );
+  const startedAt = new Date().toISOString();
+  const metrics = {
+    ok: true,
+    source: String(options.source || 'manual'),
+    startedAt,
+    finishedAt: null,
+    batchSize,
+    kv: {
+      scannedUsers: 0,
+      candidates: 0,
+      probedUsers: 0,
+      deletedUsers: 0,
+      deletedVerifyStates: 0,
+      deletedTopicMappings: 0,
+      deletedBlacklistEntries: 0,
+      deletedTrustEntries: 0,
+      deletedAdminEntries: 0,
+      skippedNoTimestamp: 0,
+      protectedUsers: 0,
+      notDeleted: 0,
+      probeErrors: 0,
+      errors: 0,
+    },
+    d1: {
+      deletedMessages: 0,
+      deletedConversations: 0,
+      errors: 0,
+    },
+    detections: [],
+  };
+
+  try {
+    const scanLimit = Math.min(8000, Math.max(batchSize * 6, MAX_SCAN_KEYS));
+    const userNames = await collectKvKeys(env.BOT_KV, 'user:', scanLimit);
+    metrics.kv.scannedUsers = userNames.length;
+    const rootAdminIdSet = new Set(getRootAdminIds(env).map((id) => Number(id)));
+
+    const profiles = (
+      await Promise.all(
+        userNames.map(async (keyName) => {
+          const profile = await getJson(env.BOT_KV, keyName);
+          if (!profile || typeof profile !== 'object') return null;
+          const userId = Number(profile.userId);
+          if (!(Number.isFinite(userId) && userId > 0)) return null;
+          const seenMs = Date.parse(String(profile.lastSeenAt || profile.firstSeenAt || ''));
+          if (!Number.isFinite(seenMs)) {
+            metrics.kv.skippedNoTimestamp += 1;
+            return null;
+          }
+          return {
+            profile,
+            userId,
+            seenMs,
+          };
+        }),
+      )
+    )
+      .filter(Boolean)
+      .sort((a, b) => a.seenMs - b.seenMs);
+
+    const candidates = profiles.slice(0, batchSize);
+    metrics.kv.candidates = candidates.length;
+
+    for (const item of candidates) {
+      const userId = Number(item.userId);
+      if (!(Number.isFinite(userId) && userId > 0)) continue;
+
+      if (rootAdminIdSet.has(userId)) {
+        metrics.kv.protectedUsers += 1;
+        continue;
+      }
+
+      metrics.kv.probedUsers += 1;
+      const probe = await probeDeletedTelegramUser(env, userId);
+      if (!probe.deleted) {
+        metrics.kv.notDeleted += 1;
+        if (probe.error) {
+          metrics.kv.probeErrors += 1;
+        }
+        continue;
+      }
+
+      const deletion = await purgeDeletedUserData(env, userId, {
+        profile: item.profile,
+      });
+      metrics.kv.deletedUsers += deletion.kv.deletedUsers;
+      metrics.kv.deletedVerifyStates += deletion.kv.deletedVerifyStates;
+      metrics.kv.deletedTopicMappings += deletion.kv.deletedTopicMappings;
+      metrics.kv.deletedBlacklistEntries += deletion.kv.deletedBlacklistEntries;
+      metrics.kv.deletedTrustEntries += deletion.kv.deletedTrustEntries;
+      metrics.kv.deletedAdminEntries += deletion.kv.deletedAdminEntries;
+      metrics.d1.deletedMessages += deletion.d1.deletedMessages;
+      metrics.d1.deletedConversations += deletion.d1.deletedConversations;
+      metrics.kv.errors += deletion.kv.errors;
+      metrics.d1.errors += deletion.d1.errors;
+      metrics.detections.push({
+        userId,
+        reason: probe.reason,
+      });
+    }
+  } catch (error) {
+    metrics.kv.errors += 1;
+  }
+
+  metrics.finishedAt = new Date().toISOString();
+  try {
+    await env.BOT_KV.put(LAST_DELETED_ACCOUNT_SWEEP_KEY, JSON.stringify(metrics));
+  } catch (error) {
+    // ignore sweep state write failure
+  }
+
+  if ((metrics.kv.deletedUsers > 0 || metrics.d1.deletedMessages > 0) && env.ADMIN_CHAT_ID) {
+    try {
+      const adminChatId = toChatId(env.ADMIN_CHAT_ID);
+      const summary = [
+        '🧹 注销账户巡检完成',
+        `扫描用户：${metrics.kv.scannedUsers}`,
+        `命中：${metrics.detections.length}`,
+        `删除档案：${metrics.kv.deletedUsers}`,
+        `删除消息：${metrics.d1.deletedMessages}`,
+        `删除会话：${metrics.d1.deletedConversations}`,
+      ].join('\n');
+      await telegram(env, 'sendMessage', {
+        chat_id: adminChatId,
+        text: summary,
+      });
+    } catch (error) {
+      // ignore notification failure
+    }
+  }
+
+  return metrics;
+}
+
+async function probeDeletedTelegramUser(env, userId) {
+  try {
+    const chat = await telegram(env, 'getChat', {
+      chat_id: userId,
+    });
+
+    const marker = normalizeDeletedAccountMarker(chat?.first_name || chat?.title || chat?.description || '');
+    const deletedByMarker = marker.includes('deleted account') || marker === 'deleted';
+
+    return {
+      deleted: deletedByMarker,
+      reason: deletedByMarker ? 'deleted_marker' : 'active',
+      chat,
+    };
+  } catch (error) {
+    const raw = formatErrorMessage(error).toLowerCase();
+    if (raw.includes('deactivated')) {
+      return {
+        deleted: true,
+        reason: 'deactivated_error',
+        error: formatErrorMessage(error),
+      };
+    }
+
+    return {
+      deleted: false,
+      reason: 'probe_failed',
+      error: formatErrorMessage(error),
+    };
+  }
+}
+
+function normalizeDeletedAccountMarker(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+async function purgeDeletedUserData(env, userId, options = {}) {
+  ensureKv(env);
+  const topicRecord = options.topicRecord || (await getTopicByUser(env, userId));
+  const kv = {
+    deletedUsers: 0,
+    deletedVerifyStates: 0,
+    deletedTopicMappings: 0,
+    deletedBlacklistEntries: 0,
+    deletedTrustEntries: 0,
+    deletedAdminEntries: 0,
+    errors: 0,
+  };
+  const d1 = {
+    deletedMessages: 0,
+    deletedConversations: 0,
+    errors: 0,
+  };
+
+  const deletions = [
+    ['user', userKey(userId)],
+    ['verify', verifyKey(userId)],
+    ['topicUser', topicUserKey(userId)],
+    ['blacklist', blacklistKey(userId)],
+    ['trust', trustKey(userId)],
+    ['admin', adminKey(userId)],
+  ];
+
+  for (const [kind, key] of deletions) {
+    try {
+      await env.BOT_KV.delete(key);
+      if (kind === 'user') kv.deletedUsers += 1;
+      if (kind === 'verify') kv.deletedVerifyStates += 1;
+      if (kind === 'topicUser') kv.deletedTopicMappings += 1;
+      if (kind === 'blacklist') kv.deletedBlacklistEntries += 1;
+      if (kind === 'trust') kv.deletedTrustEntries += 1;
+      if (kind === 'admin') kv.deletedAdminEntries += 1;
+    } catch (error) {
+      kv.errors += 1;
+    }
+  }
+
+  try {
+    if (Number.isFinite(Number(topicRecord?.threadId))) {
+      await env.BOT_KV.delete(topicThreadKey(Number(topicRecord.threadId)));
+      kv.deletedTopicMappings += 1;
+    }
+  } catch (error) {
+    kv.errors += 1;
+  }
+
+  if (env.DB) {
+    try {
+      const deletedMessages = await env.DB.prepare('DELETE FROM messages WHERE user_id = ?1').bind(userId).run();
+      d1.deletedMessages = Number(deletedMessages?.meta?.changes || 0);
+    } catch (error) {
+      d1.errors += 1;
+    }
+
+    try {
+      const deletedConversations = await env.DB.prepare('DELETE FROM conversations WHERE user_id = ?1')
+        .bind(userId)
+        .run();
+      d1.deletedConversations = Number(deletedConversations?.meta?.changes || 0);
+    } catch (error) {
+      d1.errors += 1;
+    }
+  }
+
+  return { kv, d1 };
+}
+
 async function getJson(kv, key) {
   const raw = await kv.get(key);
   if (!raw) return null;
@@ -3833,6 +4589,38 @@ function parsePositiveInt(value, fallback) {
   return Math.floor(num);
 }
 
+function getDataRetentionDays(env) {
+  return clamp(
+    parsePositiveInt(env.DATA_RETENTION_DAYS, DEFAULT_DATA_RETENTION_DAYS),
+    DATA_RETENTION_MIN_DAYS,
+    DATA_RETENTION_MAX_DAYS,
+  );
+}
+
+function getDataCleanupBatchSize(env) {
+  return clamp(
+    parsePositiveInt(env.DATA_CLEANUP_BATCH_SIZE, DEFAULT_DATA_CLEANUP_BATCH_SIZE),
+    DATA_CLEANUP_MIN_BATCH,
+    DATA_CLEANUP_MAX_BATCH,
+  );
+}
+
+function isDataCleanupAutoEnabled(env) {
+  return String(env.DATA_CLEANUP_AUTO ?? 'true').trim().toLowerCase() !== 'false';
+}
+
+function getDeletedAccountSweepBatchSize(env) {
+  return clamp(
+    parsePositiveInt(env.DELETED_ACCOUNT_SWEEP_BATCH_SIZE, DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE),
+    DELETED_ACCOUNT_SWEEP_MIN_BATCH,
+    DELETED_ACCOUNT_SWEEP_MAX_BATCH,
+  );
+}
+
+function isDeletedAccountSweepAutoEnabled(env) {
+  return String(env.DELETED_ACCOUNT_SWEEP_AUTO ?? 'true').trim().toLowerCase() !== 'false';
+}
+
 function getVerificationExpireMs(env) {
   return parsePositiveInt(env.VERIFY_EXPIRE_MS, VERIFY_EXPIRE_MS);
 }
@@ -3912,7 +4700,7 @@ function matchKeywordFilter(env, message) {
   return keywords.find((item) => textPool.includes(String(item).toLowerCase())) || null;
 }
 
-async function applyPostVerifyObservationLayer(message, env, adminChatId) {
+async function applyPostVerifyObservationLayer(message, env, adminChatId, preloadedVerifyState = null) {
   if (!env.BOT_KV || !isUserVerificationEnabled(env)) {
     return true;
   }
@@ -3922,7 +4710,7 @@ async function applyPostVerifyObservationLayer(message, env, adminChatId) {
     return true;
   }
 
-  const state = await getUserVerificationState(env, userId);
+  const state = preloadedVerifyState || (await getUserVerificationState(env, userId));
   if (!state?.verified) {
     return true;
   }
@@ -4047,8 +4835,15 @@ async function getRuntimeEnv(env) {
     'WEBHOOK_PATH',
     'TOPIC_MODE',
     'USER_VERIFICATION',
+    'WELCOME_TYPE',
+    'WELCOME_MEDIA',
     'WELCOME_TEXT',
     'BLOCKED_TEXT',
+    'DATA_RETENTION_DAYS',
+    'DATA_CLEANUP_BATCH_SIZE',
+    'DATA_CLEANUP_AUTO',
+    'DELETED_ACCOUNT_SWEEP_AUTO',
+    'DELETED_ACCOUNT_SWEEP_BATCH_SIZE',
     'ADMIN_API_KEY',
     'ADMIN_PANEL_URL',
     'ADMIN_PANEL_USER',
@@ -4186,6 +4981,8 @@ async function getEffectiveSystemConfig(env) {
     'WEBHOOK_PATH',
     'TOPIC_MODE',
     'USER_VERIFICATION',
+    'WELCOME_TYPE',
+    'WELCOME_MEDIA',
     'VERIFY_EXPIRE_MS',
     'VERIFY_FAIL_BLOCK_MS',
     'VERIFY_TIMEOUT_BLOCK_MS',
@@ -4201,6 +4998,11 @@ async function getEffectiveSystemConfig(env) {
     'VERIFY_FAIL_TOPIC_ID',
     'WELCOME_TEXT',
     'BLOCKED_TEXT',
+    'DATA_RETENTION_DAYS',
+    'DATA_CLEANUP_BATCH_SIZE',
+    'DATA_CLEANUP_AUTO',
+    'DELETED_ACCOUNT_SWEEP_AUTO',
+    'DELETED_ACCOUNT_SWEEP_BATCH_SIZE',
     'ADMIN_API_KEY',
     'ADMIN_PANEL_URL',
     'ADMIN_PANEL_USER',
@@ -4230,11 +5032,18 @@ async function getSystemConfig(env) {
     return {};
   }
 
+  const cached = readSystemConfigCache();
+  if (cached) {
+    return { ...cached };
+  }
+
   const data = await getJson(env.BOT_KV, SYSTEM_CONFIG_KEY);
   if (!data || typeof data !== 'object') {
+    writeSystemConfigCache({});
     return {};
   }
-  return data;
+  writeSystemConfigCache(data);
+  return { ...data };
 }
 
 async function ensureAdminPasswordState(env) {
@@ -4293,14 +5102,14 @@ async function ensureAdminPasswordState(env) {
 
   delete next.ADMIN_PANEL_PASSWORD;
   delete next.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
-  await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
+  await setSystemConfig(env, next);
   let bootstrapNotifyError = null;
   try {
     await notifyBootstrapPassword(env, username, bootstrapGeneratedPassword, next.ADMIN_BOOTSTRAP_EXPIRES_AT);
   } catch (error) {
     bootstrapNotifyError = formatErrorMessage(error);
     next.ADMIN_BOOTSTRAP_NOTIFY_ERROR = bootstrapNotifyError;
-    await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
+    await setSystemConfig(env, next);
   }
 
   return {
@@ -4338,7 +5147,7 @@ async function resendBootstrapPassword(env) {
     if (config.ADMIN_BOOTSTRAP_NOTIFY_ERROR) {
       delete config.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
       config.updatedAt = new Date().toISOString();
-      await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(config));
+      await setSystemConfig(env, config);
     }
   } catch (error) {
     return {
@@ -4375,12 +5184,12 @@ async function resetBootstrapPassword(env) {
 
   delete next.ADMIN_PANEL_PASSWORD;
   delete next.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
-  await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
+  await setSystemConfig(env, next);
   try {
     await notifyBootstrapPassword(env, username, bootstrapGeneratedPassword, expiresAt);
   } catch (error) {
     next.ADMIN_BOOTSTRAP_NOTIFY_ERROR = formatErrorMessage(error);
-    await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
+    await setSystemConfig(env, next);
     return {
       ok: false,
       message: `新的临时密码已生成，但发送到 Telegram 失败：${next.ADMIN_BOOTSTRAP_NOTIFY_ERROR}`,
@@ -4434,8 +5243,15 @@ async function updateSystemConfig(env, payload) {
     'WEBHOOK_PATH',
     'TOPIC_MODE',
     'USER_VERIFICATION',
+    'WELCOME_TYPE',
+    'WELCOME_MEDIA',
     'WELCOME_TEXT',
     'BLOCKED_TEXT',
+    'DATA_RETENTION_DAYS',
+    'DATA_CLEANUP_BATCH_SIZE',
+    'DATA_CLEANUP_AUTO',
+    'DELETED_ACCOUNT_SWEEP_AUTO',
+    'DELETED_ACCOUNT_SWEEP_BATCH_SIZE',
     'ADMIN_API_KEY',
     'ADMIN_PANEL_URL',
     'ADMIN_PANEL_USER',
@@ -4453,7 +5269,7 @@ async function updateSystemConfig(env, payload) {
   }
 
   next.updatedAt = new Date().toISOString();
-  await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
+  await setSystemConfig(env, next);
   return next;
 }
 
@@ -4481,8 +5297,15 @@ function buildSystemConfigView(config) {
     VERIFY_SLIDER_TOLERANCE: config.VERIFY_SLIDER_TOLERANCE || '',
     VERIFY_OBSERVE_MESSAGE_COUNT: config.VERIFY_OBSERVE_MESSAGE_COUNT || '',
     VERIFY_FAIL_TOPIC_ID: config.VERIFY_FAIL_TOPIC_ID || '',
+    WELCOME_TYPE: config.WELCOME_TYPE || '',
+    WELCOME_MEDIA: config.WELCOME_MEDIA || '',
     WELCOME_TEXT: config.WELCOME_TEXT || '',
     BLOCKED_TEXT: config.BLOCKED_TEXT || '',
+    DATA_RETENTION_DAYS: config.DATA_RETENTION_DAYS || '',
+    DATA_CLEANUP_BATCH_SIZE: config.DATA_CLEANUP_BATCH_SIZE || '',
+    DATA_CLEANUP_AUTO: config.DATA_CLEANUP_AUTO || '',
+    DELETED_ACCOUNT_SWEEP_AUTO: config.DELETED_ACCOUNT_SWEEP_AUTO || '',
+    DELETED_ACCOUNT_SWEEP_BATCH_SIZE: config.DELETED_ACCOUNT_SWEEP_BATCH_SIZE || '',
     ADMIN_API_KEY: maskSecret(config.ADMIN_API_KEY),
     ADMIN_PANEL_URL: config.ADMIN_PANEL_URL || '',
     ADMIN_PANEL_USER: config.ADMIN_PANEL_USER || '',
@@ -4739,7 +5562,7 @@ async function handleAdminChangePassword(request, env) {
 
   delete next.ADMIN_BOOTSTRAP_PASSWORD;
   delete next.ADMIN_BOOTSTRAP_EXPIRES_AT;
-  await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(next));
+  await setSystemConfig(env, next);
 
   return json(
     {
@@ -4812,13 +5635,33 @@ function formatAdminOperator(sender) {
 }
 
 async function isTelegramGroupAdmin(env, chatId, userId) {
+  const numericChatId = Number(chatId);
+  const numericUserId = Number(userId);
+  if (!(Number.isFinite(numericChatId) && numericChatId < 0 && Number.isFinite(numericUserId) && numericUserId > 0)) {
+    return false;
+  }
+
+  const cacheKey = buildGroupAdminMemberCacheKey(numericChatId, numericUserId);
+  const cached = readTimedCacheValue(groupAdminMembershipCache, cacheKey);
+  if (cached === true || cached === false) {
+    return cached;
+  }
+
+  const fromListCache = getGroupAdminStatusFromCachedList(numericChatId, numericUserId);
+  if (fromListCache === true || fromListCache === false) {
+    writeTimedCacheValue(groupAdminMembershipCache, cacheKey, fromListCache, GROUP_ADMIN_MEMBER_CACHE_TTL_MS);
+    return fromListCache;
+  }
+
   try {
     const member = await telegram(env, 'getChatMember', {
-      chat_id: chatId,
-      user_id: userId,
+      chat_id: numericChatId,
+      user_id: numericUserId,
     });
     const status = String(member?.status || '').toLowerCase();
-    return status === 'creator' || status === 'administrator';
+    const isAdmin = status === 'creator' || status === 'administrator';
+    writeTimedCacheValue(groupAdminMembershipCache, cacheKey, isAdmin, GROUP_ADMIN_MEMBER_CACHE_TTL_MS);
+    return isAdmin;
   } catch (error) {
     return false;
   }
@@ -4843,6 +5686,7 @@ async function readJsonBody(request) {
 async function syncTelegramProfile(env, userId, options = {}) {
   const numericUserId = Number(userId);
   const existing = options.existing || (await getUserProfile(env, numericUserId)) || {};
+  const persistProfile = options.persist !== false;
   const nowIso = new Date().toISOString();
   const lastSyncMs = existing?.lastProfileSyncAt ? new Date(existing.lastProfileSyncAt).getTime() : 0;
   const skipRemoteSync =
@@ -4913,7 +5757,7 @@ async function syncTelegramProfile(env, userId, options = {}) {
 
     record.lastProfileSyncAt = nowIso;
     record.profileSyncError = null;
-    if (env.BOT_KV) {
+    if (env.BOT_KV && persistProfile) {
       await env.BOT_KV.put(userKey(numericUserId), JSON.stringify(record));
     }
     return record;
@@ -4921,7 +5765,7 @@ async function syncTelegramProfile(env, userId, options = {}) {
     record.lastProfileSyncAt = nowIso;
     record.profileStatus = record.firstName || record.lastName || record.username ? 'partial' : 'error';
     record.profileSyncError = error instanceof Error ? error.message : String(error);
-    if (env.BOT_KV) {
+    if (env.BOT_KV && persistProfile) {
       await env.BOT_KV.put(userKey(numericUserId), JSON.stringify(record));
     }
     return record;
@@ -4969,6 +5813,22 @@ function buildAdminPanelUrl(env, publicBaseUrl = '') {
     return `${origin}${ADMIN_PANEL_PATH}`;
   } catch (error) {
     return DEFAULT_ADMIN_PANEL_EXTERNAL_URL || ADMIN_PANEL_PATH;
+  }
+}
+
+function buildAdminPanelRedirectUrl(env, publicBaseUrl = '', request = null) {
+  const target = buildAdminPanelUrl(env, publicBaseUrl);
+  if (!isAbsoluteHttpUrl(target)) return target;
+
+  try {
+    const targetUrl = new URL(target);
+    const workerOrigin = getRequestOrigin(request) || getUrlOrigin(publicBaseUrl) || '';
+    if (workerOrigin) {
+      targetUrl.searchParams.set('worker_origin', workerOrigin);
+    }
+    return targetUrl.toString();
+  } catch (error) {
+    return target;
   }
 }
 
@@ -5221,6 +6081,18 @@ function getRequestOrigin(request = null) {
   }
 
   return '';
+}
+
+function getUrlOrigin(value = '') {
+  try {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    const withProtocol = /^https?:\/\//i.test(text) ? text : `https://${text}`;
+    const parsed = new URL(withProtocol);
+    return parsed.origin.replace(/\/$/, '');
+  } catch (error) {
+    return '';
+  }
 }
 
 function getBaseDomain(host = '') {

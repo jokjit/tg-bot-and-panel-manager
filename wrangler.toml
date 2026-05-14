@@ -26,3 +26,7 @@ USER_VERIFICATION = "true"
 VERIFY_MAX_FAILURES = "2"
 WELCOME_TEXT = "你好，欢迎使用私聊中转机器人。"
 BLOCKED_TEXT = "你已被管理员限制联系，如有需要请稍后再试。"
+DELETED_ACCOUNT_SWEEP_AUTO = "true"
+DELETED_ACCOUNT_SWEEP_BATCH_SIZE = "120"
+[triggers]
+crons = ["0 3 * * 1"]

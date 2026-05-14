@@ -1,11 +1,12 @@
 {
   "name": "tg-bot-deploy",
-  "version": "2.0.1",
+  "version": "2.3.0",
   "description": "TG Bot Cloudflare 部署工具",
   "main": "main.js",
   "scripts": {
     "start": "node start.js",
-    "build": "electron-builder --win --x64"
+    "build:panel": "npm --prefix ../admin-panel run build",
+    "build": "npm run build:panel && electron-builder --win --x64"
   },
   "dependencies": {
     "blake3-wasm": "^2.1.5"
@@ -47,20 +48,15 @@
         "to": "node_modules/blake3-wasm"
       },
       {
-        "from": "../admin-panel",
-        "to": "admin-panel",
+        "from": "../admin-panel/dist",
+        "to": "admin-panel-dist",
         "filter": [
-          "**",
-          "!dist/**",
-          "!.env*",
-          "!node_modules/.cache/**",
-          "!node_modules/.vite/**"
+          "**/*"
         ]
       }
     ],
     "asarUnpack": [
-      "node_modules/blake3-wasm/**",
-      "admin-panel/node_modules/**"
+      "node_modules/blake3-wasm/**"
     ],
     "win": {
       "target": "nsis",

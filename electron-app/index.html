@@ -23,7 +23,10 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  background: var(--bg);
+  background:
+    radial-gradient(900px 420px at 14% -10%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 72%),
+    radial-gradient(760px 360px at 92% 0%, color-mix(in srgb, #10b981 16%, transparent), transparent 74%),
+    var(--bg);
   color: var(--text);
   display: flex;
   height: 100vh;
@@ -158,8 +161,8 @@ body[data-theme="dark"] {
   flex-direction: column;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 20px;
-  gap: 12px;
+  padding: 18px;
+  gap: 14px;
 }
 .topbar {
   display: flex;
@@ -177,6 +180,71 @@ body[data-theme="dark"] {
   align-items: center;
   gap: 8px;
 }
+.floating-nav {
+  --pad: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  padding: var(--pad);
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
+  background: color-mix(in srgb, var(--surface) 84%, transparent);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px) saturate(122%);
+}
+
+.nav-indicator {
+  position: absolute;
+  top: var(--pad);
+  left: 0;
+  height: calc(100% - (var(--pad) * 2));
+  width: 0;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1), width 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+
+.nav-btn {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 38px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition: color 0.15s ease, transform 0.15s ease;
+}
+
+.nav-btn:hover { color: var(--text); }
+.nav-btn:active { transform: scale(0.98); }
+.nav-btn.active { color: var(--accent); }
+
+.view-pane {
+  display: grid;
+  gap: 12px;
+}
+
+.view-pane.hidden { display: none !important; }
+
+.view-pane.active {
+  animation: view-in 0.2s ease both;
+}
+
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .no-account-tip {
   background: var(--warn-bg);
   border: 1px solid var(--warn-border);
@@ -186,32 +254,421 @@ body[data-theme="dark"] {
   color: var(--warn-text);
 }
 
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+.glass-card {
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(16px) saturate(126%);
+}
+
+.dashboard-head {
+  border-radius: 16px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
 }
-.card {
-  background: var(--surface);
-  border-radius: var(--radius);
-  padding: 16px;
-  cursor: pointer;
-  transition: transform 0.15s, box-shadow 0.15s;
+
+.dashboard-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.dashboard-desc {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.dashboard-meta {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.dashboard-warning {
+  font-size: 12px;
+  color: #f59e0b;
+}
+
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dash-card {
+  border-radius: 16px;
+  padding: 13px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
   box-shadow: var(--shadow);
-  border: 1px solid transparent;
-  user-select: none;
+  backdrop-filter: blur(16px) saturate(124%);
+  display: grid;
+  gap: 9px;
 }
-.card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(0, 102, 255, 0.15);
-  border-color: var(--accent-light);
+
+.dash-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
-.card:active { transform: translateY(0); }
-.card.disabled { opacity: 0.45; pointer-events: none; }
-.card-icon { font-size: 22px; margin-bottom: 8px; font-weight: 700; color: var(--text-2); }
-.card-label { font-size: 13px; font-weight: 600; color: var(--text); }
-.card-desc { font-size: 11px; color: var(--text-2); margin-top: 3px; }
-.card.primary .card-label { color: var(--accent); }
+
+.dash-label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dash-donut {
+  width: 70px;
+  height: 70px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dash-donut svg {
+  width: 70px;
+  height: 70px;
+  transform: rotate(-90deg);
+}
+
+.dash-donut-track,
+.dash-donut-ring {
+  fill: none;
+  stroke-width: 7;
+}
+
+.dash-donut-track {
+  stroke: color-mix(in srgb, var(--border) 90%, transparent);
+}
+
+.dash-donut-ring {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s ease;
+}
+
+.dash-donut-ring.unknown {
+  stroke: var(--text-2);
+  opacity: 0.45;
+}
+
+.dash-donut-pct {
+  position: absolute;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.dash-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dash-meta-grid small {
+  display: block;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.dash-meta-grid b {
+  display: block;
+  margin-top: 2px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.dash-extra {
+  margin-top: 2px;
+  display: grid;
+  gap: 8px;
+}
+
+.dash-mini-grid {
+  margin-top: 2px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dash-mini-donut {
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  padding: 7px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.dash-mini-ring {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+}
+
+.dash-mini-ring svg {
+  width: 44px;
+  height: 44px;
+  transform: rotate(-90deg);
+}
+
+.dash-mini-track,
+.dash-mini-progress {
+  fill: none;
+  stroke-width: 4.5;
+}
+
+.dash-mini-track {
+  stroke: color-mix(in srgb, var(--border) 88%, transparent);
+}
+
+.dash-mini-progress {
+  stroke: #7b7ff0;
+  stroke-linecap: round;
+}
+
+.dash-mini-pct {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.dash-mini-donut.unknown .dash-mini-progress {
+  stroke: color-mix(in srgb, var(--text-2) 66%, transparent);
+}
+
+.dash-mini-donut.is-kv-storage .dash-mini-progress,
+.dash-mini-donut.is-d1-storage .dash-mini-progress {
+  stroke: #6f78f8;
+}
+
+.dash-mini-donut.is-kv-read .dash-mini-progress,
+.dash-mini-donut.is-d1-read .dash-mini-progress {
+  stroke: #2f7dfa;
+}
+
+.dash-mini-donut.is-kv-write .dash-mini-progress,
+.dash-mini-donut.is-d1-write .dash-mini-progress {
+  stroke: #f29e4c;
+}
+
+.dash-mini-donut.is-kv-namespaces .dash-mini-progress,
+.dash-mini-donut.is-d1-databases .dash-mini-progress {
+  stroke: #2ebf9a;
+}
+
+.dash-mini-legend {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.dash-mini-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dash-mini-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #7b7ff0;
+  flex: 0 0 auto;
+}
+
+.dash-mini-donut.is-kv-storage .dash-mini-dot,
+.dash-mini-donut.is-d1-storage .dash-mini-dot {
+  background: #6f78f8;
+}
+
+.dash-mini-donut.is-kv-read .dash-mini-dot,
+.dash-mini-donut.is-d1-read .dash-mini-dot {
+  background: #2f7dfa;
+}
+
+.dash-mini-donut.is-kv-write .dash-mini-dot,
+.dash-mini-donut.is-d1-write .dash-mini-dot {
+  background: #f29e4c;
+}
+
+.dash-mini-donut.is-kv-namespaces .dash-mini-dot,
+.dash-mini-donut.is-d1-databases .dash-mini-dot {
+  background: #2ebf9a;
+}
+
+.dash-mini-label span {
+  font-size: 11px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dash-mini-legend b {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dash-extra-title {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.dash-extra-db {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.dash-extra-db.muted {
+  opacity: 0.75;
+}
+
+.dash-progress {
+  display: grid;
+  gap: 5px;
+}
+
+.dash-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.dash-progress-head b {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dash-progress-meter {
+  position: relative;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border) 86%, transparent);
+  overflow: hidden;
+}
+
+.dash-progress-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 72%, #5eead4), var(--accent));
+}
+
+.dash-progress small {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.dash-card-resource {
+  gap: 8px;
+  padding: 12px;
+}
+
+.dash-card-resource .dash-row {
+  justify-content: flex-start;
+  min-height: 24px;
+}
+
+.deploy-card {
+  border-radius: 16px;
+  padding: 14px;
+  display: grid;
+  gap: 14px;
+}
+
+.deploy-card-head {
+  display: grid;
+  gap: 4px;
+}
+
+.deploy-group {
+  border-top: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  padding-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.deploy-group h3 {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.deploy-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.deploy-grid.deploy-grid-bot {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.deploy-field {
+  display: grid;
+  gap: 6px;
+}
+
+.deploy-field span {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.deploy-field input,
+.deploy-field select {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  font-size: 13px;
+  outline: none;
+  background: color-mix(in srgb, var(--surface) 80%, var(--bg));
+  color: var(--text);
+}
+
+.deploy-field input:focus,
+.deploy-field select:focus {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+}
+
+.deploy-field input[readonly] {
+  color: var(--text-2);
+}
+
+.deploy-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 
 .panel-embed {
   background: var(--surface);
@@ -220,8 +677,9 @@ body[data-theme="dark"] {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  flex: 1 1 0;
-  min-height: clamp(320px, 56vh, 840px);
+  min-height: clamp(380px, 56vh, 760px);
+  height: clamp(420px, 64vh, 860px);
+  max-height: calc(100vh - 146px);
 }
 .panel-toolbar {
   display: flex;
@@ -259,41 +717,16 @@ body[data-theme="dark"] {
   width: 100%;
   border: 0;
   min-height: 0;
+  height: 100%;
   background: #fff;
 }
 
-.resizer {
-  flex: 0 0 8px;
-  cursor: row-resize;
-  position: relative;
-  user-select: none;
-}
-.resizer::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: 40px;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--border);
-  transition: background 0.15s;
-}
-.resizer:hover::before,
-.resizer.dragging::before {
-  background: var(--accent);
-}
-
 .terminal-wrap {
-  flex: 0 0 var(--terminal-height, 220px);
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
-.main.terminal-fullsize .terminal-wrap {
-  flex: 1 1 0;
-}
+.logs-wrap { min-height: clamp(300px, 58vh, 760px); }
 .terminal-bar {
   display: flex;
   justify-content: space-between;
@@ -426,10 +859,14 @@ body[data-theme="dark"] {
 .btn-primary:hover { background: #0052cc; }
 .btn-ghost { background: var(--bg); color: var(--text-2); }
 .btn-ghost:hover { background: var(--border); }
-.wizard-step {
-  font-size: 11px;
-  color: var(--text-2);
-  margin-bottom: 16px;
+@media (max-width: 1160px) {
+  .dash-grid {
+    grid-template-columns: 1fr;
+  }
+  .deploy-grid,
+  .deploy-grid.deploy-grid-bot {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
 </head>
@@ -444,7 +881,7 @@ body[data-theme="dark"] {
   </div>
 </aside>
 
-<main class="main terminal-fullsize">
+<main class="main">
   <div class="topbar">
     <div class="main-header" id="main-header">TG Bot Deploy Tool</div>
     <div class="topbar-actions">
@@ -452,56 +889,217 @@ body[data-theme="dark"] {
       <button class="clear-btn" id="theme-toggle-btn" type="button">Dark</button>
     </div>
   </div>
+
+  <nav class="floating-nav" id="floating-nav" aria-label="Quick Navigation">
+    <span class="nav-indicator" id="nav-indicator" aria-hidden="true"></span>
+    <button class="nav-btn active" id="nav-home-btn" data-view="home" type="button">
+      <span id="nav-home-label">Home</span>
+    </button>
+    <button class="nav-btn" id="nav-deploy-btn" data-view="deploy" type="button">
+      <span id="nav-deploy-label">Deploy</span>
+    </button>
+    <button class="nav-btn" id="nav-panel-btn" data-view="panel" type="button">
+      <span id="nav-panel-label">Panel</span>
+    </button>
+    <button class="nav-btn" id="nav-logs-btn" data-view="logs" type="button">
+      <span id="nav-logs-label">Logs</span>
+    </button>
+  </nav>
+
   <div class="no-account-tip hidden" id="no-account-tip">Add a Cloudflare account first (API Token mode).</div>
 
-  <div class="cards" id="cards">
-    <div class="card primary" data-action="first-deploy">
-      <div class="card-icon">01</div>
-      <div class="card-label" id="card-first-label">First Deploy</div>
-      <div class="card-desc" id="card-first-desc">Run KV, D1, Worker, Pages in one flow</div>
-    </div>
-    <div class="card" data-action="deploy-worker">
-      <div class="card-icon">02</div>
-      <div class="card-label" id="card-worker-label">Update Worker</div>
-      <div class="card-desc" id="card-worker-desc">Use after backend code changes</div>
-    </div>
-    <div class="card" data-action="deploy-panel">
-      <div class="card-icon">03</div>
-      <div class="card-label" id="card-panel-label">Update Panel</div>
-      <div class="card-desc" id="card-panel-desc">Use after frontend code changes</div>
-    </div>
-    <div class="card" data-action="open-panel">
-      <div class="card-icon">04</div>
-      <div class="card-label" id="card-open-label">Open Panel</div>
-      <div class="card-desc" id="card-open-desc">Open current account panel in app</div>
-    </div>
-  </div>
-
-  <div class="panel-embed hidden" id="embedded-panel-wrap">
-    <div class="panel-toolbar">
+  <section class="view-pane active" id="view-home" data-view="home">
+    <div class="dashboard-head glass-card">
       <div>
-        <div class="panel-title" id="panel-title">Embedded Panel</div>
-        <div class="panel-sub" id="embedded-panel-account">No active account</div>
+        <div class="dashboard-title" id="dashboard-title">Cloudflare Dashboard</div>
+        <div class="dashboard-desc" id="dashboard-desc">Usage snapshot for current account</div>
       </div>
-      <div class="panel-actions">
-        <button class="clear-btn" id="panel-refresh-btn">Refresh</button>
-        <button class="clear-btn" id="panel-open-external-btn">Open in Browser</button>
-        <button class="clear-btn" id="panel-hide-btn">Hide</button>
+      <button class="clear-btn" id="dashboard-refresh-btn" type="button">Refresh</button>
+    </div>
+    <div class="dashboard-meta" id="dashboard-meta">-</div>
+    <div class="dashboard-warning hidden" id="dashboard-warning"></div>
+
+    <div class="dash-grid">
+      <article class="dash-card" id="dash-card-requests">
+        <div class="dash-row">
+          <div class="dash-label" id="dash-label-requests">Worker 24h Requests</div>
+          <div class="dash-donut">
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <circle class="dash-donut-track" cx="32" cy="32" r="24"></circle>
+              <circle class="dash-donut-ring" id="dash-ring-requests" cx="32" cy="32" r="24" pathLength="100"></circle>
+            </svg>
+            <span class="dash-donut-pct" id="dash-pct-requests">0%</span>
+          </div>
+        </div>
+        <div class="dash-meta-grid">
+          <div><small id="dash-used-text-requests">Used</small><b id="dash-used-requests">--</b></div>
+          <div><small id="dash-total-text-requests">Total</small><b id="dash-total-requests">--</b></div>
+        </div>
+      </article>
+
+      <article class="dash-card" id="dash-card-workers">
+        <div class="dash-row">
+          <div class="dash-label" id="dash-label-workers">Workers Scripts</div>
+          <div class="dash-donut">
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <circle class="dash-donut-track" cx="32" cy="32" r="24"></circle>
+              <circle class="dash-donut-ring" id="dash-ring-workers" cx="32" cy="32" r="24" pathLength="100"></circle>
+            </svg>
+            <span class="dash-donut-pct" id="dash-pct-workers">0%</span>
+          </div>
+        </div>
+        <div class="dash-meta-grid">
+          <div><small id="dash-used-text-workers">Used</small><b id="dash-used-workers">--</b></div>
+          <div><small id="dash-total-text-workers">Total</small><b id="dash-total-workers">--</b></div>
+        </div>
+      </article>
+
+      <article class="dash-card dash-card-resource" id="dash-card-kv">
+        <div class="dash-row">
+          <div class="dash-label" id="dash-label-kv">KV Namespaces</div>
+        </div>
+        <div class="dash-meta-grid">
+          <div><small id="dash-used-text-kv">Used</small><b id="dash-used-kv">--</b></div>
+          <div><small id="dash-total-text-kv">Total</small><b id="dash-total-kv">--</b></div>
+        </div>
+        <div class="dash-mini-grid" id="dash-mini-kv"></div>
+        <div class="dash-extra" id="dash-extra-kv"></div>
+      </article>
+
+      <article class="dash-card dash-card-resource" id="dash-card-d1">
+        <div class="dash-row">
+          <div class="dash-label" id="dash-label-d1">D1 Databases</div>
+        </div>
+        <div class="dash-meta-grid">
+          <div><small id="dash-used-text-d1">Used</small><b id="dash-used-d1">--</b></div>
+          <div><small id="dash-total-text-d1">Total</small><b id="dash-total-d1">--</b></div>
+        </div>
+        <div class="dash-mini-grid" id="dash-mini-d1"></div>
+        <div class="dash-extra" id="dash-extra-d1"></div>
+      </article>
+
+      <article class="dash-card" id="dash-card-pages">
+        <div class="dash-row">
+          <div class="dash-label" id="dash-label-pages">Pages Projects</div>
+          <div class="dash-donut">
+            <svg viewBox="0 0 64 64" aria-hidden="true">
+              <circle class="dash-donut-track" cx="32" cy="32" r="24"></circle>
+              <circle class="dash-donut-ring" id="dash-ring-pages" cx="32" cy="32" r="24" pathLength="100"></circle>
+            </svg>
+            <span class="dash-donut-pct" id="dash-pct-pages">0%</span>
+          </div>
+        </div>
+        <div class="dash-meta-grid">
+          <div><small id="dash-used-text-pages">Used</small><b id="dash-used-pages">--</b></div>
+          <div><small id="dash-total-text-pages">Total</small><b id="dash-total-pages">--</b></div>
+        </div>
+        <div class="dash-extra" id="dash-extra-pages"></div>
+      </article>
+    </div>
+  </section>
+
+  <section class="view-pane hidden" id="view-deploy" data-view="deploy">
+    <div class="deploy-card glass-card">
+      <div class="deploy-card-head">
+        <div class="dashboard-title" id="deploy-title">Deploy</div>
+        <div class="dashboard-desc" id="deploy-desc">Configure variables and deploy from one place</div>
+      </div>
+
+      <section class="deploy-group">
+        <h3 id="group-cf-title">Cloudflare 参数</h3>
+        <div class="deploy-grid">
+          <label class="deploy-field">
+            <span id="label-worker-name">Worker Name</span>
+            <input id="d-worker-name" />
+          </label>
+          <label class="deploy-field">
+            <span id="label-kv-namespace-title">KV Namespace Title</span>
+            <input id="d-kv-namespace-title" />
+          </label>
+          <label class="deploy-field">
+            <span id="label-d1-database-name">D1 Database Name</span>
+            <input id="d-d1-database-name" />
+          </label>
+          <label class="deploy-field">
+            <span id="label-worker-url">Worker URL</span>
+            <input id="d-worker-url" />
+          </label>
+          <label class="deploy-field">
+            <span id="label-verify-public-base-url">Verification URL base (optional)</span>
+            <input id="d-verify-public-base-url" />
+          </label>
+          <label class="deploy-field">
+            <span id="label-panel-url">Panel URL</span>
+            <input id="d-panel-url" readonly />
+          </label>
+          <label class="deploy-field">
+            <span id="label-deploy-panel">Auto deploy Pages panel</span>
+            <select id="d-deploy-panel-select">
+              <option id="d-deploy-panel-on" value="1">On</option>
+              <option id="d-deploy-panel-off" value="0">Off</option>
+            </select>
+          </label>
+          <label class="deploy-field">
+            <span id="label-pages-project-name">Pages Project Name</span>
+            <input id="d-pages-project-name" />
+          </label>
+          <label class="deploy-field">
+            <span id="label-pages-branch">Pages Branch</span>
+            <input id="d-pages-branch" />
+          </label>
+        </div>
+      </section>
+
+      <section class="deploy-group">
+        <h3 id="group-bot-title">机器人参数</h3>
+        <div class="deploy-grid deploy-grid-bot">
+          <label class="deploy-field">
+            <span id="label-bot-token">BOT_TOKEN</span>
+            <input id="d-bot-token" type="password" autocomplete="off" />
+          </label>
+          <label class="deploy-field">
+            <span id="label-admin-chat-id">ADMIN_CHAT_ID</span>
+            <input id="d-admin-chat-id" />
+          </label>
+        </div>
+      </section>
+
+      <div class="deploy-actions">
+        <button class="clear-btn" id="deploy-save-btn" type="button">Save</button>
+        <button class="clear-btn" id="deploy-clear-logs-btn" type="button">Clear Logs</button>
+        <button class="clear-btn" id="deploy-open-panel-btn" type="button">Open Panel</button>
+        <button class="btn btn-primary" id="deploy-start-btn" type="button">Start Deploy</button>
       </div>
     </div>
-    <div class="panel-empty" id="embedded-panel-empty">No panel URL for this account. Deploy Pages first or set panel URL in first deploy.</div>
-    <iframe id="embedded-panel-frame" class="hidden" src="about:blank" loading="eager"></iframe>
-  </div>
+  </section>
 
-  <div class="resizer hidden" id="panel-resizer" role="separator" aria-orientation="horizontal" title="拖拽调整高度"></div>
-
-  <div class="terminal-wrap">
-    <div class="terminal-bar">
-      <span><span class="status-dot" id="status-dot"></span><span id="status-text">Idle</span></span>
-      <button class="clear-btn" id="clear-btn">Clear Logs</button>
+  <section class="view-pane hidden" id="view-panel" data-view="panel">
+    <div class="panel-embed" id="embedded-panel-wrap">
+      <div class="panel-toolbar">
+        <div>
+          <div class="panel-title" id="panel-title">Embedded Panel</div>
+          <div class="panel-sub" id="embedded-panel-account">No active account</div>
+        </div>
+        <div class="panel-actions">
+          <button class="clear-btn" id="panel-refresh-btn">Refresh</button>
+          <button class="clear-btn" id="panel-open-external-btn">Open in Browser</button>
+          <button class="clear-btn" id="panel-hide-btn">Hide</button>
+        </div>
+      </div>
+      <div class="panel-empty" id="embedded-panel-empty">No panel URL for this account. Deploy Pages first or set panel URL in first deploy.</div>
+      <iframe id="embedded-panel-frame" class="hidden" src="about:blank" loading="eager"></iframe>
     </div>
-    <div id="output"></div>
-  </div>
+  </section>
+
+  <section class="view-pane hidden" id="view-logs" data-view="logs">
+    <div class="terminal-wrap logs-wrap">
+      <div class="terminal-bar">
+        <span><span class="status-dot" id="status-dot"></span><span id="status-text">Idle</span></span>
+        <button class="clear-btn" id="clear-btn">Clear Logs</button>
+      </div>
+      <div id="output"></div>
+    </div>
+  </section>
 </main>
 
 <div class="overlay hidden" id="add-account-modal">
@@ -518,74 +1116,26 @@ body[data-theme="dark"] {
   </div>
 </div>
 
-<div class="overlay hidden" id="wizard-modal">
-  <div class="modal">
-    <h2 id="wizard-title">First Deploy</h2>
-    <div class="wizard-step" id="wizard-step">This runs KV/D1 init, Worker deploy, and Pages deploy.</div>
-    <div class="field"><label id="w-bot-token-label">BOT_TOKEN</label><input id="w-bot-token" type="password" placeholder="Get from @BotFather" /></div>
-    <div class="field"><label id="w-admin-chat-id-label">ADMIN_CHAT_ID</label><input id="w-admin-chat-id" placeholder="Admin user ID or group ID" /></div>
-
-    <details class="field">
-      <summary id="wizard-advanced-summary" style="font-size:12px;color:var(--text-2);cursor:pointer;">Advanced (optional)</summary>
-      <div style="margin-top:8px;">
-        <label id="w-worker-name-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Worker Name</label>
-        <input id="w-worker-name" placeholder="telegram-private-chatbot" />
-      </div>
-      <div style="margin-top:10px;">
-        <label id="w-kv-namespace-title-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">KV Namespace Title</label>
-        <input id="w-kv-namespace-title" placeholder="tg-bot-kv" />
-      </div>
-      <div style="margin-top:10px;">
-        <label id="w-d1-database-name-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">D1 Database Name</label>
-        <input id="w-d1-database-name" placeholder="tg-bot-history" />
-      </div>
-      <div style="margin-top:8px;">
-        <label id="w-worker-url-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Worker URL</label>
-        <input id="w-worker-url" placeholder="https://your-worker.example.com" />
-      </div>
-      <div style="margin-top:10px;">
-        <label id="w-verify-public-base-url-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Verification URL base (optional)</label>
-        <input id="w-verify-public-base-url" placeholder="https://verify.example.com" />
-      </div>
-      <div style="margin-top:10px;">
-        <label id="w-panel-url-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Panel URL</label>
-        <input id="w-panel-url" placeholder="Cloudflare Pages default URL" readonly />
-      </div>
-      <div style="margin-top:10px;">
-        <label id="w-pages-project-name-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Pages Project Name</label>
-        <input id="w-pages-project-name" placeholder="tg-admin-panel" />
-      </div>
-      <div style="margin-top:10px;">
-        <label id="w-pages-branch-label" style="display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;">Pages Branch</label>
-        <input id="w-pages-branch" placeholder="main" />
-      </div>
-    </details>
-
-    <div class="field">
-      <label class="field-inline"><input id="w-open-panel-in-client" type="checkbox" /> <span id="w-open-panel-in-client-text">Open panel in app after deploy</span></label>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-ghost" id="cancel-wizard">Cancel</button>
-      <button class="btn btn-primary" id="confirm-wizard">Start Deploy</button>
-    </div>
-  </div>
-</div>
-
 <script>
 const output = document.getElementById("output")
 const statusDot = document.getElementById("status-dot")
 const statusText = document.getElementById("status-text")
-const cards = document.querySelectorAll(".card[data-action]")
-const wizardModal = document.getElementById("wizard-modal")
-const wizardWorkerName = document.getElementById("w-worker-name")
-const wizardKvNamespaceTitle = document.getElementById("w-kv-namespace-title")
-const wizardD1DatabaseName = document.getElementById("w-d1-database-name")
-const wizardWorkerUrl = document.getElementById("w-worker-url")
-const wizardVerifyPublicBaseUrl = document.getElementById("w-verify-public-base-url")
-const wizardPanelUrl = document.getElementById("w-panel-url")
-const wizardPagesProjectName = document.getElementById("w-pages-project-name")
-const wizardPagesBranch = document.getElementById("w-pages-branch")
-const wizardOpenPanelInClient = document.getElementById("w-open-panel-in-client")
+
+const deployWorkerName = document.getElementById("d-worker-name")
+const deployKvNamespaceTitle = document.getElementById("d-kv-namespace-title")
+const deployD1DatabaseName = document.getElementById("d-d1-database-name")
+const deployWorkerUrl = document.getElementById("d-worker-url")
+const deployVerifyPublicBaseUrl = document.getElementById("d-verify-public-base-url")
+const deployPanelUrl = document.getElementById("d-panel-url")
+const deployPanelSelect = document.getElementById("d-deploy-panel-select")
+const deployPagesProjectName = document.getElementById("d-pages-project-name")
+const deployPagesBranch = document.getElementById("d-pages-branch")
+const deployBotToken = document.getElementById("d-bot-token")
+const deployAdminChatId = document.getElementById("d-admin-chat-id")
+const deploySaveBtn = document.getElementById("deploy-save-btn")
+const deployClearLogsBtn = document.getElementById("deploy-clear-logs-btn")
+const deployOpenPanelBtn = document.getElementById("deploy-open-panel-btn")
+const deployStartBtn = document.getElementById("deploy-start-btn")
 
 const panelWrap = document.getElementById("embedded-panel-wrap")
 const panelFrame = document.getElementById("embedded-panel-frame")
@@ -596,8 +1146,46 @@ const panelHideBtn = document.getElementById("panel-hide-btn")
 const panelOpenExternalBtn = document.getElementById("panel-open-external-btn")
 const langToggleBtn = document.getElementById("lang-toggle-btn")
 const themeToggleBtn = document.getElementById("theme-toggle-btn")
-const mainEl = document.querySelector(".main")
-const panelResizer = document.getElementById("panel-resizer")
+
+const navButtons = Array.from(document.querySelectorAll(".nav-btn"))
+const navIndicator = document.getElementById("nav-indicator")
+const viewPanes = Array.from(document.querySelectorAll(".view-pane"))
+const dashboardRefreshBtn = document.getElementById("dashboard-refresh-btn")
+const dashboardMeta = document.getElementById("dashboard-meta")
+const dashboardWarning = document.getElementById("dashboard-warning")
+
+const UI_LOCALE_KEY = "tg_bot_ui_locale"
+const UI_THEME_KEY = "tg_bot_ui_theme"
+const LEGACY_DEFAULT_PAGES_PANEL_URL = "https://tg-admin-panel.pages.dev"
+const DASHBOARD_CACHE_TTL_MS = 3 * 60 * 1000
+
+const DASHBOARD_TOTALS = {
+  workerRequests24h: 100000,
+  workersScriptCount: 100,
+  kvNamespaceCount: 1000,
+  d1DatabaseCount: 10,
+  pagesProjectCount: 100,
+}
+
+const KV_LIMITS = {
+  storage: 1 * 1024 * 1024 * 1024,
+  reads: 100000,
+  writes: 1000,
+}
+
+const D1_LIMITS = {
+  storage: 5 * 1024 * 1024 * 1024,
+  reads: 5000000,
+  writes: 100000,
+}
+
+const DASHBOARD_BINDINGS = [
+  { key: "workerRequests24h", usedId: "dash-used-requests", totalId: "dash-total-requests", pctId: "dash-pct-requests", ringId: "dash-ring-requests" },
+  { key: "workersScriptCount", usedId: "dash-used-workers", totalId: "dash-total-workers", pctId: "dash-pct-workers", ringId: "dash-ring-workers" },
+  { key: "kvNamespaceCount", usedId: "dash-used-kv", totalId: "dash-total-kv", pctId: "dash-pct-kv", ringId: "dash-ring-kv" },
+  { key: "d1DatabaseCount", usedId: "dash-used-d1", totalId: "dash-total-d1", pctId: "dash-pct-d1", ringId: "dash-ring-d1" },
+  { key: "pagesProjectCount", usedId: "dash-used-pages", totalId: "dash-total-pages", pctId: "dash-pct-pages", ringId: "dash-ring-pages" },
+]
 
 let running = false
 let currentActiveAccount = null
@@ -605,15 +1193,10 @@ let currentLocale = "zh"
 let currentTheme = "light"
 let statusKey = "status_idle"
 let repoRootPath = ""
-let terminalHeightBeforePanel = null
-
-const UI_LOCALE_KEY = "tg_bot_ui_locale"
-const UI_THEME_KEY = "tg_bot_ui_theme"
-const UI_TERMINAL_HEIGHT_KEY = "tg_bot_ui_terminal_height"
-const TERMINAL_MIN_HEIGHT = 80
-const TERMINAL_DEFAULT_HEIGHT = 220
-const TERMINAL_PANEL_OPEN_HEIGHT = 120
-const LEGACY_DEFAULT_PAGES_PANEL_URL = "https://tg-admin-panel.pages.dev"
+let activeView = "home"
+let dashboardLoading = false
+let dashboardRequestSeq = 0
+const dashboardCacheByAccountId = new Map()
 
 const i18n = {
   zh: {
@@ -622,18 +1205,69 @@ const i18n = {
     add_account_btn: "添加账号",
     clear_local_data: "清除本地数据",
     no_account_tip: "请先在左侧添加 Cloudflare 账号（API Token 模式）。",
-    card_first_label: "首次部署",
-    card_first_desc: "一次完成 KV、D1、Worker、Pages",
-    card_worker_label: "更新 Worker",
-    card_worker_desc: "后端改动后重新部署",
-    card_panel_label: "更新面板",
-    card_panel_desc: "前端改动后重新部署",
-    card_open_label: "打开面板",
-    card_open_desc: "在客户端内打开当前账号面板",
+    nav_aria: "快捷导航",
+    nav_home: "首页",
+    nav_deploy: "部署",
+    nav_panel: "面板",
+    nav_logs: "日志",
+    dashboard_title: "Cloudflare 仪表盘",
+    dashboard_desc: "当前账号的 Worker / KV / D1 / Pages 使用快照",
+    dashboard_refresh: "刷新",
+    dashboard_updating: "更新中...",
+    dashboard_updated_at: "更新时间",
+    dashboard_warning: "部分指标不可用",
+    dashboard_missing: "当前账号缺少 API Token 或 Account ID，无法读取仪表盘",
+    dash_used: "已用",
+    dash_total: "总量",
+    dash_na: "--",
+    dash_label_requests: "Worker 24h 请求",
+    dash_label_workers: "Workers 脚本数",
+    dash_label_kv: "KV 命名空间",
+    dash_label_d1: "D1 数据库数",
+    dash_label_pages: "Pages 项目数",
+    dash_kv_mini_namespaces: "命名空间数量",
+    dash_kv_mini_storage: "KV 存储占用",
+    dash_kv_mini_reads: "KV 24h 读",
+    dash_kv_mini_writes: "KV 24h 写",
+    dash_d1_mini_databases: "数据库数量",
+    dash_d1_mini_storage: "D1 存储占用",
+    dash_d1_mini_reads: "D1 24h 读",
+    dash_d1_mini_writes: "D1 24h 写",
+    dash_kv_quota_storage: "总存储占用 / 1GB",
+    dash_kv_quota_reads: "24h 读请求 / 10万",
+    dash_kv_quota_writes: "24h 写请求 / 1000",
+    dash_d1_quota_storage: "总存储占用 / 5GB",
+    dash_d1_quota_reads: "24h 读请求 / 500万",
+    dash_d1_quota_writes: "24h 写请求 / 10万",
+    dash_d1_top_title: "库明细（Top3）",
+    dash_d1_more: "其余 {count} 个库...",
+    deploy_title: "部署配置",
+    deploy_desc: "部署需要的变量和操作入口",
+    group_cf: "Cloudflare 参数",
+    group_bot: "机器人参数",
+    label_worker_name: "Worker Name",
+    label_kv: "KV Namespace Title",
+    label_d1: "D1 Database Name",
+    label_worker_url: "Worker URL",
+    label_verify_url: "Verification URL base (optional)",
+    label_panel_url: "Pages 面板地址（只读，/admin 跳转目标）",
+    switch_panel: "自动部署 Pages 管理面板",
+    switch_panel_on: "开启",
+    switch_panel_off: "关闭",
+    label_pages_project: "Pages Project Name",
+    label_pages_branch: "Pages Branch",
+    label_bot_token: "BOT_TOKEN",
+    label_admin_chat: "ADMIN_CHAT_ID",
+    btn_save: "保存配置",
+    btn_deploy: "开始部署",
+    btn_open_panel: "打开面板",
+    status_saved: "配置已保存",
+    status_save_fail: "保存失败",
+    status_deploy_fail: "部署失败",
     panel_title: "内嵌面板",
     panel_refresh: "刷新",
     panel_open_browser: "浏览器打开",
-    panel_hide: "收起",
+    panel_hide: "返回首页",
     panel_empty: "当前账号暂无面板地址。请先部署 Pages 或在首次部署中填写面板地址。",
     clear_logs: "清空日志",
     status_idle: "就绪",
@@ -651,33 +1285,19 @@ const i18n = {
     f_email_ph: "仅用于显示",
     cancel: "取消",
     add: "添加",
-    wizard_title: "首次部署",
-    wizard_step: "将执行 KV/D1 初始化、Worker 部署、Pages 部署。",
-    w_bot_token_label: "BOT_TOKEN",
-    w_bot_token_ph: "从 @BotFather 获取",
-    w_admin_label: "ADMIN_CHAT_ID",
-    w_admin_ph: "管理员用户 ID 或群组 ID",
-    wizard_advanced: "高级选项（可选）",
-    w_worker_name_label: "Worker 名称",
-    w_worker_name_ph: "默认 telegram-private-chatbot，可按账号自定义",
-    w_kv_namespace_title_label: "KV 命名空间名称",
-    w_kv_namespace_title_ph: "默认 tg-bot-kv，可按账号自定义",
-    w_d1_database_name_label: "D1 数据库名称",
-    w_d1_database_name_ph: "默认 tg-bot-history，可按账号自定义",
-    w_worker_label: "Worker 地址（Webhook / 面板入口）",
-    w_verify_base_label: "验证页面域名（可选）",
-    w_verify_base_ph: "留空则使用 Worker 地址（PUBLIC_BASE_URL）",
-    w_panel_label: "Pages 面板地址（只读，/admin 跳转目标）",
-    w_panel_ph: "部署后自动读取 Cloudflare 分配的 pages.dev 地址",
-    w_pages_project_label: "Pages 项目名称",
-    w_pages_project_ph: "默认 tg-admin-panel，可按账号自定义",
-    w_pages_branch_label: "Pages 分支",
-    w_pages_branch_ph: "默认 main",
-    w_open_panel: "部署完成后在客户端打开面板",
-    start_deploy: "开始部署",
+    ph_worker_name: "默认 telegram-private-chatbot，可按账号自定义",
+    ph_kv: "默认 tg-bot-kv，可按账号自定义",
+    ph_d1: "默认 tg-bot-history，可按账号自定义",
+    ph_worker_url: "https://your-worker.example.com",
+    ph_verify_url: "留空则使用 Worker 地址（PUBLIC_BASE_URL）",
+    ph_panel_url: "部署后自动读取 Cloudflare 分配的 pages.dev 地址",
+    ph_pages_project: "默认 tg-admin-panel，可按账号自定义",
+    ph_pages_branch: "默认 main",
+    ph_bot_token: "从 @BotFather 获取",
+    ph_admin_chat: "管理员用户 ID 或群组 ID",
     error_prefix: "错误",
     no_panel_url_alert: "当前账号没有面板地址",
-    missing_required_alert: "BOT_TOKEN 和 ADMIN_CHAT_ID 为必填项",
+    missing_required_alert: "请填写 BOT_TOKEN 和 ADMIN_CHAT_ID",
     add_required_alert: "账号名称、API Token、Account ID 为必填项",
     delete_account_confirm: "确认删除这个账号？",
     clear_data_confirm: "确认清除所有本地账号数据？该操作不可恢复。",
@@ -698,18 +1318,69 @@ const i18n = {
     add_account_btn: "Add Account",
     clear_local_data: "Clear Local Data",
     no_account_tip: "Add a Cloudflare account first (API Token mode).",
-    card_first_label: "First Deploy",
-    card_first_desc: "Run KV, D1, Worker, Pages in one flow",
-    card_worker_label: "Update Worker",
-    card_worker_desc: "Use after backend code changes",
-    card_panel_label: "Update Panel",
-    card_panel_desc: "Use after frontend code changes",
-    card_open_label: "Open Panel",
-    card_open_desc: "Open current account panel in app",
+    nav_aria: "Quick Navigation",
+    nav_home: "Home",
+    nav_deploy: "Deploy",
+    nav_panel: "Panel",
+    nav_logs: "Logs",
+    dashboard_title: "Cloudflare Dashboard",
+    dashboard_desc: "Snapshot for Worker / KV / D1 / Pages usage under current account",
+    dashboard_refresh: "Refresh",
+    dashboard_updating: "Updating...",
+    dashboard_updated_at: "Updated At",
+    dashboard_warning: "Some metrics are unavailable",
+    dashboard_missing: "Current account is missing API Token or Account ID",
+    dash_used: "Used",
+    dash_total: "Total",
+    dash_na: "--",
+    dash_label_requests: "Worker 24h Requests",
+    dash_label_workers: "Workers Scripts",
+    dash_label_kv: "KV Namespaces",
+    dash_label_d1: "D1 Databases",
+    dash_label_pages: "Pages Projects",
+    dash_kv_mini_namespaces: "Namespaces",
+    dash_kv_mini_storage: "Storage",
+    dash_kv_mini_reads: "24h Reads",
+    dash_kv_mini_writes: "24h Writes",
+    dash_d1_mini_databases: "Databases",
+    dash_d1_mini_storage: "Storage",
+    dash_d1_mini_reads: "24h Reads",
+    dash_d1_mini_writes: "24h Writes",
+    dash_kv_quota_storage: "Storage Usage / 1GB",
+    dash_kv_quota_reads: "24h Read Ops / 100K",
+    dash_kv_quota_writes: "24h Write Ops / 1K",
+    dash_d1_quota_storage: "Storage Usage / 5GB",
+    dash_d1_quota_reads: "24h Read Ops / 5M",
+    dash_d1_quota_writes: "24h Write Ops / 100K",
+    dash_d1_top_title: "Database Details (Top3)",
+    dash_d1_more: "{count} more databases...",
+    deploy_title: "Deploy Config",
+    deploy_desc: "Deployment variables and actions",
+    group_cf: "Cloudflare Settings",
+    group_bot: "Bot Settings",
+    label_worker_name: "Worker Name",
+    label_kv: "KV Namespace Title",
+    label_d1: "D1 Database Name",
+    label_worker_url: "Worker URL",
+    label_verify_url: "Verification URL base (optional)",
+    label_panel_url: "Pages panel URL (read-only /admin target)",
+    switch_panel: "Auto deploy Pages admin panel",
+    switch_panel_on: "On",
+    switch_panel_off: "Off",
+    label_pages_project: "Pages Project Name",
+    label_pages_branch: "Pages Branch",
+    label_bot_token: "BOT_TOKEN",
+    label_admin_chat: "ADMIN_CHAT_ID",
+    btn_save: "Save Config",
+    btn_deploy: "Start Deploy",
+    btn_open_panel: "Open Panel",
+    status_saved: "Config saved",
+    status_save_fail: "Save failed",
+    status_deploy_fail: "Deploy failed",
     panel_title: "Embedded Panel",
     panel_refresh: "Refresh",
     panel_open_browser: "Open in Browser",
-    panel_hide: "Hide",
+    panel_hide: "Back Home",
     panel_empty: "No panel URL for this account. Deploy Pages first or set panel URL in first deploy.",
     clear_logs: "Clear Logs",
     status_idle: "Idle",
@@ -727,33 +1398,19 @@ const i18n = {
     f_email_ph: "For display only",
     cancel: "Cancel",
     add: "Add",
-    wizard_title: "First Deploy",
-    wizard_step: "This runs KV/D1 init, Worker deploy, and Pages deploy.",
-    w_bot_token_label: "BOT_TOKEN",
-    w_bot_token_ph: "Get from @BotFather",
-    w_admin_label: "ADMIN_CHAT_ID",
-    w_admin_ph: "Admin user ID or group ID",
-    wizard_advanced: "Advanced (optional)",
-    w_worker_name_label: "Worker Name",
-    w_worker_name_ph: "Default telegram-private-chatbot, customizable per account",
-    w_kv_namespace_title_label: "KV Namespace Title",
-    w_kv_namespace_title_ph: "Default tg-bot-kv, customizable per account",
-    w_d1_database_name_label: "D1 Database Name",
-    w_d1_database_name_ph: "Default tg-bot-history, customizable per account",
-    w_worker_label: "Worker URL (webhook / panel entry)",
-    w_verify_base_label: "Verification URL base (optional)",
-    w_verify_base_ph: "Leave empty to use Worker URL (PUBLIC_BASE_URL)",
-    w_panel_label: "Pages panel URL (read-only /admin target)",
-    w_panel_ph: "Auto-detect the Cloudflare-assigned pages.dev URL after deploy",
-    w_pages_project_label: "Pages Project Name",
-    w_pages_project_ph: "Default tg-admin-panel, customizable per account",
-    w_pages_branch_label: "Pages Branch",
-    w_pages_branch_ph: "Default main",
-    w_open_panel: "Open panel in app after deploy",
-    start_deploy: "Start Deploy",
+    ph_worker_name: "Default telegram-private-chatbot, customizable per account",
+    ph_kv: "Default tg-bot-kv, customizable per account",
+    ph_d1: "Default tg-bot-history, customizable per account",
+    ph_worker_url: "https://your-worker.example.com",
+    ph_verify_url: "Leave empty to use Worker URL (PUBLIC_BASE_URL)",
+    ph_panel_url: "Auto-detect Cloudflare-assigned pages.dev URL after deploy",
+    ph_pages_project: "Default tg-admin-panel, customizable per account",
+    ph_pages_branch: "Default main",
+    ph_bot_token: "Get from @BotFather",
+    ph_admin_chat: "Admin user ID or group ID",
     error_prefix: "Error",
     no_panel_url_alert: "No panel URL configured for this account",
-    missing_required_alert: "BOT_TOKEN and ADMIN_CHAT_ID are required",
+    missing_required_alert: "Please fill BOT_TOKEN and ADMIN_CHAT_ID",
     add_required_alert: "Account Name, API Token, and Account ID are required",
     delete_account_confirm: "Delete this account?",
     clear_data_confirm: "Clear all local account data? This cannot be undone.",
@@ -774,6 +1431,23 @@ function t(key) {
   return i18n[currentLocale]?.[key] ?? i18n.en[key] ?? key
 }
 
+function byId(id) {
+  return document.getElementById(id)
+}
+
+function setText(id, key) {
+  const node = byId(id)
+  if (node) node.textContent = t(key)
+}
+
+function fmt(template, values = {}) {
+  let result = String(template || "")
+  Object.entries(values).forEach(([k, v]) => {
+    result = result.replaceAll(`{${k}}`, String(v))
+  })
+  return result
+}
+
 function setLocale(locale) {
   currentLocale = locale === "en" ? "en" : "zh"
   localStorage.setItem(UI_LOCALE_KEY, currentLocale)
@@ -788,77 +1462,7 @@ function setTheme(theme) {
 }
 
 function updateRepoRootLabel() {
-  document.getElementById("repo-root-display").textContent = repoRootPath ? `${t("repo_prefix")}: ${repoRootPath}` : ""
-}
-
-function applyLocale() {
-  document.documentElement.lang = currentLocale
-  document.title = t("app_title")
-  document.getElementById("main-header").textContent = t("app_title")
-  document.getElementById("sidebar-title").textContent = t("sidebar_title")
-  document.getElementById("open-add-account-text").textContent = t("add_account_btn")
-  document.getElementById("clear-data-btn").textContent = t("clear_local_data")
-  document.getElementById("no-account-tip").textContent = t("no_account_tip")
-  document.getElementById("card-first-label").textContent = t("card_first_label")
-  document.getElementById("card-first-desc").textContent = t("card_first_desc")
-  document.getElementById("card-worker-label").textContent = t("card_worker_label")
-  document.getElementById("card-worker-desc").textContent = t("card_worker_desc")
-  document.getElementById("card-panel-label").textContent = t("card_panel_label")
-  document.getElementById("card-panel-desc").textContent = t("card_panel_desc")
-  document.getElementById("card-open-label").textContent = t("card_open_label")
-  document.getElementById("card-open-desc").textContent = t("card_open_desc")
-  document.getElementById("panel-title").textContent = t("panel_title")
-  document.getElementById("panel-refresh-btn").textContent = t("panel_refresh")
-  document.getElementById("panel-open-external-btn").textContent = t("panel_open_browser")
-  document.getElementById("panel-hide-btn").textContent = t("panel_hide")
-  document.getElementById("embedded-panel-empty").textContent = t("panel_empty")
-  document.getElementById("clear-btn").textContent = t("clear_logs")
-  document.getElementById("add-modal-title").textContent = t("add_modal_title")
-  document.getElementById("f-name-label").textContent = t("f_name_label")
-  document.getElementById("f-token-label").textContent = t("f_token_label")
-  document.getElementById("f-account-id-label").textContent = t("f_account_id_label")
-  document.getElementById("f-email-label").textContent = t("f_email_label")
-  document.getElementById("cancel-add").textContent = t("cancel")
-  document.getElementById("confirm-add").textContent = t("add")
-  document.getElementById("wizard-title").textContent = t("wizard_title")
-  document.getElementById("wizard-step").textContent = t("wizard_step")
-  document.getElementById("w-bot-token-label").textContent = t("w_bot_token_label")
-  document.getElementById("w-admin-chat-id-label").textContent = t("w_admin_label")
-  document.getElementById("wizard-advanced-summary").textContent = t("wizard_advanced")
-  document.getElementById("w-worker-name-label").textContent = t("w_worker_name_label")
-  document.getElementById("w-kv-namespace-title-label").textContent = t("w_kv_namespace_title_label")
-  document.getElementById("w-d1-database-name-label").textContent = t("w_d1_database_name_label")
-  document.getElementById("w-worker-url-label").textContent = t("w_worker_label")
-  document.getElementById("w-verify-public-base-url-label").textContent = t("w_verify_base_label")
-  document.getElementById("w-panel-url-label").textContent = t("w_panel_label")
-  document.getElementById("w-pages-project-name-label").textContent = t("w_pages_project_label")
-  document.getElementById("w-pages-branch-label").textContent = t("w_pages_branch_label")
-  document.getElementById("w-open-panel-in-client-text").textContent = t("w_open_panel")
-  document.getElementById("cancel-wizard").textContent = t("cancel")
-  document.getElementById("confirm-wizard").textContent = t("start_deploy")
-
-  document.getElementById("f-name").placeholder = t("f_name_ph")
-  document.getElementById("f-token").placeholder = t("f_token_ph")
-  document.getElementById("f-account-id").placeholder = t("f_account_id_ph")
-  document.getElementById("f-email").placeholder = t("f_email_ph")
-  document.getElementById("w-bot-token").placeholder = t("w_bot_token_ph")
-  document.getElementById("w-admin-chat-id").placeholder = t("w_admin_ph")
-  document.getElementById("w-worker-name").placeholder = t("w_worker_name_ph")
-  document.getElementById("w-kv-namespace-title").placeholder = t("w_kv_namespace_title_ph")
-  document.getElementById("w-d1-database-name").placeholder = t("w_d1_database_name_ph")
-  document.getElementById("w-verify-public-base-url").placeholder = t("w_verify_base_ph")
-  document.getElementById("w-panel-url").placeholder = t("w_panel_ph")
-  document.getElementById("w-pages-project-name").placeholder = t("w_pages_project_ph")
-  document.getElementById("w-pages-branch").placeholder = t("w_pages_branch_ph")
-
-  langToggleBtn.textContent = t("language_toggle")
-  themeToggleBtn.textContent = currentTheme === "dark" ? t("theme_toggle_light") : t("theme_toggle_dark")
-  statusText.textContent = t(statusKey)
-  updateRepoRootLabel()
-  renderEmbeddedPanel(false)
-  if (currentActiveAccount) {
-    renderAccounts()
-  }
+  byId("repo-root-display").textContent = repoRootPath ? `${t("repo_prefix")}: ${repoRootPath}` : ""
 }
 
 function normalizeHttpUrl(raw) {
@@ -911,18 +1515,14 @@ function normalizeD1DatabaseName(raw) {
 function getDeployedPanelUrl(result) {
   if (!result) return ""
   if (typeof result.panelUrl === "string") return normalizePanelUrl(result.panelUrl)
-  if (result.panel && typeof result.panel.panelUrl === "string") {
-    return normalizePanelUrl(result.panel.panelUrl)
-  }
+  if (result.panel && typeof result.panel.panelUrl === "string") return normalizePanelUrl(result.panel.panelUrl)
   return ""
 }
 
 function getDeployedPanelEntryUrl(result) {
   if (!result) return ""
   if (typeof result.panelEntryUrl === "string") return normalizeHttpUrl(result.panelEntryUrl)
-  if (result.panel && typeof result.panel.panelEntryUrl === "string") {
-    return normalizeHttpUrl(result.panel.panelEntryUrl)
-  }
+  if (result.panel && typeof result.panel.panelEntryUrl === "string") return normalizeHttpUrl(result.panel.panelEntryUrl)
   return ""
 }
 
@@ -938,12 +1538,14 @@ function buildPanelEntryUrl(workerUrl) {
 
 function getActivePanelUrl() {
   const prefs = currentActiveAccount?.deployPrefs || {}
-  return normalizePanelUrl(prefs.panelUrl) || normalizePanelUrl(prefs.panelEntryUrl) || normalizePanelUrl(buildPanelEntryUrl(prefs.workerUrl))
+  return normalizePanelUrl(prefs.panelEntryUrl) || normalizePanelUrl(prefs.panelUrl) || normalizePanelUrl(buildPanelEntryUrl(prefs.workerUrl))
 }
 
 function getSavedDeployParams() {
   const prefs = currentActiveAccount?.deployPrefs || {}
   return {
+    botToken: String(prefs.botToken || "").trim(),
+    adminChatId: String(prefs.adminChatId || "").trim(),
     workerName: normalizeWorkerName(prefs.workerName || "") || "telegram-private-chatbot",
     kvNamespaceTitle: normalizeKvNamespaceTitle(prefs.kvNamespaceTitle || prefs.kvNamespaceName || "") || "tg-bot-kv",
     d1DatabaseName: normalizeD1DatabaseName(prefs.d1DatabaseName || "") || "tg-bot-history",
@@ -953,80 +1555,97 @@ function getSavedDeployParams() {
     panelEntryUrl: String(prefs.panelEntryUrl || "").trim(),
     pagesProjectName: normalizePagesProjectName(prefs.pagesProjectName || "") || "tg-admin-panel",
     pagesBranch: normalizePagesBranch(prefs.pagesBranch || "main"),
+    deployPanel: prefs.deployPanel !== false,
+    openPanelInClient: Boolean(prefs.openPanelInClient ?? true),
   }
 }
 
-function applyWizardPrefsFromActiveAccount() {
+function applyDeployFormFromActiveAccount() {
   const prefs = currentActiveAccount?.deployPrefs || {}
-  document.getElementById("w-bot-token").value = prefs.botToken || ""
-  document.getElementById("w-admin-chat-id").value = prefs.adminChatId || ""
-  wizardWorkerName.value = normalizeWorkerName(prefs.workerName || "") || "telegram-private-chatbot"
-  wizardKvNamespaceTitle.value = normalizeKvNamespaceTitle(prefs.kvNamespaceTitle || prefs.kvNamespaceName || "") || "tg-bot-kv"
-  wizardD1DatabaseName.value = normalizeD1DatabaseName(prefs.d1DatabaseName || "") || "tg-bot-history"
-  wizardWorkerUrl.value = prefs.workerUrl || ""
-  wizardVerifyPublicBaseUrl.value = normalizeHttpUrl(prefs.verifyPublicBaseUrl || "")
-  wizardPanelUrl.value = normalizePanelUrl(prefs.panelUrl)
-  wizardPagesProjectName.value = normalizePagesProjectName(prefs.pagesProjectName || "") || "tg-admin-panel"
-  wizardPagesBranch.value = normalizePagesBranch(prefs.pagesBranch || "main")
-  wizardOpenPanelInClient.checked = Boolean(prefs.openPanelInClient ?? prefs.useBuiltinPanel)
+  deployBotToken.value = prefs.botToken || ""
+  deployAdminChatId.value = prefs.adminChatId || ""
+  deployWorkerName.value = normalizeWorkerName(prefs.workerName || "") || "telegram-private-chatbot"
+  deployKvNamespaceTitle.value = normalizeKvNamespaceTitle(prefs.kvNamespaceTitle || prefs.kvNamespaceName || "") || "tg-bot-kv"
+  deployD1DatabaseName.value = normalizeD1DatabaseName(prefs.d1DatabaseName || "") || "tg-bot-history"
+  deployWorkerUrl.value = prefs.workerUrl || ""
+  deployVerifyPublicBaseUrl.value = normalizeHttpUrl(prefs.verifyPublicBaseUrl || "")
+  deployPanelUrl.value = normalizePanelUrl(prefs.panelUrl)
+  deployPagesProjectName.value = normalizePagesProjectName(prefs.pagesProjectName || "") || "tg-admin-panel"
+  deployPagesBranch.value = normalizePagesBranch(prefs.pagesBranch || "main")
+  deployPanelSelect.value = (prefs.deployPanel === false) ? "0" : "1"
+  refreshDeployPanelFieldsState()
 }
 
-function getWizardParams() {
+function getDeployFormParams() {
   return {
-    botToken: document.getElementById("w-bot-token").value.trim(),
-    adminChatId: document.getElementById("w-admin-chat-id").value.trim(),
-    workerName: normalizeWorkerName(wizardWorkerName.value) || "telegram-private-chatbot",
-    kvNamespaceTitle: normalizeKvNamespaceTitle(wizardKvNamespaceTitle.value) || "tg-bot-kv",
-    d1DatabaseName: normalizeD1DatabaseName(wizardD1DatabaseName.value) || "tg-bot-history",
-    workerUrl: wizardWorkerUrl.value.trim(),
-    verifyPublicBaseUrl: normalizeHttpUrl(wizardVerifyPublicBaseUrl.value),
-    panelUrl: normalizePanelUrl(wizardPanelUrl.value),
-    pagesProjectName: normalizePagesProjectName(wizardPagesProjectName.value) || "tg-admin-panel",
-    pagesBranch: normalizePagesBranch(wizardPagesBranch.value),
-    openPanelInClient: Boolean(wizardOpenPanelInClient.checked),
+    botToken: deployBotToken.value.trim(),
+    adminChatId: deployAdminChatId.value.trim(),
+    workerName: normalizeWorkerName(deployWorkerName.value) || "telegram-private-chatbot",
+    kvNamespaceTitle: normalizeKvNamespaceTitle(deployKvNamespaceTitle.value) || "tg-bot-kv",
+    d1DatabaseName: normalizeD1DatabaseName(deployD1DatabaseName.value) || "tg-bot-history",
+    workerUrl: deployWorkerUrl.value.trim(),
+    verifyPublicBaseUrl: normalizeHttpUrl(deployVerifyPublicBaseUrl.value),
+    panelUrl: normalizePanelUrl(deployPanelUrl.value),
+    pagesProjectName: normalizePagesProjectName(deployPagesProjectName.value) || "tg-admin-panel",
+    pagesBranch: normalizePagesBranch(deployPagesBranch.value),
+    deployPanel: deployPanelSelect.value === "1",
+    openPanelInClient: true,
   }
 }
 
-function clampTerminalHeight(value) {
-  const numeric = Number.isFinite(value) ? value : TERMINAL_DEFAULT_HEIGHT
-  const mainHeight = mainEl.getBoundingClientRect().height
-  const maxAllowed = mainHeight > 0
-    ? Math.max(TERMINAL_MIN_HEIGHT, Math.floor(mainHeight * 0.7))
-    : 9999
-  return Math.max(TERMINAL_MIN_HEIGHT, Math.min(numeric, maxAllowed))
+function refreshDeployPanelFieldsState() {
+  const enabled = deployPanelSelect.value === "1"
+  deployPagesProjectName.disabled = !enabled || running
+  deployPagesBranch.disabled = !enabled || running
 }
 
-function applyTerminalHeight(height, persist) {
-  const clamped = clampTerminalHeight(height)
-  mainEl.style.setProperty("--terminal-height", `${clamped}px`)
-  if (persist) {
-    localStorage.setItem(UI_TERMINAL_HEIGHT_KEY, String(clamped))
+function positionNavIndicator(immediate = false) {
+  const active = navButtons.find((button) => button.classList.contains("active"))
+  if (!active || !navIndicator) return
+  const left = active.offsetLeft
+  const width = active.offsetWidth
+  const oldTransition = navIndicator.style.transition
+  if (immediate) navIndicator.style.transition = "none"
+  navIndicator.style.width = `${width}px`
+  navIndicator.style.transform = `translate3d(${left}px,0,0)`
+  if (immediate) {
+    void navIndicator.offsetWidth
+    navIndicator.style.transition = oldTransition
   }
-  return clamped
 }
 
-function getCurrentTerminalHeight() {
-  const cssValue = parseFloat(getComputedStyle(mainEl).getPropertyValue("--terminal-height"))
-  return Number.isFinite(cssValue) && cssValue > 0 ? cssValue : TERMINAL_DEFAULT_HEIGHT
+function updatePanelEmbedHeight() {
+  if (!panelWrap || activeView !== "panel") return
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0
+  if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) return
+  const rect = panelWrap.getBoundingClientRect()
+  const safeBottomGap = 18
+  const minHeight = 360
+  const available = Math.floor(viewportHeight - rect.top - safeBottomGap)
+  const targetHeight = Math.max(minHeight, available)
+  panelWrap.style.height = `${targetHeight}px`
+  panelWrap.style.maxHeight = `${targetHeight}px`
 }
 
-function showEmbeddedPanelLayout() {
-  if (terminalHeightBeforePanel === null) {
-    terminalHeightBeforePanel = getCurrentTerminalHeight()
+function setView(view, immediate = false) {
+  activeView = view
+  viewPanes.forEach((pane) => {
+    const active = pane.dataset.view === view
+    pane.classList.toggle("hidden", !active)
+    pane.classList.toggle("active", active)
+  })
+  navButtons.forEach((button) => {
+    const active = button.dataset.view === view
+    button.classList.toggle("active", active)
+    if (active) button.setAttribute("aria-current", "page")
+    else button.removeAttribute("aria-current")
+  })
+  positionNavIndicator(immediate)
+  if (view === "panel") {
+    renderEmbeddedPanel(false)
+    window.requestAnimationFrame(() => updatePanelEmbedHeight())
   }
-  const compactHeight = Math.min(terminalHeightBeforePanel, TERMINAL_PANEL_OPEN_HEIGHT)
-  applyTerminalHeight(compactHeight, false)
-  mainEl.classList.remove("terminal-fullsize")
-  panelResizer.classList.remove("hidden")
-}
-
-function hideEmbeddedPanelLayout() {
-  mainEl.classList.add("terminal-fullsize")
-  panelResizer.classList.add("hidden")
-  if (terminalHeightBeforePanel !== null) {
-    applyTerminalHeight(terminalHeightBeforePanel, false)
-    terminalHeightBeforePanel = null
-  }
+  if (view === "home") refreshDashboard(false)
 }
 
 function renderEmbeddedPanel(forceReload = false) {
@@ -1046,16 +1665,15 @@ function renderEmbeddedPanel(forceReload = false) {
 
   panelEmpty.classList.add("hidden")
   panelFrame.classList.remove("hidden")
-
   if (forceReload || panelFrame.dataset.url !== panelUrl) {
     panelFrame.src = panelUrl
     panelFrame.dataset.url = panelUrl
   }
+  if (activeView === "panel") window.requestAnimationFrame(() => updatePanelEmbedHeight())
 }
 
 function openEmbeddedPanel(forceReload = false) {
-  panelWrap.classList.remove("hidden")
-  showEmbeddedPanelLayout()
+  setView("panel")
   renderEmbeddedPanel(forceReload)
 }
 
@@ -1064,7 +1682,452 @@ function setStatus(text, isRunning) {
   statusText.textContent = t(text)
   statusDot.className = "status-dot" + (isRunning ? " running" : "")
   running = isRunning
-  cards.forEach((c) => c.classList.toggle("disabled", isRunning))
+  if (deploySaveBtn) deploySaveBtn.disabled = isRunning
+  if (deployClearLogsBtn) deployClearLogsBtn.disabled = isRunning
+  if (deployOpenPanelBtn) deployOpenPanelBtn.disabled = isRunning
+  if (deployStartBtn) deployStartBtn.disabled = isRunning
+  if (deployPanelSelect) deployPanelSelect.disabled = isRunning
+  ;[
+    deployWorkerName,
+    deployKvNamespaceTitle,
+    deployD1DatabaseName,
+    deployWorkerUrl,
+    deployVerifyPublicBaseUrl,
+    deployPagesProjectName,
+    deployPagesBranch,
+    deployBotToken,
+    deployAdminChatId,
+  ].forEach((el) => {
+    if (el) el.disabled = isRunning
+  })
+  refreshDeployPanelFieldsState()
+  if (dashboardRefreshBtn) dashboardRefreshBtn.disabled = isRunning || dashboardLoading
+}
+
+function formatNumber(value) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return t("dash_na")
+  return new Intl.NumberFormat(currentLocale === "en" ? "en-US" : "zh-CN").format(Math.max(0, Math.round(value)))
+}
+
+function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return t("dash_na")
+  const value = Math.max(0, Number(bytes))
+  if (value < 1024) return `${Math.round(value)} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+function formatPercent(used, total) {
+  if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) return t("dash_na")
+  const pct = Math.max(0, Math.min(100, (used / total) * 100))
+  return `${Math.round(pct)}%`
+}
+
+function setDonut(used, total, ringId, pctId) {
+  const ring = byId(ringId)
+  const pct = byId(pctId)
+  const unknown = !Number.isFinite(used) || !Number.isFinite(total) || total <= 0
+  if (!ring || !pct) return
+  if (unknown) {
+    ring.style.strokeDasharray = "100"
+    ring.style.strokeDashoffset = "100"
+    ring.classList.add("unknown")
+    pct.textContent = t("dash_na")
+    return
+  }
+  const ratio = Math.max(0, Math.min(1, used / total))
+  const percent = Math.round(ratio * 100)
+  ring.style.strokeDasharray = "100"
+  ring.style.strokeDashoffset = `${(100 - percent).toFixed(2)}`
+  ring.classList.remove("unknown")
+  pct.textContent = `${percent}%`
+}
+
+function clearDashboardExtras() {
+  byId("dash-mini-kv").innerHTML = ""
+  byId("dash-mini-d1").innerHTML = ""
+  byId("dash-extra-kv").innerHTML = ""
+  byId("dash-extra-d1").innerHTML = ""
+  byId("dash-extra-pages").innerHTML = ""
+}
+
+function appendMiniDonut(container, options) {
+  if (!container) return
+  const kind = options.kind === "bytes" ? "bytes" : "num"
+  const used = Number.isFinite(options.used) ? Math.max(0, Number(options.used)) : null
+  const total = Number.isFinite(options.total) && Number(options.total) > 0 ? Number(options.total) : 0
+  const ratio = used !== null && total > 0 ? Math.max(0, Math.min(1, used / total)) : null
+  const rawPercent = ratio === null ? 0 : ratio * 100
+  const visualPercent = ratio !== null && rawPercent > 0 ? Math.max(rawPercent, 1.2) : rawPercent
+
+  const wrap = document.createElement("div")
+  wrap.className = `dash-mini-donut ${options.className || ""}`.trim()
+  if (ratio === null) wrap.classList.add("unknown")
+
+  const ringWrap = document.createElement("div")
+  ringWrap.className = "dash-mini-ring"
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg")
+  svg.setAttribute("viewBox", "0 0 40 40")
+  svg.setAttribute("aria-hidden", "true")
+
+  const track = document.createElementNS("http://www.w3.org/2000/svg", "circle")
+  track.setAttribute("class", "dash-mini-track")
+  track.setAttribute("cx", "20")
+  track.setAttribute("cy", "20")
+  track.setAttribute("r", "14")
+
+  const ring = document.createElementNS("http://www.w3.org/2000/svg", "circle")
+  ring.setAttribute("class", "dash-mini-progress")
+  ring.setAttribute("cx", "20")
+  ring.setAttribute("cy", "20")
+  ring.setAttribute("r", "14")
+  ring.setAttribute("pathLength", "100")
+  ring.style.strokeDasharray = "100"
+  ring.style.strokeDashoffset = `${(100 - Math.min(100, visualPercent)).toFixed(2)}`
+
+  svg.append(track, ring)
+
+  const pct = document.createElement("span")
+  pct.className = "dash-mini-pct"
+  pct.textContent = formatPercent(used, total)
+  ringWrap.append(svg, pct)
+
+  const legend = document.createElement("div")
+  legend.className = "dash-mini-legend"
+  const labelLine = document.createElement("div")
+  labelLine.className = "dash-mini-label"
+  const dot = document.createElement("i")
+  dot.className = "dash-mini-dot"
+  dot.setAttribute("aria-hidden", "true")
+  const label = document.createElement("span")
+  label.textContent = t(options.labelKey)
+  labelLine.append(dot, label)
+
+  const value = document.createElement("b")
+  const usedText = kind === "bytes" ? formatBytes(used) : formatNumber(used)
+  const totalText = kind === "bytes" ? formatBytes(total) : formatNumber(total)
+  value.textContent = `${usedText} / ${totalText}`
+  legend.append(labelLine, value)
+
+  wrap.append(ringWrap, legend)
+  container.appendChild(wrap)
+}
+
+function appendProgressLine(container, label, used, total, kind = "num") {
+  const row = document.createElement("div")
+  row.className = "dash-progress"
+
+  const head = document.createElement("div")
+  head.className = "dash-progress-head"
+
+  const labelNode = document.createElement("span")
+  labelNode.textContent = label
+
+  const valueNode = document.createElement("b")
+  valueNode.textContent = `${kind === "bytes" ? formatBytes(used) : formatNumber(used)} / ${kind === "bytes" ? formatBytes(total) : formatNumber(total)}`
+
+  head.append(labelNode, valueNode)
+
+  const meter = document.createElement("div")
+  meter.className = "dash-progress-meter"
+  const fill = document.createElement("span")
+  fill.className = "dash-progress-fill"
+  const valid = Number.isFinite(used) && Number.isFinite(total) && total > 0
+  const ratio = valid ? Math.max(0, Math.min(1, used / total)) : 0
+  fill.style.width = `${Math.max(0, Math.min(100, ratio * 100))}%`
+  meter.appendChild(fill)
+
+  const pct = document.createElement("small")
+  pct.textContent = formatPercent(used, total)
+
+  row.append(head, meter, pct)
+  container.appendChild(row)
+}
+
+function renderDashboardExtras(snapshot) {
+  clearDashboardExtras()
+  if (!snapshot) return
+
+  const kvMini = byId("dash-mini-kv")
+  appendMiniDonut(kvMini, {
+    labelKey: "dash_kv_mini_namespaces",
+    used: snapshot.kvNamespaceCount,
+    total: DASHBOARD_TOTALS.kvNamespaceCount,
+    className: "is-kv-namespaces",
+    kind: "num",
+  })
+  appendMiniDonut(kvMini, {
+    labelKey: "dash_kv_mini_storage",
+    used: snapshot.kvStorageBytes,
+    total: KV_LIMITS.storage,
+    className: "is-kv-storage",
+    kind: "bytes",
+  })
+  appendMiniDonut(kvMini, {
+    labelKey: "dash_kv_mini_reads",
+    used: snapshot.kvReadRequests24h,
+    total: KV_LIMITS.reads,
+    className: "is-kv-read",
+    kind: "num",
+  })
+  appendMiniDonut(kvMini, {
+    labelKey: "dash_kv_mini_writes",
+    used: snapshot.kvWriteRequests24h,
+    total: KV_LIMITS.writes,
+    className: "is-kv-write",
+    kind: "num",
+  })
+
+  const kvNode = byId("dash-extra-kv")
+  appendProgressLine(kvNode, t("dash_kv_quota_storage"), snapshot.kvStorageBytes, KV_LIMITS.storage, "bytes")
+  appendProgressLine(kvNode, t("dash_kv_quota_reads"), snapshot.kvReadRequests24h, KV_LIMITS.reads, "num")
+  appendProgressLine(kvNode, t("dash_kv_quota_writes"), snapshot.kvWriteRequests24h, KV_LIMITS.writes, "num")
+
+  const d1Mini = byId("dash-mini-d1")
+  appendMiniDonut(d1Mini, {
+    labelKey: "dash_d1_mini_databases",
+    used: snapshot.d1DatabaseCount,
+    total: DASHBOARD_TOTALS.d1DatabaseCount,
+    className: "is-d1-databases",
+    kind: "num",
+  })
+  appendMiniDonut(d1Mini, {
+    labelKey: "dash_d1_mini_storage",
+    used: snapshot.d1StorageBytes,
+    total: D1_LIMITS.storage,
+    className: "is-d1-storage",
+    kind: "bytes",
+  })
+  appendMiniDonut(d1Mini, {
+    labelKey: "dash_d1_mini_reads",
+    used: snapshot.d1ReadRequests24h,
+    total: D1_LIMITS.reads,
+    className: "is-d1-read",
+    kind: "num",
+  })
+  appendMiniDonut(d1Mini, {
+    labelKey: "dash_d1_mini_writes",
+    used: snapshot.d1WriteRequests24h,
+    total: D1_LIMITS.writes,
+    className: "is-d1-write",
+    kind: "num",
+  })
+
+  const d1Node = byId("dash-extra-d1")
+  appendProgressLine(d1Node, t("dash_d1_quota_storage"), snapshot.d1StorageBytes, D1_LIMITS.storage, "bytes")
+  appendProgressLine(d1Node, t("dash_d1_quota_reads"), snapshot.d1ReadRequests24h, D1_LIMITS.reads, "num")
+  appendProgressLine(d1Node, t("dash_d1_quota_writes"), snapshot.d1WriteRequests24h, D1_LIMITS.writes, "num")
+
+  const databases = Array.isArray(snapshot.d1DatabasesUsage) ? snapshot.d1DatabasesUsage : []
+  if (databases.length > 0) {
+    const title = document.createElement("p")
+    title.className = "dash-extra-title"
+    title.textContent = t("dash_d1_top_title")
+    d1Node.appendChild(title)
+  }
+  databases.slice(0, 3).forEach((db) => {
+    const row = document.createElement("p")
+    row.className = "dash-extra-db"
+    const name = db.name || db.id || "-"
+    row.textContent = `${name} · ${formatBytes(db.fileSizeBytes)} · R ${formatNumber(db.rowsRead24h)} / W ${formatNumber(db.rowsWritten24h)}`
+    d1Node.appendChild(row)
+  })
+  if (databases.length > 3) {
+    const more = document.createElement("p")
+    more.className = "dash-extra-db muted"
+    more.textContent = fmt(t("dash_d1_more"), { count: databases.length - 3 })
+    d1Node.appendChild(more)
+  }
+
+  const pagesNode = byId("dash-extra-pages")
+  const workerLine = document.createElement("p")
+  workerLine.className = "dash-extra-db"
+  workerLine.textContent = `Worker: ${snapshot.workerName || t("dash_na")}`
+  pagesNode.appendChild(workerLine)
+}
+
+function renderDashboard(snapshot, externalWarning = "", missingConfig = false) {
+  DASHBOARD_BINDINGS.forEach((binding) => {
+    const usedRaw = snapshot && Number.isFinite(snapshot[binding.key]) ? Number(snapshot[binding.key]) : null
+    const total = DASHBOARD_TOTALS[binding.key]
+    byId(binding.usedId).textContent = formatNumber(usedRaw)
+    byId(binding.totalId).textContent = formatNumber(total)
+    setDonut(usedRaw, total, binding.ringId, binding.pctId)
+  })
+
+  renderDashboardExtras(snapshot)
+
+  if (!snapshot) {
+    dashboardMeta.textContent = missingConfig ? t("dashboard_missing") : `${t("dashboard_updated_at")}: ${t("dash_na")}`
+    if (externalWarning) {
+      dashboardWarning.textContent = `${t("dashboard_warning")}: ${externalWarning}`
+      dashboardWarning.classList.remove("hidden")
+    } else {
+      dashboardWarning.classList.add("hidden")
+      dashboardWarning.textContent = ""
+    }
+    return
+  }
+
+  const locale = currentLocale === "en" ? "en-US" : "zh-CN"
+  const timeText = new Date(snapshot.fetchedAt || Date.now()).toLocaleString(locale, { hour12: false })
+  dashboardMeta.textContent = `${t("dashboard_updated_at")}: ${timeText}`
+  const warnings = [...(Array.isArray(snapshot.warnings) ? snapshot.warnings : [])]
+  if (externalWarning) warnings.push(externalWarning)
+  if (warnings.length > 0) {
+    dashboardWarning.textContent = `${t("dashboard_warning")}: ${warnings.join(" | ")}`
+    dashboardWarning.classList.remove("hidden")
+  } else {
+    dashboardWarning.classList.add("hidden")
+    dashboardWarning.textContent = ""
+  }
+}
+
+function setDashboardLoading(loading) {
+  dashboardLoading = loading
+  if (dashboardRefreshBtn) dashboardRefreshBtn.disabled = running || loading
+  if (dashboardRefreshBtn) dashboardRefreshBtn.textContent = loading ? t("dashboard_updating") : t("dashboard_refresh")
+}
+
+async function refreshDashboard(force = false) {
+  if (activeView !== "home") return
+  if (!currentActiveAccount) {
+    renderDashboard(null)
+    return
+  }
+
+  if (!currentActiveAccount.apiToken || !currentActiveAccount.accountId) {
+    dashboardCacheByAccountId.delete(currentActiveAccount.id)
+    renderDashboard(null, "", true)
+    return
+  }
+
+  const cached = dashboardCacheByAccountId.get(currentActiveAccount.id) || null
+  if (!force && cached) {
+    const ageMs = Date.now() - Date.parse(cached.fetchedAt || "")
+    if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs < DASHBOARD_CACHE_TTL_MS) {
+      renderDashboard(cached)
+      return
+    }
+  }
+
+  const requestId = ++dashboardRequestSeq
+  setDashboardLoading(true)
+  try {
+    const response = await window.api.dashboardSnapshot()
+    if (!response?.ok || !response?.snapshot) {
+      throw new Error(response?.reason || "dashboard snapshot failed")
+    }
+    dashboardCacheByAccountId.set(currentActiveAccount.id, response.snapshot)
+    if (requestId !== dashboardRequestSeq) return
+    renderDashboard(response.snapshot)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (requestId !== dashboardRequestSeq) return
+    if (cached) renderDashboard(cached, message)
+    else renderDashboard(null, message)
+  } finally {
+    if (requestId === dashboardRequestSeq) setDashboardLoading(false)
+  }
+}
+
+function applyLocale() {
+  document.documentElement.lang = currentLocale
+  document.title = t("app_title")
+  setText("main-header", "app_title")
+  setText("sidebar-title", "sidebar_title")
+  setText("open-add-account-text", "add_account_btn")
+  setText("clear-data-btn", "clear_local_data")
+  setText("no-account-tip", "no_account_tip")
+  setText("nav-home-label", "nav_home")
+  setText("nav-deploy-label", "nav_deploy")
+  setText("nav-panel-label", "nav_panel")
+  setText("nav-logs-label", "nav_logs")
+  byId("floating-nav").setAttribute("aria-label", t("nav_aria"))
+
+  setText("dashboard-title", "dashboard_title")
+  setText("dashboard-desc", "dashboard_desc")
+  setText("dashboard-refresh-btn", "dashboard_refresh")
+  setText("dash-label-requests", "dash_label_requests")
+  setText("dash-label-workers", "dash_label_workers")
+  setText("dash-label-kv", "dash_label_kv")
+  setText("dash-label-d1", "dash_label_d1")
+  setText("dash-label-pages", "dash_label_pages")
+  setText("dash-used-text-requests", "dash_used")
+  setText("dash-total-text-requests", "dash_total")
+  setText("dash-used-text-workers", "dash_used")
+  setText("dash-total-text-workers", "dash_total")
+  setText("dash-used-text-kv", "dash_used")
+  setText("dash-total-text-kv", "dash_total")
+  setText("dash-used-text-d1", "dash_used")
+  setText("dash-total-text-d1", "dash_total")
+  setText("dash-used-text-pages", "dash_used")
+  setText("dash-total-text-pages", "dash_total")
+
+  setText("deploy-title", "deploy_title")
+  setText("deploy-desc", "deploy_desc")
+  setText("group-cf-title", "group_cf")
+  setText("group-bot-title", "group_bot")
+  setText("label-worker-name", "label_worker_name")
+  setText("label-kv-namespace-title", "label_kv")
+  setText("label-d1-database-name", "label_d1")
+  setText("label-worker-url", "label_worker_url")
+  setText("label-verify-public-base-url", "label_verify_url")
+  setText("label-panel-url", "label_panel_url")
+  setText("label-deploy-panel", "switch_panel")
+  setText("d-deploy-panel-on", "switch_panel_on")
+  setText("d-deploy-panel-off", "switch_panel_off")
+  setText("label-pages-project-name", "label_pages_project")
+  setText("label-pages-branch", "label_pages_branch")
+  setText("label-bot-token", "label_bot_token")
+  setText("label-admin-chat-id", "label_admin_chat")
+  setText("deploy-save-btn", "btn_save")
+  setText("deploy-open-panel-btn", "btn_open_panel")
+  setText("deploy-start-btn", "btn_deploy")
+  setText("panel-title", "panel_title")
+  setText("panel-refresh-btn", "panel_refresh")
+  setText("panel-open-external-btn", "panel_open_browser")
+  setText("panel-hide-btn", "panel_hide")
+  setText("embedded-panel-empty", "panel_empty")
+  setText("clear-btn", "clear_logs")
+  setText("add-modal-title", "add_modal_title")
+  setText("f-name-label", "f_name_label")
+  setText("f-token-label", "f_token_label")
+  setText("f-account-id-label", "f_account_id_label")
+  setText("f-email-label", "f_email_label")
+  setText("cancel-add", "cancel")
+  setText("confirm-add", "add")
+  byId("f-name").placeholder = t("f_name_ph")
+  byId("f-token").placeholder = t("f_token_ph")
+  byId("f-account-id").placeholder = t("f_account_id_ph")
+  byId("f-email").placeholder = t("f_email_ph")
+  deployWorkerName.placeholder = t("ph_worker_name")
+  deployKvNamespaceTitle.placeholder = t("ph_kv")
+  deployD1DatabaseName.placeholder = t("ph_d1")
+  deployWorkerUrl.placeholder = t("ph_worker_url")
+  deployVerifyPublicBaseUrl.placeholder = t("ph_verify_url")
+  deployPanelUrl.placeholder = t("ph_panel_url")
+  deployPagesProjectName.placeholder = t("ph_pages_project")
+  deployPagesBranch.placeholder = t("ph_pages_branch")
+  deployBotToken.placeholder = t("ph_bot_token")
+  deployAdminChatId.placeholder = t("ph_admin_chat")
+
+  langToggleBtn.textContent = t("language_toggle")
+  themeToggleBtn.textContent = currentTheme === "dark" ? t("theme_toggle_light") : t("theme_toggle_dark")
+  statusText.textContent = t(statusKey)
+  refreshDeployPanelFieldsState()
+  updateRepoRootLabel()
+
+  if (currentActiveAccount) {
+    renderEmbeddedPanel(false)
+    const cached = dashboardCacheByAccountId.get(currentActiveAccount.id) || null
+    renderDashboard(cached)
+  } else {
+    renderDashboard(null)
+  }
+  positionNavIndicator(true)
 }
 
 window.api.onOutput((data) => {
@@ -1072,7 +2135,7 @@ window.api.onOutput((data) => {
   output.scrollTop = output.scrollHeight
 })
 
-document.getElementById("clear-btn").addEventListener("click", () => {
+byId("clear-btn").addEventListener("click", () => {
   output.textContent = ""
   setStatus("status_idle", false)
 })
@@ -1085,12 +2148,33 @@ themeToggleBtn.addEventListener("click", () => {
   setTheme(currentTheme === "dark" ? "light" : "dark")
 })
 
+if (dashboardRefreshBtn) {
+  dashboardRefreshBtn.addEventListener("click", () => {
+    refreshDashboard(true)
+  })
+}
+
+navButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const nextView = String(button.dataset.view || "").trim()
+    if (!nextView || nextView === activeView) return
+    setView(nextView)
+  })
+})
+
+window.addEventListener("resize", () => {
+  positionNavIndicator(true)
+  if (activeView === "panel") updatePanelEmbedHeight()
+})
+
 async function execAction(action, params) {
   output.textContent = ""
   setStatus("status_running", true)
   try {
     const result = await window.api.runAction(action, params)
     setStatus("status_done", false)
+    if (currentActiveAccount) dashboardCacheByAccountId.delete(currentActiveAccount.id)
+    if (activeView === "home") refreshDashboard(true)
     return result
   } catch (e) {
     output.textContent += `\n${t("error_prefix")}: ${e.message}`
@@ -1099,63 +2183,101 @@ async function execAction(action, params) {
   }
 }
 
-cards.forEach((card) => {
-  card.addEventListener("click", async () => {
-    if (running) return
-    const action = card.dataset.action
+async function saveDeployForm(showStatus = false) {
+  const params = getDeployFormParams()
+  await window.api.accounts.saveDeployPrefs(params)
+  if (showStatus) {
+    setStatus("status_saved", false)
+    output.textContent += `${t("status_saved")}\n`
+  }
+}
 
-    if (action === "open-panel") {
-      openEmbeddedPanel(true)
-      return
-    }
+async function onDeployStart() {
+  if (running) return
+  const params = getDeployFormParams()
+  if (!params.botToken || !params.adminChatId) {
+    alert(t("missing_required_alert"))
+    return
+  }
+  try {
+    await saveDeployForm(false)
+  } catch {}
 
-    if (action === "first-deploy") {
-      applyWizardPrefsFromActiveAccount()
-      wizardModal.classList.remove("hidden")
-      wizardModal.dataset.action = action
-      return
-    }
+  output.textContent = ""
+  const action = params.deployPanel ? "first-deploy" : "deploy-worker"
+  let result = null
+  try {
+    result = await execAction(action, params)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    setStatus(`${t("status_deploy_fail")}: ${message}`, false)
+    return
+  }
 
-    if (action === "deploy-panel") {
-      const params = getSavedDeployParams()
-      let result = null
-      try {
-        result = await execAction(action, params)
-      } catch {
-        return
-      }
+  const deployedPanelUrl = getDeployedPanelUrl(result)
+  const deployedPanelEntryUrl = getDeployedPanelEntryUrl(result)
+  const mergedPrefs = {
+    ...params,
+    panelUrl: deployedPanelUrl || params.panelUrl,
+    panelEntryUrl: deployedPanelEntryUrl || buildPanelEntryUrl(params.workerUrl) || deployedPanelUrl || params.panelUrl,
+  }
+  try {
+    await window.api.accounts.saveDeployPrefs(mergedPrefs)
+    await renderAccounts()
+  } catch {}
 
-      const deployedPanelUrl = getDeployedPanelUrl(result)
-      const deployedPanelEntryUrl = getDeployedPanelEntryUrl(result)
-      if (deployedPanelUrl) {
-        try {
-          await window.api.accounts.saveDeployPrefs({
-            panelUrl: deployedPanelUrl,
-            panelEntryUrl: deployedPanelEntryUrl || buildPanelEntryUrl(params.workerUrl) || deployedPanelUrl,
-          })
-          await renderAccounts()
-        } catch {
-          // ignore cache-save errors
-        }
-      }
+  if (mergedPrefs.openPanelInClient && getActivePanelUrl()) {
+    openEmbeddedPanel(true)
+  }
+}
 
-      if (currentActiveAccount?.deployPrefs?.openPanelInClient) {
-        openEmbeddedPanel(true)
-      }
-      return
-    }
+deploySaveBtn.addEventListener("click", async () => {
+  if (running) return
+  try {
+    await saveDeployForm(true)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    setStatus(`${t("status_save_fail")}: ${message}`, false)
+    output.textContent += `${t("status_save_fail")}: ${message}\n`
+  }
+})
 
-    try {
-      await execAction(action)
-    } catch {
-      // already printed
-    }
+deployClearLogsBtn.addEventListener("click", () => {
+  output.textContent = ""
+  setStatus("status_idle", false)
+})
+
+deployOpenPanelBtn.addEventListener("click", () => {
+  openEmbeddedPanel(true)
+})
+
+deployStartBtn.addEventListener("click", () => {
+  onDeployStart()
+})
+
+deployPanelSelect.addEventListener("change", () => {
+  refreshDeployPanelFieldsState()
+})
+
+;[
+  deployBotToken,
+  deployAdminChatId,
+  deployWorkerName,
+  deployKvNamespaceTitle,
+  deployD1DatabaseName,
+  deployWorkerUrl,
+  deployVerifyPublicBaseUrl,
+  deployPagesProjectName,
+  deployPagesBranch,
+].forEach((el) => {
+  if (!el) return
+  el.addEventListener("input", () => {
+    saveDeployForm(false).catch(() => {})
   })
 })
 
 panelHideBtn.addEventListener("click", () => {
-  panelWrap.classList.add("hidden")
-  hideEmbeddedPanelLayout()
+  setView("home")
 })
 
 panelRefreshBtn.addEventListener("click", () => {
@@ -1171,69 +2293,20 @@ panelOpenExternalBtn.addEventListener("click", () => {
   window.open(panelUrl)
 })
 
-document.getElementById("cancel-wizard").addEventListener("click", () => {
-  wizardModal.classList.add("hidden")
+byId("open-add-account").addEventListener("click", () => {
+  byId("add-account-modal").classList.remove("hidden")
 })
 
-document.getElementById("confirm-wizard").addEventListener("click", async () => {
-  const action = wizardModal.dataset.action || "first-deploy"
-  const params = getWizardParams()
-
-  if (action === "first-deploy" && (!params.botToken || !params.adminChatId)) {
-    alert(t("missing_required_alert"))
-    return
-  }
-
-  try {
-    await window.api.accounts.saveDeployPrefs(params)
-  } catch {
-    // ignore cache-save errors
-  }
-
-  wizardModal.classList.add("hidden")
-
-  let result = null
-  try {
-    result = await execAction(action, params)
-  } catch {
-    return
-  }
-
-  const deployedPanelUrl = getDeployedPanelUrl(result)
-  const deployedPanelEntryUrl = getDeployedPanelEntryUrl(result)
-  if (deployedPanelUrl) {
-    const mergedPrefs = {
-      ...params,
-      panelUrl: deployedPanelUrl,
-      panelEntryUrl: deployedPanelEntryUrl || buildPanelEntryUrl(params.workerUrl) || deployedPanelUrl,
-    }
-    try {
-      await window.api.accounts.saveDeployPrefs(mergedPrefs)
-      await renderAccounts()
-    } catch {
-      // ignore cache-save errors
-    }
-  }
-
-  if (params.openPanelInClient) {
-    openEmbeddedPanel(true)
-  }
+byId("cancel-add").addEventListener("click", () => {
+  byId("add-account-modal").classList.add("hidden")
 })
 
-document.getElementById("open-add-account").addEventListener("click", () => {
-  document.getElementById("add-account-modal").classList.remove("hidden")
-})
-
-document.getElementById("cancel-add").addEventListener("click", () => {
-  document.getElementById("add-account-modal").classList.add("hidden")
-})
-
-document.getElementById("confirm-add").addEventListener("click", async () => {
+byId("confirm-add").addEventListener("click", async () => {
   const account = {
-    name: document.getElementById("f-name").value.trim(),
-    apiToken: document.getElementById("f-token").value.trim(),
-    accountId: document.getElementById("f-account-id").value.trim(),
-    email: document.getElementById("f-email").value.trim(),
+    name: byId("f-name").value.trim(),
+    apiToken: byId("f-token").value.trim(),
+    accountId: byId("f-account-id").value.trim(),
+    email: byId("f-email").value.trim(),
   }
 
   if (!account.name || !account.apiToken || !account.accountId) {
@@ -1242,9 +2315,9 @@ document.getElementById("confirm-add").addEventListener("click", async () => {
   }
 
   await window.api.accounts.add(account)
-  document.getElementById("add-account-modal").classList.add("hidden")
+  byId("add-account-modal").classList.add("hidden")
   ;["f-name", "f-token", "f-account-id", "f-email"].forEach((id) => {
-    document.getElementById(id).value = ""
+    byId(id).value = ""
   })
   await renderAccounts()
 })
@@ -1255,8 +2328,8 @@ async function renderAccounts() {
     window.api.accounts.getActive(),
   ])
 
-  const list = document.getElementById("account-list")
-  const tip = document.getElementById("no-account-tip")
+  const list = byId("account-list")
+  const tip = byId("no-account-tip")
   tip.classList.toggle("hidden", accounts.length > 0)
 
   currentActiveAccount = accounts.find((a) => a.id === activeId) || accounts[0] || null
@@ -1272,8 +2345,7 @@ async function renderAccounts() {
         <div class="account-id">${a.email || shortId}</div>
       </div>
       <span class="account-del" data-del="${a.id}" title="${t("delete_title")}">x</span>
-    </div>
-  `
+    </div>`
     })
     .join("")
 
@@ -1294,10 +2366,15 @@ async function renderAccounts() {
     })
   })
 
-  applyWizardPrefsFromActiveAccount()
-  if (!panelWrap.classList.contains("hidden")) {
-    renderEmbeddedPanel(true)
+  applyDeployFormFromActiveAccount()
+  renderEmbeddedPanel(true)
+  if (currentActiveAccount) {
+    const cached = dashboardCacheByAccountId.get(currentActiveAccount.id) || null
+    renderDashboard(cached)
+  } else {
+    renderDashboard(null)
   }
+  if (activeView === "home") refreshDashboard(false)
 }
 
 window.api.getRepoRoot().then((root) => {
@@ -1305,69 +2382,24 @@ window.api.getRepoRoot().then((root) => {
   updateRepoRootLabel()
 })
 
-document.getElementById("clear-data-btn").addEventListener("click", async () => {
+byId("clear-data-btn").addEventListener("click", async () => {
   if (!confirm(t("clear_data_confirm"))) return
   await window.api.clearData()
+  dashboardCacheByAccountId.clear()
   await renderAccounts()
-  output.textContent = ""
+  output.textContent = `${t("data_cleared")}\n`
   setStatus("status_idle", false)
-  output.textContent += `${t("data_cleared")}\n`
-  panelWrap.classList.add("hidden")
-  hideEmbeddedPanelLayout()
+  setView("home", true)
 })
 
 const savedLocale = localStorage.getItem(UI_LOCALE_KEY)
-if (savedLocale === "en" || savedLocale === "zh") {
-  currentLocale = savedLocale
-}
+if (savedLocale === "en" || savedLocale === "zh") currentLocale = savedLocale
 const savedTheme = localStorage.getItem(UI_THEME_KEY)
-if (savedTheme === "dark" || savedTheme === "light") {
-  currentTheme = savedTheme
-}
+if (savedTheme === "dark" || savedTheme === "light") currentTheme = savedTheme
 setTheme(currentTheme)
 applyLocale()
 setStatus("status_idle", false)
-
-let resizerStartY = 0
-let resizerStartHeight = 0
-
-function handleResizerMove(e) {
-  applyTerminalHeight(resizerStartHeight + (resizerStartY - e.clientY), false)
-}
-
-function handleResizerUp() {
-  panelResizer.classList.remove("dragging")
-  document.body.style.cursor = ""
-  document.removeEventListener("mousemove", handleResizerMove)
-  document.removeEventListener("mouseup", handleResizerUp)
-  const cssValue = parseFloat(getComputedStyle(mainEl).getPropertyValue("--terminal-height"))
-  applyTerminalHeight(Number.isFinite(cssValue) ? cssValue : TERMINAL_DEFAULT_HEIGHT, true)
-}
-
-panelResizer.addEventListener("mousedown", (e) => {
-  e.preventDefault()
-  resizerStartY = e.clientY
-  const cssValue = parseFloat(getComputedStyle(mainEl).getPropertyValue("--terminal-height"))
-  resizerStartHeight = Number.isFinite(cssValue) && cssValue > 0
-    ? cssValue
-    : document.querySelector(".terminal-wrap").getBoundingClientRect().height || TERMINAL_DEFAULT_HEIGHT
-  panelResizer.classList.add("dragging")
-  document.body.style.cursor = "row-resize"
-  document.addEventListener("mousemove", handleResizerMove)
-  document.addEventListener("mouseup", handleResizerUp)
-})
-
-window.addEventListener("resize", () => {
-  const cssValue = parseFloat(getComputedStyle(mainEl).getPropertyValue("--terminal-height"))
-  if (Number.isFinite(cssValue)) applyTerminalHeight(cssValue, false)
-})
-
-const savedTerminalHeight = parseFloat(localStorage.getItem(UI_TERMINAL_HEIGHT_KEY))
-applyTerminalHeight(
-  Number.isFinite(savedTerminalHeight) && savedTerminalHeight > 0 ? savedTerminalHeight : TERMINAL_DEFAULT_HEIGHT,
-  false,
-)
-
+setView("home", true)
 renderAccounts()
 </script>
 </body>

@@ -1,6 +1,73 @@
 import axios from 'axios';
 
-const runtimeOrigin = typeof window !== 'undefined' ? window.location.origin.replace(/\/$/, '') : '';
+const WORKER_ORIGIN_QUERY_KEY = 'worker_origin';
+const WORKER_ORIGIN_STORAGE_PREFIX = 'tg_admin_worker_origin:';
+
+function normalizeHttpOrigin(value = '') {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  try {
+    const normalized = /^https?:\/\//i.test(text) ? text : `https://${text}`;
+    const url = new URL(normalized);
+    if (!/^https?:$/i.test(url.protocol)) return '';
+    return url.origin.replace(/\/$/, '');
+  } catch (error) {
+    return '';
+  }
+}
+
+function getWorkerOriginStorageKey() {
+  if (typeof window === 'undefined') return '';
+  const host = String(window.location.host || '').trim().toLowerCase();
+  if (!host) return '';
+  return `${WORKER_ORIGIN_STORAGE_PREFIX}${host}`;
+}
+
+function getStoredWorkerOrigin() {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return '';
+  const key = getWorkerOriginStorageKey();
+  if (!key) return '';
+  return normalizeHttpOrigin(localStorage.getItem(key) || '');
+}
+
+function setStoredWorkerOrigin(value = '') {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  const key = getWorkerOriginStorageKey();
+  if (!key) return;
+
+  const normalized = normalizeHttpOrigin(value);
+  if (!normalized) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(key, normalized);
+}
+
+function resolveRuntimeWorkerBaseUrl() {
+  if (typeof window === 'undefined') return '';
+  const currentOrigin = normalizeHttpOrigin(window.location.origin);
+  const search = new URLSearchParams(window.location.search);
+  const fromQuery = normalizeHttpOrigin(search.get(WORKER_ORIGIN_QUERY_KEY) || '');
+  if (fromQuery) {
+    setStoredWorkerOrigin(fromQuery);
+    return fromQuery;
+  }
+
+  const referrer = normalizeHttpOrigin(document.referrer || '');
+  if (referrer && referrer !== currentOrigin) {
+    setStoredWorkerOrigin(referrer);
+    return referrer;
+  }
+
+  const fromStorage = getStoredWorkerOrigin();
+  if (fromStorage && fromStorage !== currentOrigin) {
+    return fromStorage;
+  }
+
+  return currentOrigin;
+}
+
+const runtimeOrigin = resolveRuntimeWorkerBaseUrl();
 const baseURL = import.meta.env.VITE_WORKER_BASE_URL?.replace(/\/$/, '') || runtimeOrigin;
 const ADMIN_KEY_STORAGE = 'tg_admin_api_key';
 
@@ -133,6 +200,14 @@ export function fetchSystemConfig() {
 
 export function saveSystemConfig(payload) {
   return api.post('/admin/api/system-config', payload).then((r) => r.data);
+}
+
+export function runMaintenanceCleanup(payload = {}) {
+  return api.post('/admin/api/maintenance/cleanup', payload).then((r) => r.data);
+}
+
+export function runDeletedAccountSweep(payload = {}) {
+  return api.post('/admin/api/maintenance/deleted-account-sweep', payload).then((r) => r.data);
 }
 
 export function setWebhook() {

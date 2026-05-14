@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('api', {
   runAction: (action, params) => ipcRenderer.invoke('run-action', action, params),
+  dashboardSnapshot: () => ipcRenderer.invoke('dashboard:snapshot'),
   onOutput: (cb) => ipcRenderer.on('output', (_, data) => cb(data)),
   getRepoRoot: () => ipcRenderer.invoke('get-repo-root'),
   clearData: () => ipcRenderer.invoke('data:clear'),

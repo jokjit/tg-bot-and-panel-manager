@@ -1,7 +1,8 @@
-import { Capacitor, CapacitorHttp } from '@capacitor/core';
+﻿import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { Preferences } from '@capacitor/preferences';
 
 const CF_API_BASE = 'https://api.cloudflare.com/client/v4';
+const CF_GRAPHQL_API = `${CF_API_BASE}/graphql`;
 const STORAGE_KEY = 'tg_bot_mobile_deploy_config_v2';
 const ASSET_PREFIX = '/deploy-assets';
 const PANEL_ASSET_PREFIX = `${ASSET_PREFIX}/admin-panel`;
@@ -37,6 +38,30 @@ export interface DeployRunResult {
   pagesProjectName: string;
   bootstrapOk: boolean;
   bootstrapReason: string;
+}
+
+export interface DashboardD1DatabaseUsage {
+  id: string;
+  name: string;
+  fileSizeBytes: number | null;
+  rowsRead24h: number | null;
+  rowsWritten24h: number | null;
+  numTables: number | null;
+}
+
+export interface DashboardSnapshot {
+  workerName: string;
+  workerRequests24h: number | null;
+  workersScriptCount: number | null;
+  kvNamespaceCount: number | null;
+  kvReadRequests24h: number | null;
+  kvWriteRequests24h: number | null;
+  kvStorageBytes: number | null;
+  d1DatabaseCount: number | null;
+  d1DatabasesUsage: DashboardD1DatabaseUsage[];
+  pagesProjectCount: number | null;
+  fetchedAt: string;
+  warnings: string[];
 }
 
 interface PanelAssetMeta {
@@ -161,6 +186,23 @@ function getUrlOrigin(value: string): string {
 function buildAdminPanelEntryUrl(workerUrl: string): string {
   const origin = getUrlOrigin(workerUrl);
   return origin ? `${origin}/admin` : '';
+}
+
+function buildPanelTargetUrl(panelUrl: string, workerUrl: string): string {
+  const normalizedPanelUrl = normalizeHttpUrl(panelUrl);
+  if (!normalizedPanelUrl) return '';
+  const workerOrigin = getUrlOrigin(workerUrl);
+  if (!workerOrigin) return normalizedPanelUrl;
+
+  try {
+    const url = new URL(normalizedPanelUrl);
+    if (!url.searchParams.get('worker_origin')) {
+      url.searchParams.set('worker_origin', workerOrigin);
+    }
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return normalizedPanelUrl;
+  }
 }
 
 function getCustomDomainHost(value: string): string {
@@ -333,6 +375,512 @@ async function cfApi<T>(
     result: (json?.result ?? null) as T,
     reason: buildCfErrorReason(json, response.status, response.text),
     resultInfo: json?.result_info ?? null,
+  };
+}
+
+function parseNumber(value: unknown, fallback = 0): number {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function pickResultInfoCount(resultInfo: any): number | null {
+  const candidates = [resultInfo?.total_count, resultInfo?.totalCount, resultInfo?.count, resultInfo?.total];
+  for (const value of candidates) {
+    const num = Number(value);
+    if (Number.isFinite(num) && num >= 0) return num;
+  }
+  return null;
+}
+
+async function countCollection(
+  token: string,
+  accountId: string,
+  path: string,
+  label: string,
+): Promise<number> {
+  let count = 0;
+  let totalPages = 1;
+
+  for (let page = 1; page <= totalPages && page <= 20; page += 1) {
+    const query = new URLSearchParams({ page: String(page), per_page: '100' });
+    const response = await cfApi<any[]>(token, accountId, `${path}?${query.toString()}`);
+    if (!response.ok) {
+      throw new Error(`${label} count failed: ${response.reason}`);
+    }
+
+    if (page === 1) {
+      const fastCount = pickResultInfoCount(response.resultInfo);
+      if (fastCount !== null) return fastCount;
+    }
+
+    const rows = Array.isArray(response.result) ? response.result : [];
+    count += rows.length;
+
+    totalPages = parseNumber(response.resultInfo?.total_pages, 1);
+    if (totalPages < 1) totalPages = 1;
+  }
+
+  return count;
+}
+
+async function countPagesProjects(token: string, accountId: string): Promise<number> {
+  const response = await cfApi<any[]>(token, accountId, `/accounts/${accountId}/pages/projects`);
+  if (!response.ok) {
+    throw new Error(`pages count failed: ${response.reason}`);
+  }
+  const fastCount = pickResultInfoCount(response.resultInfo);
+  if (fastCount !== null) return fastCount;
+  return Array.isArray(response.result) ? response.result.length : 0;
+}
+
+function escapeGraphqlString(value: string): string {
+  return String(value || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, ' ')
+    .replace(/\n/g, ' ');
+}
+
+async function requestGraphql<T = any>(
+  token: string,
+  query: string,
+): Promise<{ data: T | null; errors: string[] }> {
+  const response = await request(CF_GRAPHQL_API, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    jsonBody: { query },
+    timeoutMs: 30000,
+  });
+
+  const errorsRaw = Array.isArray(response.json?.errors) ? response.json.errors : [];
+  const errors = errorsRaw
+    .map((item: any) => String(item?.message || 'unknown').trim())
+    .filter(Boolean);
+
+  if (errors.length > 0) {
+    return { data: null, errors };
+  }
+
+  return { data: (response.json?.data ?? null) as T | null, errors: [] };
+}
+
+async function fetchWorkerRequests24h(
+  token: string,
+  accountId: string,
+  workerName: string,
+): Promise<{ value: number | null; warning: string }> {
+  const name = String(workerName || '').trim();
+  if (!name) {
+    return { value: null, warning: 'missing worker name' };
+  }
+
+  const now = new Date();
+  const from = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const account = escapeGraphqlString(accountId);
+  const script = escapeGraphqlString(name);
+  const dateStart = from.toISOString();
+  const dateEnd = now.toISOString();
+
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          workersInvocationsAdaptive(
+            limit: 1000
+            filter: {
+              scriptName: "${script}"
+              datetime_geq: "${dateStart}"
+              datetime_leq: "${dateEnd}"
+            }
+          ) {
+            sum {
+              requests
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const result = await requestGraphql<any>(token, query);
+  if (result.errors.length > 0) {
+    return { value: null, warning: result.errors.join('; ') || 'graphql query failed' };
+  }
+
+  const rows = result.data?.viewer?.accounts?.[0]?.workersInvocationsAdaptive;
+  if (!Array.isArray(rows)) {
+    return { value: null, warning: 'workers analytics unavailable' };
+  }
+
+  let total = 0;
+  for (const row of rows) {
+    total += parseNumber(row?.sum?.requests, 0);
+  }
+
+  return { value: Math.max(0, Math.round(total)), warning: '' };
+}
+
+async function fetchKvRequests24h(
+  token: string,
+  accountId: string,
+): Promise<{ readRequests24h: number | null; writeRequests24h: number | null; warning: string }> {
+  const now = new Date();
+  const from = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const account = escapeGraphqlString(accountId);
+  const dateStart = from.toISOString().slice(0, 10);
+  const dateEnd = now.toISOString().slice(0, 10);
+
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          kvOperationsAdaptiveGroups(
+            limit: 5000
+            filter: { date_geq: "${dateStart}", date_leq: "${dateEnd}" }
+          ) {
+            dimensions {
+              actionType
+            }
+            sum {
+              requests
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const result = await requestGraphql<any>(token, query);
+  if (result.errors.length > 0) {
+    return {
+      readRequests24h: null,
+      writeRequests24h: null,
+      warning: result.errors.join('; ') || 'kv operations graphql query failed',
+    };
+  }
+
+  const rows = result.data?.viewer?.accounts?.[0]?.kvOperationsAdaptiveGroups;
+  if (!Array.isArray(rows)) {
+    return { readRequests24h: null, writeRequests24h: null, warning: 'kv analytics unavailable' };
+  }
+
+  let read = 0;
+  let write = 0;
+  for (const row of rows) {
+    const action = String(row?.dimensions?.actionType || '').trim().toLowerCase();
+    const requests = Math.max(0, parseNumber(row?.sum?.requests, 0));
+    if (action === 'read') read += requests;
+    if (action === 'write') write += requests;
+  }
+
+  return {
+    readRequests24h: Math.round(read),
+    writeRequests24h: Math.round(write),
+    warning: '',
+  };
+}
+
+async function fetchKvStorageBytes(
+  token: string,
+  accountId: string,
+): Promise<{ storageBytes: number | null; warning: string }> {
+  const now = new Date();
+  const from = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
+  const account = escapeGraphqlString(accountId);
+  const dateStart = from.toISOString().slice(0, 10);
+  const dateEnd = now.toISOString().slice(0, 10);
+
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          kvStorageAdaptiveGroups(
+            filter: { date_geq: "${dateStart}", date_leq: "${dateEnd}" }
+            limit: 10000
+            orderBy: [date_DESC]
+          ) {
+            max {
+              byteCount
+            }
+            dimensions {
+              date
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const result = await requestGraphql<any>(token, query);
+  if (result.errors.length > 0) {
+    return {
+      storageBytes: null,
+      warning: result.errors.join('; ') || 'kv storage graphql query failed',
+    };
+  }
+
+  const rows = result.data?.viewer?.accounts?.[0]?.kvStorageAdaptiveGroups;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return { storageBytes: null, warning: 'kv storage analytics unavailable' };
+  }
+
+  let latestDate = '';
+  for (const row of rows) {
+    const date = String(row?.dimensions?.date || '').trim();
+    if (!date) continue;
+    if (!latestDate || date > latestDate) latestDate = date;
+  }
+
+  let totalBytes = 0;
+  let hasValue = false;
+  for (const row of rows) {
+    const date = String(row?.dimensions?.date || '').trim();
+    if (latestDate && date && date !== latestDate) continue;
+    const byteCount = Number(row?.max?.byteCount ?? NaN);
+    if (!Number.isFinite(byteCount) || byteCount < 0) continue;
+    totalBytes += byteCount;
+    hasValue = true;
+  }
+
+  if (!hasValue) {
+    return { storageBytes: null, warning: 'kv storage byteCount missing' };
+  }
+
+  return {
+    storageBytes: Math.max(0, Math.round(totalBytes)),
+    warning: '',
+  };
+}
+
+async function fetchD1Rows24hMap(
+  token: string,
+  accountId: string,
+): Promise<{ rowsMap: Map<string, { rowsRead24h: number; rowsWritten24h: number }>; warning: string }> {
+  const now = new Date();
+  const from = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const account = escapeGraphqlString(accountId);
+  const dateStart = from.toISOString().slice(0, 10);
+  const dateEnd = now.toISOString().slice(0, 10);
+
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          d1AnalyticsAdaptiveGroups(
+            limit: 5000
+            filter: { date_geq: "${dateStart}", date_leq: "${dateEnd}" }
+          ) {
+            dimensions {
+              databaseId
+            }
+            sum {
+              rowsRead
+              rowsWritten
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const result = await requestGraphql<any>(token, query);
+  if (result.errors.length > 0) {
+    return {
+      rowsMap: new Map(),
+      warning: result.errors.join('; ') || 'd1 analytics graphql query failed',
+    };
+  }
+
+  const rows = result.data?.viewer?.accounts?.[0]?.d1AnalyticsAdaptiveGroups;
+  if (!Array.isArray(rows)) {
+    return { rowsMap: new Map(), warning: 'd1 analytics unavailable' };
+  }
+
+  const rowsMap = new Map<string, { rowsRead24h: number; rowsWritten24h: number }>();
+  for (const row of rows) {
+    const databaseId = String(row?.dimensions?.databaseId || '').trim();
+    if (!databaseId) continue;
+
+    const read = Math.max(0, Math.round(parseNumber(row?.sum?.rowsRead, 0)));
+    const write = Math.max(0, Math.round(parseNumber(row?.sum?.rowsWritten, 0)));
+    const existing = rowsMap.get(databaseId);
+    if (!existing) {
+      rowsMap.set(databaseId, { rowsRead24h: read, rowsWritten24h: write });
+      continue;
+    }
+    existing.rowsRead24h += read;
+    existing.rowsWritten24h += write;
+  }
+
+  return { rowsMap, warning: '' };
+}
+
+async function fetchD1DatabaseMeta(
+  token: string,
+  accountId: string,
+  databaseId: string,
+): Promise<{ fileSizeBytes: number | null; numTables: number | null }> {
+  const response = await cfApi<any>(
+    token,
+    accountId,
+    `/accounts/${accountId}/d1/database/${encodeURIComponent(databaseId)}`,
+  );
+  if (!response.ok) {
+    throw new Error(`d1 database meta failed: ${response.reason}`);
+  }
+
+  const fileSizeRaw = Number(response.result?.file_size ?? response.result?.fileSize ?? NaN);
+  const numTablesRaw = Number(response.result?.num_tables ?? response.result?.numTables ?? NaN);
+  return {
+    fileSizeBytes: Number.isFinite(fileSizeRaw) && fileSizeRaw >= 0 ? Math.round(fileSizeRaw) : null,
+    numTables: Number.isFinite(numTablesRaw) && numTablesRaw >= 0 ? Math.round(numTablesRaw) : null,
+  };
+}
+
+async function fetchD1DatabasesUsage(
+  token: string,
+  accountId: string,
+): Promise<{ items: DashboardD1DatabaseUsage[]; warning: string }> {
+  const databases = await listD1Databases(token, accountId);
+  if (databases.length === 0) {
+    return { items: [], warning: '' };
+  }
+
+  const [analytics, metaResults] = await Promise.all([
+    fetchD1Rows24hMap(token, accountId),
+    Promise.allSettled(databases.map((item) => fetchD1DatabaseMeta(token, accountId, item.id))),
+  ]);
+
+  const items: DashboardD1DatabaseUsage[] = [];
+  let failedMetaCount = 0;
+
+  for (let i = 0; i < databases.length; i += 1) {
+    const database = databases[i];
+    const meta = metaResults[i];
+    let fileSizeBytes: number | null = null;
+    let numTables: number | null = null;
+    if (meta?.status === 'fulfilled') {
+      fileSizeBytes = meta.value.fileSizeBytes;
+      numTables = meta.value.numTables;
+    } else {
+      failedMetaCount += 1;
+    }
+
+    const rows = analytics.rowsMap.get(database.id);
+    items.push({
+      id: database.id,
+      name: database.name,
+      fileSizeBytes,
+      rowsRead24h: rows ? rows.rowsRead24h : null,
+      rowsWritten24h: rows ? rows.rowsWritten24h : null,
+      numTables,
+    });
+  }
+
+  items.sort((a, b) => {
+    const aSize = a.fileSizeBytes === null ? -1 : a.fileSizeBytes;
+    const bSize = b.fileSizeBytes === null ? -1 : b.fileSizeBytes;
+    if (aSize !== bSize) return bSize - aSize;
+    return a.name.localeCompare(b.name);
+  });
+
+  const warnings: string[] = [];
+  if (analytics.warning) warnings.push(`d1 analytics: ${analytics.warning}`);
+  if (failedMetaCount > 0) warnings.push(`d1 meta: ${failedMetaCount}/${databases.length} failed`);
+
+  return { items, warning: warnings.join('; ') };
+}
+
+export async function fetchDashboardSnapshot(
+  formInput: Partial<DeployFormState>,
+): Promise<DashboardSnapshot> {
+  const form = sanitizeFormState(formInput);
+  const token = String(form.cfApiToken || '').trim();
+  const accountId = String(form.cfAccountId || '').trim();
+  const workerName = String(form.workerName || '').trim();
+
+  if (!token) throw new Error('missing Cloudflare API Token');
+  if (!accountId) throw new Error('missing Cloudflare Account ID');
+
+  const warnings: string[] = [];
+
+  const [workersCount, kvCount, kvUsage, kvStorageUsage, d1Usage, pagesCount, workerReq] = await Promise.allSettled([
+    countCollection(token, accountId, `/accounts/${accountId}/workers/scripts`, 'workers'),
+    countCollection(token, accountId, `/accounts/${accountId}/storage/kv/namespaces`, 'kv'),
+    fetchKvRequests24h(token, accountId),
+    fetchKvStorageBytes(token, accountId),
+    fetchD1DatabasesUsage(token, accountId),
+    countPagesProjects(token, accountId),
+    fetchWorkerRequests24h(token, accountId, workerName),
+  ]);
+
+  const workersScriptCount = workersCount.status === 'fulfilled' ? workersCount.value : null;
+  if (workersCount.status === 'rejected') {
+    warnings.push(`workers: ${workersCount.reason instanceof Error ? workersCount.reason.message : String(workersCount.reason)}`);
+  }
+
+  const kvNamespaceCount = kvCount.status === 'fulfilled' ? kvCount.value : null;
+  if (kvCount.status === 'rejected') {
+    warnings.push(`kv: ${kvCount.reason instanceof Error ? kvCount.reason.message : String(kvCount.reason)}`);
+  }
+
+  let kvReadRequests24h: number | null = null;
+  let kvWriteRequests24h: number | null = null;
+  let kvStorageBytes: number | null = null;
+  if (kvUsage.status === 'fulfilled') {
+    kvReadRequests24h = kvUsage.value.readRequests24h;
+    kvWriteRequests24h = kvUsage.value.writeRequests24h;
+    if (kvUsage.value.warning) warnings.push(`kv analytics: ${kvUsage.value.warning}`);
+  } else {
+    warnings.push(`kv analytics: ${kvUsage.reason instanceof Error ? kvUsage.reason.message : String(kvUsage.reason)}`);
+  }
+
+  if (kvStorageUsage.status === 'fulfilled') {
+    kvStorageBytes = kvStorageUsage.value.storageBytes;
+    if (kvStorageUsage.value.warning) warnings.push(`kv storage: ${kvStorageUsage.value.warning}`);
+  } else {
+    warnings.push(`kv storage: ${kvStorageUsage.reason instanceof Error ? kvStorageUsage.reason.message : String(kvStorageUsage.reason)}`);
+  }
+
+  let d1DatabasesUsage: DashboardD1DatabaseUsage[] = [];
+  let d1DatabaseCount: number | null = null;
+  if (d1Usage.status === 'fulfilled') {
+    d1DatabasesUsage = d1Usage.value.items;
+    d1DatabaseCount = d1DatabasesUsage.length;
+    if (d1Usage.value.warning) warnings.push(d1Usage.value.warning);
+  } else {
+    warnings.push(`d1: ${d1Usage.reason instanceof Error ? d1Usage.reason.message : String(d1Usage.reason)}`);
+  }
+
+  const pagesProjectCount = pagesCount.status === 'fulfilled' ? pagesCount.value : null;
+  if (pagesCount.status === 'rejected') {
+    warnings.push(`pages: ${pagesCount.reason instanceof Error ? pagesCount.reason.message : String(pagesCount.reason)}`);
+  }
+
+  let workerRequests24h: number | null = null;
+  if (workerReq.status === 'fulfilled') {
+    workerRequests24h = workerReq.value.value;
+    if (workerReq.value.warning) warnings.push(`requests: ${workerReq.value.warning}`);
+  } else {
+    warnings.push(`requests: ${workerReq.reason instanceof Error ? workerReq.reason.message : String(workerReq.reason)}`);
+  }
+
+  return {
+    workerName,
+    workerRequests24h,
+    workersScriptCount,
+    kvNamespaceCount,
+    kvReadRequests24h,
+    kvWriteRequests24h,
+    kvStorageBytes,
+    d1DatabaseCount,
+    d1DatabasesUsage,
+    pagesProjectCount,
+    fetchedAt: new Date().toISOString(),
+    warnings,
   };
 }
 
@@ -1537,8 +2085,10 @@ export async function runDeploy(
 
   const workerUrlInput = normalizeHttpUrl(form.workerUrl);
   const verifyPublicBaseUrl = normalizeHttpUrl(form.verifyPublicBaseUrl);
-  const manualPanelUrl = normalizeHttpUrl(form.panelUrl);
   const deployPanel = Boolean(form.deployPanel);
+  const panelUrlFromForm = normalizeHttpUrl(form.panelUrl);
+  // Mobile keeps panel URL as read-only display state, so avoid treating it as manual override when auto deploying Pages.
+  const manualPanelUrl = deployPanel ? '' : panelUrlFromForm;
   const pagesProjectName = normalizePagesProjectName(form.pagesProjectName) || suggestPagesProjectName(workerName);
   const pagesBranch = String(form.pagesBranch || DEFAULT_PAGES_BRANCH).trim() || DEFAULT_PAGES_BRANCH;
 
@@ -1569,12 +2119,16 @@ export async function runDeploy(
   );
 
   onLog('步骤 3/6: 配置 Worker 公开入口');
-  let workerUrl = workerUrlInput;
   const customHost = getCustomDomainHost(workerUrlInput);
+  const workersDevUrl = await ensureWorkersDevEndpoint(token, accountId, workerName, onLog);
+  let workerUrl = workersDevUrl;
+
   if (customHost) {
     await ensureWorkerCustomDomainByHost(token, accountId, workerName, customHost, onLog);
+    workerUrl = workerUrlInput;
+    onLog('自定义域名已提交绑定，证书与边缘生效可能有短暂延迟。');
   } else {
-    workerUrl = await ensureWorkersDevEndpoint(token, accountId, workerName, onLog);
+    workerUrl = workersDevUrl;
   }
 
   const verifyHost = getCustomDomainHost(verifyPublicBaseUrl);
@@ -1600,13 +2154,18 @@ export async function runDeploy(
     onLog('步骤 4/6: 跳过 Pages 管理面板部署（已关闭）。');
   }
 
+  const effectivePanelTargetUrl = buildPanelTargetUrl(effectivePanelUrl, workerUrl);
+
   onLog('步骤 5/6: 回写最终运行变量并更新 Worker');
   const finalVars: Record<string, string> = {
     ...firstVars,
     PUBLIC_BASE_URL: workerUrl,
   };
-  if (effectivePanelUrl) {
-    finalVars.ADMIN_PANEL_URL = effectivePanelUrl;
+  if (deployPanel) {
+    // In auto Pages deploy mode, overwrite stale values from older runs.
+    finalVars.ADMIN_PANEL_URL = effectivePanelTargetUrl || '';
+  } else if (effectivePanelTargetUrl) {
+    finalVars.ADMIN_PANEL_URL = effectivePanelTargetUrl;
   }
 
   await uploadWorker(
@@ -1637,8 +2196,12 @@ export async function runDeploy(
     onLog,
   );
 
-  await waitForWorkerHealth(workerUrl, onLog);
-  const bootstrap = await triggerDeployBootstrap(workerUrl, bootstrapToken);
+  const bootstrapWorkerUrl = workersDevUrl || workerUrl;
+  if (bootstrapWorkerUrl !== workerUrl) {
+    onLog('部署引导将通过 workers.dev 入口执行，避免自定义域名尚未生效导致超时。');
+  }
+  await waitForWorkerHealth(bootstrapWorkerUrl, onLog);
+  const bootstrap = await triggerDeployBootstrap(bootstrapWorkerUrl, bootstrapToken);
   if (bootstrap.ok) {
     onLog(`Webhook 已设置: ${bootstrap.webhookUrl || `${getUrlOrigin(workerUrl)}/webhook`}`);
   } else {
@@ -1646,7 +2209,7 @@ export async function runDeploy(
   }
 
   const finalVerifyBaseUrl = verifyPublicBaseUrl || workerUrl;
-  const panelEntryUrl = buildAdminPanelEntryUrl(workerUrl) || effectivePanelUrl;
+  const panelEntryUrl = buildAdminPanelEntryUrl(workerUrl) || effectivePanelTargetUrl || effectivePanelUrl;
 
   return {
     workerName,
@@ -1655,7 +2218,7 @@ export async function runDeploy(
     kvNamespaceId: kv.namespaceId,
     d1DatabaseId: d1.databaseId,
     webhookUrl: bootstrap.webhookUrl || `${getUrlOrigin(workerUrl)}${normalizeWebhookPath(finalVars.WEBHOOK_PATH || '/webhook')}`,
-    panelUrl: effectivePanelUrl,
+    panelUrl: effectivePanelTargetUrl || effectivePanelUrl,
     panelEntryUrl,
     pagesProjectName,
     bootstrapOk: bootstrap.ok,

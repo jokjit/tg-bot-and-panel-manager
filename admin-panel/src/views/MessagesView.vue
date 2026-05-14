@@ -25,6 +25,15 @@
           </div>
 
           <n-form label-placement="top" class="panel-form">
+            <n-form-item :label="t('messages.welcomeType')">
+              <n-select v-model:value="form.WELCOME_TYPE" :options="welcomeTypeOptions" />
+            </n-form-item>
+            <n-form-item :label="t('messages.welcomeMedia')">
+              <n-input
+                v-model:value="form.WELCOME_MEDIA"
+                :placeholder="t('messages.welcomeMediaPlaceholder')"
+              />
+            </n-form-item>
             <n-form-item :label="t('messages.welcomeText')">
               <n-input
                 v-model:value="form.WELCOME_TEXT"
@@ -57,6 +66,8 @@
           <n-space vertical :size="16" class="preview-stack">
             <div class="preview-card">
               <div class="preview-card__label">{{ t('messages.welcomePreview') }}</div>
+              <div class="preview-meta">{{ t('messages.welcomeType') }}: {{ form.WELCOME_TYPE }}</div>
+              <div v-if="form.WELCOME_MEDIA" class="preview-meta media">{{ form.WELCOME_MEDIA }}</div>
               <div class="preview-bubble">{{ form.WELCOME_TEXT || t('messages.emptyPreview') }}</div>
             </div>
             <div class="preview-card blocked">
@@ -71,8 +82,8 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue';
-import { NButton, NCard, NForm, NFormItem, NGi, NGrid, NInput, NSpace, useMessage } from 'naive-ui';
+import { computed, onMounted, reactive, ref } from 'vue';
+import { NButton, NCard, NForm, NFormItem, NGi, NGrid, NInput, NSelect, NSpace, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchSystemConfig, saveSystemConfig } from '../services/api';
 
@@ -82,11 +93,22 @@ const loading = ref(false);
 const saving = ref(false);
 
 const form = reactive({
+  WELCOME_TYPE: 'text',
+  WELCOME_MEDIA: '',
   WELCOME_TEXT: '',
   BLOCKED_TEXT: '',
 });
 
+const welcomeTypeOptions = computed(() => [
+  { label: t('messages.welcomeTypeText'), value: 'text' },
+  { label: t('messages.welcomeTypePhoto'), value: 'photo' },
+  { label: t('messages.welcomeTypeVideo'), value: 'video' },
+  { label: t('messages.welcomeTypeDocument'), value: 'document' },
+]);
+
 function assignConfig(cfg = {}) {
+  form.WELCOME_TYPE = cfg.WELCOME_TYPE || 'text';
+  form.WELCOME_MEDIA = cfg.WELCOME_MEDIA || '';
   form.WELCOME_TEXT = cfg.WELCOME_TEXT || '';
   form.BLOCKED_TEXT = cfg.BLOCKED_TEXT || '';
 }
@@ -107,6 +129,8 @@ async function save() {
   saving.value = true;
   try {
     await saveSystemConfig({
+      WELCOME_TYPE: form.WELCOME_TYPE,
+      WELCOME_MEDIA: form.WELCOME_MEDIA,
       WELCOME_TEXT: form.WELCOME_TEXT,
       BLOCKED_TEXT: form.BLOCKED_TEXT,
     });
@@ -138,6 +162,17 @@ onMounted(load);
   font-size: 12px;
   color: var(--text-muted);
   margin-bottom: 12px;
+}
+
+.preview-meta {
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.preview-meta.media {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 .preview-bubble {
