@@ -10,7 +10,7 @@
           </div>
 
           <div class="panel-summary">
-            <n-tag type="success" round>{{ t('dashboard.loggedInAs', { name: adminStore.username || 'admin' }) }}</n-tag>
+            <n-tag type="success" round>{{ t('dashboard.loggedInAs', { name: adminStore.username || t('auth.defaultAdmin') }) }}</n-tag>
             <n-button tertiary round @click="router.push('/history')">{{ t('app.history') }}</n-button>
             <n-button secondary round @click="refresh">{{ t('dashboard.refresh') }}</n-button>
           </div>
@@ -121,23 +121,23 @@ const heroIndicators = computed(() => [
   },
   {
     key: 'kv',
-    label: 'KV',
+    label: t('dashboard.kv'),
     value: statusData.value?.hasKv ? t('app.enabled') : t('app.disabled'),
   },
   {
     key: 'd1',
-    label: 'D1',
+    label: t('dashboard.d1'),
     value: statusData.value?.hasD1 ? t('app.enabled') : t('app.disabled'),
   },
 ]);
 
 const runtimeRows = computed(() => [
   {
-    label: 'Webhook',
+    label: t('dashboard.webhookLabel'),
     value: statusData.value?.webhookUrl || '-',
   },
   {
-    label: 'Panel',
+    label: t('dashboard.panelLabel'),
     value: statusData.value?.adminPanel || statusData.value?.adminPanelTarget || '-',
   },
 ]);
@@ -174,7 +174,7 @@ async function refresh() {
   try {
     const data = await fetchStatus();
     setStatusData(data);
-    setLoginState(true, adminStore.username || 'admin');
+    setLoginState(true, adminStore.username || t('auth.defaultAdmin'));
   } catch (error) {
     clearAuthState();
     message.error(error.message || t('dashboard.statusFailed'));

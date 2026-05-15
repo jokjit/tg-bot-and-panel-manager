@@ -220,8 +220,8 @@ const summaryCards = computed(() => {
   return [
     { key: 'total', label: t('admins.title'), value: String(list.length) },
     { key: 'root', label: t('admins.rootAdmin'), value: String(root) },
-    { key: 'group', label: t('admins.source'), value: `group ${group}` },
-    { key: 'manual', label: t('admins.note'), value: `kv ${manual}` },
+    { key: 'group', label: t('admins.source'), value: t('admins.groupCount', { n: group }) },
+    { key: 'manual', label: t('admins.note'), value: t('admins.kvCount', { n: manual }) },
   ];
 });
 

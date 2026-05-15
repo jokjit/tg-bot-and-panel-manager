@@ -33,6 +33,29 @@
                 v-model:value="form.WELCOME_MEDIA"
                 :placeholder="t('messages.welcomeMediaPlaceholder')"
               />
+              <div class="media-upload-row">
+                <input
+                  ref="welcomeMediaInputRef"
+                  type="file"
+                  class="media-upload-input"
+                  @change="handleWelcomeMediaFileChange"
+                />
+                <n-button secondary size="small" @click="openWelcomeMediaFilePicker">
+                  {{ t('messages.chooseMediaFile') }}
+                </n-button>
+                <n-button
+                  size="small"
+                  type="primary"
+                  :loading="uploadingMedia"
+                  :disabled="!selectedWelcomeMediaFile"
+                  @click="uploadSelectedWelcomeMedia"
+                >
+                  {{ t('messages.uploadMediaFile') }}
+                </n-button>
+                <span class="media-upload-tip">
+                  {{ selectedWelcomeMediaFile ? selectedWelcomeMediaFile.name : t('messages.noMediaFileSelected') }}
+                </span>
+              </div>
             </n-form-item>
             <n-form-item :label="t('messages.welcomeText')">
               <n-input
@@ -41,6 +64,22 @@
                 :autosize="{ minRows: 5, maxRows: 10 }"
                 :placeholder="t('messages.welcomePlaceholder')"
               />
+            </n-form-item>
+            <n-form-item :label="t('messages.botDescription')">
+              <n-input
+                v-model:value="form.BOT_DESCRIPTION"
+                type="textarea"
+                :autosize="{ minRows: 4, maxRows: 8 }"
+                :placeholder="t('messages.botDescriptionPlaceholder')"
+              />
+              <div class="preview-meta">{{ (form.BOT_DESCRIPTION || '').length }}/512</div>
+            </n-form-item>
+            <n-form-item :label="t('messages.botShortDescription')">
+              <n-input
+                v-model:value="form.BOT_SHORT_DESCRIPTION"
+                :placeholder="t('messages.botShortDescriptionPlaceholder')"
+              />
+              <div class="preview-meta">{{ (form.BOT_SHORT_DESCRIPTION || '').length }}/120</div>
             </n-form-item>
             <n-form-item :label="t('messages.blockedText')">
               <n-input
@@ -74,6 +113,13 @@
               <div class="preview-card__label">{{ t('messages.blockedPreview') }}</div>
               <div class="preview-bubble">{{ form.BLOCKED_TEXT || t('messages.emptyPreview') }}</div>
             </div>
+            <div class="preview-card">
+              <div class="preview-card__label">{{ t('messages.botProfilePreview') }}</div>
+              <div class="preview-meta">{{ t('messages.botDescription') }}</div>
+              <div class="preview-bubble">{{ form.BOT_DESCRIPTION || t('messages.emptyPreview') }}</div>
+              <div class="preview-meta">{{ t('messages.botShortDescription') }}</div>
+              <div class="preview-bubble">{{ form.BOT_SHORT_DESCRIPTION || t('messages.emptyPreview') }}</div>
+            </div>
           </n-space>
         </n-card>
       </n-gi>
@@ -85,17 +131,22 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import { NButton, NCard, NForm, NFormItem, NGi, NGrid, NInput, NSelect, NSpace, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
-import { fetchSystemConfig, saveSystemConfig } from '../services/api';
+import { fetchSystemConfig, saveSystemConfig, uploadWelcomeMedia } from '../services/api';
 
 const message = useMessage();
 const { t } = useI18n();
 const loading = ref(false);
 const saving = ref(false);
+const uploadingMedia = ref(false);
+const selectedWelcomeMediaFile = ref(null);
+const welcomeMediaInputRef = ref(null);
 
 const form = reactive({
   WELCOME_TYPE: 'text',
   WELCOME_MEDIA: '',
   WELCOME_TEXT: '',
+  BOT_DESCRIPTION: '',
+  BOT_SHORT_DESCRIPTION: '',
   BLOCKED_TEXT: '',
 });
 
@@ -103,6 +154,10 @@ const welcomeTypeOptions = computed(() => [
   { label: t('messages.welcomeTypeText'), value: 'text' },
   { label: t('messages.welcomeTypePhoto'), value: 'photo' },
   { label: t('messages.welcomeTypeVideo'), value: 'video' },
+  { label: t('messages.welcomeTypeAnimation'), value: 'animation' },
+  { label: t('messages.welcomeTypeAudio'), value: 'audio' },
+  { label: t('messages.welcomeTypeVoice'), value: 'voice' },
+  { label: t('messages.welcomeTypeSticker'), value: 'sticker' },
   { label: t('messages.welcomeTypeDocument'), value: 'document' },
 ]);
 
@@ -110,6 +165,8 @@ function assignConfig(cfg = {}) {
   form.WELCOME_TYPE = cfg.WELCOME_TYPE || 'text';
   form.WELCOME_MEDIA = cfg.WELCOME_MEDIA || '';
   form.WELCOME_TEXT = cfg.WELCOME_TEXT || '';
+  form.BOT_DESCRIPTION = cfg.BOT_DESCRIPTION || cfg.BOT_DESCRIPTION_DEFAULT || '';
+  form.BOT_SHORT_DESCRIPTION = cfg.BOT_SHORT_DESCRIPTION || cfg.BOT_SHORT_DESCRIPTION_DEFAULT || '';
   form.BLOCKED_TEXT = cfg.BLOCKED_TEXT || '';
 }
 
@@ -132,6 +189,8 @@ async function save() {
       WELCOME_TYPE: form.WELCOME_TYPE,
       WELCOME_MEDIA: form.WELCOME_MEDIA,
       WELCOME_TEXT: form.WELCOME_TEXT,
+      BOT_DESCRIPTION: form.BOT_DESCRIPTION,
+      BOT_SHORT_DESCRIPTION: form.BOT_SHORT_DESCRIPTION,
       BLOCKED_TEXT: form.BLOCKED_TEXT,
     });
     message.success(t('messages.saveSuccess'));
@@ -140,6 +199,42 @@ async function save() {
     message.error(error.message || t('messages.saveFailed'));
   } finally {
     saving.value = false;
+  }
+}
+
+function openWelcomeMediaFilePicker() {
+  welcomeMediaInputRef.value?.click?.();
+}
+
+function handleWelcomeMediaFileChange(event) {
+  const input = event?.target;
+  const file = input?.files?.[0] || null;
+  selectedWelcomeMediaFile.value = file;
+}
+
+async function uploadSelectedWelcomeMedia() {
+  if (!selectedWelcomeMediaFile.value) {
+    message.warning(t('messages.noMediaFileSelected'));
+    return;
+  }
+
+  uploadingMedia.value = true;
+  try {
+    const data = await uploadWelcomeMedia(form.WELCOME_TYPE, selectedWelcomeMediaFile.value);
+    const fileId = String(data?.result?.fileId || '').trim();
+    if (!fileId) {
+      throw new Error(t('messages.uploadMediaFailed'));
+    }
+    form.WELCOME_MEDIA = fileId;
+    message.success(t('messages.uploadMediaSuccess'));
+    selectedWelcomeMediaFile.value = null;
+    if (welcomeMediaInputRef.value) {
+      welcomeMediaInputRef.value.value = '';
+    }
+  } catch (error) {
+    message.error(error.message || t('messages.uploadMediaFailed'));
+  } finally {
+    uploadingMedia.value = false;
   }
 }
 
@@ -187,5 +282,23 @@ onMounted(load);
 
 .preview-card.blocked .preview-bubble {
   border: 1px solid rgba(255, 129, 98, 0.2);
+}
+
+.media-upload-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.media-upload-input {
+  display: none;
+}
+
+.media-upload-tip {
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-all;
 }
 </style>

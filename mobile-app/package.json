@@ -1,7 +1,7 @@
 {
   "name": "tg-bot-mobile-deploy",
   "private": true,
-  "version": "2.3.0",
+  "version": "2.3.1",
   "type": "module",
   "scripts": {
     "sync-assets": "node ./scripts/sync-assets.mjs",

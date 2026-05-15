@@ -74,8 +74,8 @@
             </div>
           </div>
           <div class="history-session__meta">
-            <n-tag size="small" type="default">{{ selectedSession.chatType || 'private' }}</n-tag>
-            <n-tag v-if="selectedSession.topicId" size="small" type="warning">Topic {{ selectedSession.topicId }}</n-tag>
+            <n-tag size="small" type="default">{{ selectedSession.chatType || t('history.chatTypePrivate') }}</n-tag>
+            <n-tag v-if="selectedSession.topicId" size="small" type="warning">{{ t('history.sessionTopic', { id: selectedSession.topicId }) }}</n-tag>
           </div>
         </div>
 
@@ -99,7 +99,7 @@
 
             <div class="history-bubble__foot">
               <span>{{ t('history.messageType') }}：{{ item.message_type }}</span>
-              <span v-if="item.media_file_id">Media</span>
+              <span v-if="item.media_file_id">{{ t('history.media') }}</span>
             </div>
           </div>
         </div>

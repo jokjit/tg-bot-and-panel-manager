@@ -24,7 +24,7 @@
             <n-tag round :type="statusTagType">{{ adminStore.loggedIn ? t('app.login') : t('app.offline') }}</n-tag>
             <div class="user-chip">
               <span class="label">{{ t('app.currentUser') }}</span>
-              <strong>{{ adminStore.username || 'admin' }}</strong>
+              <strong>{{ adminStore.username || t('auth.defaultAdmin') }}</strong>
             </div>
           </div>
         </div>
@@ -55,7 +55,7 @@
                 <n-tag round :type="statusTagType">{{ adminStore.loggedIn ? t('app.login') : t('app.offline') }}</n-tag>
                 <div class="user-chip">
                   <span class="label">{{ t('app.currentUser') }}</span>
-                  <strong>{{ adminStore.username || 'admin' }}</strong>
+                  <strong>{{ adminStore.username || t('auth.defaultAdmin') }}</strong>
                 </div>
               </div>
             </div>
@@ -223,7 +223,7 @@ async function onRefreshStatus() {
   try {
     const data = await fetchStatus();
     setStatusData(data);
-    setLoginState(true, adminStore.username || 'admin');
+    setLoginState(true, adminStore.username || t('auth.defaultAdmin'));
     message.success(t('app.refreshDone'));
   } catch (error) {
     clearAuthState();

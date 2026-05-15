@@ -47,7 +47,15 @@ const DELETED_ACCOUNT_SWEEP_CHECK_MIN_INTERVAL_MS = 5 * 60 * 1000;
 const WELCOME_TYPE_TEXT = 'text';
 const WELCOME_TYPE_PHOTO = 'photo';
 const WELCOME_TYPE_VIDEO = 'video';
+const WELCOME_TYPE_ANIMATION = 'animation';
+const WELCOME_TYPE_AUDIO = 'audio';
+const WELCOME_TYPE_VOICE = 'voice';
+const WELCOME_TYPE_STICKER = 'sticker';
 const WELCOME_TYPE_DOCUMENT = 'document';
+const BOT_DESCRIPTION_MAX_LENGTH = 512;
+const BOT_SHORT_DESCRIPTION_MAX_LENGTH = 120;
+const WELCOME_SETUP_PENDING_PREFIX = 'sys:welcome_setup:';
+const WELCOME_SETUP_PENDING_TTL_SECONDS = 10 * 60;
 const SYSTEM_CONFIG_CACHE_TTL_MS = 5 * 1000;
 const GROUP_ADMIN_MEMBER_CACHE_TTL_MS = 90 * 1000;
 const GROUP_ADMIN_LIST_CACHE_TTL_MS = 60 * 1000;
@@ -152,8 +160,18 @@ export default {
       if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/system-config`) {
         await requireHttpAdmin(request, runtimeEnv);
         const body = await readJsonBody(request);
-        await updateSystemConfig(runtimeEnv, body);
-        return json({ ok: true, config: buildSystemConfigView(await getEffectiveSystemConfig(runtimeEnv)) }, 200, {}, request);
+        const updated = await updateSystemConfig(runtimeEnv, body);
+        return json(
+          {
+            ok: true,
+            config: buildSystemConfigView(await getEffectiveSystemConfig(runtimeEnv)),
+            profileMetaSynced: Boolean(updated?.metaSync?.synced),
+            profileMetaSyncError: updated?.metaSync?.error || null,
+          },
+          200,
+          {},
+          request,
+        );
       }
 
       if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/maintenance/cleanup`) {
@@ -213,6 +231,19 @@ export default {
         return await handleTelegramAvatarProxy(request, runtimeEnv);
       }
 
+      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/welcome-media/upload`) {
+        await requireHttpAdmin(request, runtimeEnv);
+        ensureEnv(runtimeEnv, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
+        const form = await request.formData();
+        const type = String(form.get('type') || '').trim().toLowerCase();
+        const file = form.get('file');
+        if (!file || typeof file === 'string') {
+          throw new AppError(400, '请先选择要上传的文件');
+        }
+        const result = await uploadWelcomeMediaToTelegram(runtimeEnv, type, file);
+        return json({ ok: true, result }, 200, {}, request);
+      }
+
       if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/users/action`) {
         await requireHttpAdmin(request, runtimeEnv);
         const body = await readJsonBody(request);
@@ -260,7 +291,12 @@ export default {
           return json({ ok: true, action, state }, 200, {}, request);
         }
 
-        throw new AppError(400, 'action 必须是 ban / unban / trust / untrust / restart / verifypass');
+        if (action === 'delete') {
+          const result = await purgeDeletedUserData(runtimeEnv, userId);
+          return json({ ok: true, action, userId, result }, 200, {}, request);
+        }
+
+        throw new AppError(400, 'action 必须是 ban / unban / trust / untrust / restart / verifypass / delete');
       }
 
       if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/blacklist`) {
@@ -623,8 +659,10 @@ async function handleUpdate(update, env, publicBaseUrl = '') {
   const senderId = message.from?.id ? Number(message.from.id) : null;
   const authorizedAdmin = senderId ? await isAuthorizedAdmin(env, senderId) : false;
   const isAdminChat = Number(message.chat.id) === adminChatId;
+  const privateRelayAdminIds = isTopicModeEnabled(env) ? [] : await getPrivateRelayAdminUserIds(env);
+  const isPrivateRelayAdminChat = !isTopicModeEnabled(env) && privateRelayAdminIds.includes(Number(message.chat.id));
 
-  if (authorizedAdmin || isAdminChat) {
+  if (authorizedAdmin || isAdminChat || isPrivateRelayAdminChat) {
     await handleAdminMessage(message, env, adminChatId, authorizedAdmin, publicBaseUrl);
     return;
   }
@@ -697,6 +735,16 @@ async function handleCallbackQuery(callbackQuery, env, publicBaseUrl = '') {
 async function handleUserMessage(message, env, adminChatId) {
   const sender = message.from || {};
   const topicModeEnabled = isTopicModeEnabled(env);
+  const relayChatIds = topicModeEnabled ? [adminChatId] : await getPrivateRelayAdminUserIds(env);
+  if (!topicModeEnabled && relayChatIds.length === 0) {
+    await notifyUserAdminDeliveryFailed(
+      env,
+      message,
+      new Error('未找到可用的管理员私聊转发目标，请配置 ADMIN_IDS 或 ADMIN_ID（管理员用户 ID）。'),
+    );
+    return;
+  }
+
   const profileLine = formatUserProfile(sender, message.chat);
   let topicRecord = null;
   let topicError = '';
@@ -710,71 +758,84 @@ async function handleUserMessage(message, env, adminChatId) {
   const messageThreadId = topicRecord?.threadId;
   const topicModeActive = Boolean(messageThreadId);
   const metaText = [
-    '📩 新的用户消息',
+    '用户新消息',
     `#UID:${message.chat.id}`,
     profileLine,
     topicModeActive
-      ? '当前默认已启用话题模式：请在该用户专属话题中直接回复，也可使用下方按钮操作。'
+      ? '当前为话题模式。请在该用户专属话题内直接回复，或使用下方操作按钮。'
       : topicModeEnabled && topicError
-        ? `话题模式创建失败，已自动退回普通回复链模式。\n错误：${topicError}`
-      : '当前为普通回复链模式：回复这条提示消息，或使用 /reply 用户ID 内容，即可回消息。',
-    '建议使用按钮查看资料、拉黑/解封，降低回复错人的风险。',
+        ? `创建话题失败，已回退到私聊转发模式。\n错误：${topicError}`
+        : relayChatIds.length > 1
+          ? `当前为私聊转发模式（TOPIC_MODE 已关闭）。消息已发送给 ${relayChatIds.length} 位管理员，请在机器人私聊中回复，或使用 /reply userId 内容。`
+          : '当前为私聊转发模式（TOPIC_MODE 已关闭）。消息已发送到管理员私聊，请在机器人私聊中回复，或使用 /reply userId 内容。',
+    '可使用下方操作按钮查看资料、封禁/解封和信任管理。',
   ]
     .filter(Boolean)
     .join('\n');
 
-  let forwarded;
-  try {
-    forwarded = await telegramWithThreadFallback(env, 'forwardMessage', {
-      chat_id: adminChatId,
-      from_chat_id: message.chat.id,
-      message_id: message.message_id,
-      message_thread_id: messageThreadId || undefined,
-    });
-  } catch (error) {
+  let delivered = false;
+  let lastError = null;
+
+  for (const relayChatId of relayChatIds) {
+    let forwarded;
     try {
-      forwarded = await telegramWithThreadFallback(env, 'sendMessage', {
-        chat_id: adminChatId,
-        text: buildFallbackText(message, sender),
+      forwarded = await telegramWithThreadFallback(env, 'forwardMessage', {
+        chat_id: relayChatId,
+        from_chat_id: message.chat.id,
+        message_id: message.message_id,
         message_thread_id: messageThreadId || undefined,
       });
-    } catch (fallbackError) {
-      await notifyUserAdminDeliveryFailed(env, message, fallbackError);
-      await saveMessageHistory(env, {
-        userId: Number(message.chat.id),
-        chatType: message.chat?.type || 'private',
-        topicId: messageThreadId || null,
-        telegramMessageId: Number(message.message_id) || null,
-        direction: 'user_to_admin',
-        senderRole: 'user',
-        messageType: detectMessageType(message),
-        textContent: extractMessageText(message),
-        mediaFileId: extractPrimaryMediaFileId(message),
-        rawPayload: message,
+      delivered = true;
+    } catch (error) {
+      try {
+        forwarded = await telegramWithThreadFallback(env, 'sendMessage', {
+          chat_id: relayChatId,
+          text: buildFallbackText(message, sender),
+          message_thread_id: messageThreadId || undefined,
+        });
+        delivered = true;
+      } catch (fallbackError) {
+        lastError = fallbackError;
+        continue;
+      }
+    }
+
+    try {
+      await telegramWithThreadFallback(env, 'sendMessage', {
+        chat_id: relayChatId,
+        text: metaText,
+        message_thread_id: messageThreadId || undefined,
+        reply_to_message_id: forwarded.message_id,
+        reply_markup: buildAdminActionKeyboard(message.chat.id),
       });
-      return;
+    } catch (error) {
+      try {
+        await telegram(env, 'sendMessage', {
+          chat_id: relayChatId,
+          text: `${metaText}\n\n提示：元信息补发失败：${trimText(formatErrorMessage(error), 300)}`,
+          reply_markup: buildAdminActionKeyboard(message.chat.id),
+        });
+      } catch (fallbackError) {
+        lastError = fallbackError;
+      }
     }
   }
 
-  try {
-    await telegramWithThreadFallback(env, 'sendMessage', {
-      chat_id: adminChatId,
-      text: metaText,
-      message_thread_id: messageThreadId || undefined,
-      reply_to_message_id: forwarded.message_id,
-      reply_markup: buildAdminActionKeyboard(message.chat.id),
+  if (!delivered) {
+    await notifyUserAdminDeliveryFailed(env, message, lastError || new Error('消息转发失败'));
+    await saveMessageHistory(env, {
+      userId: Number(message.chat.id),
+      chatType: message.chat?.type || 'private',
+      topicId: messageThreadId || null,
+      telegramMessageId: Number(message.message_id) || null,
+      direction: 'user_to_admin',
+      senderRole: 'user',
+      messageType: detectMessageType(message),
+      textContent: extractMessageText(message),
+      mediaFileId: extractPrimaryMediaFileId(message),
+      rawPayload: message,
     });
-  } catch (error) {
-    try {
-      await telegram(env, 'sendMessage', {
-        chat_id: adminChatId,
-        text: `${metaText}\n\n提示：元信息消息降级发送，原错误：${trimText(formatErrorMessage(error), 300)}`,
-        reply_markup: buildAdminActionKeyboard(message.chat.id),
-      });
-    } catch (fallbackError) {
-      await notifyUserAdminDeliveryFailed(env, message, fallbackError);
-      return;
-    }
+    return;
   }
 
   if (typeof message.text === 'string' && message.text.startsWith('/start')) {
@@ -795,6 +856,34 @@ async function handleUserMessage(message, env, adminChatId) {
   });
 }
 
+async function getPrivateRelayAdminUserIds(env) {
+  const configured = parseIdList(env.ADMIN_IDS || env.ADMIN_ID).filter((id) => Number.isFinite(id) && id > 0);
+  if (configured.length > 0) {
+    return Array.from(new Set(configured));
+  }
+
+  const adminChatId = Number(env.ADMIN_CHAT_ID);
+  if (Number.isFinite(adminChatId) && adminChatId > 0) {
+    return [adminChatId];
+  }
+
+  if (Number.isFinite(adminChatId) && adminChatId < 0 && env.BOT_TOKEN) {
+    try {
+      const members = await getAdminChatMembers(env, adminChatId);
+      const memberIds = members
+        .filter((item) => !item?.user?.is_bot)
+        .map((item) => Number(item?.user?.id))
+        .filter((id) => Number.isFinite(id) && id > 0);
+      return Array.from(new Set(memberIds));
+    } catch (error) {
+      return [];
+    }
+  }
+
+  return [];
+}
+
+
 async function handleAdminMessage(message, env, adminChatId, preAuthorized = null, publicBaseUrl = '') {
   const senderId = message.from?.id ? Number(message.from.id) : null;
   const chatId = Number(message.chat.id);
@@ -813,6 +902,14 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = nul
   }
 
   if (!authorized) {
+    const rawText = typeof message?.text === 'string' ? message.text.trim() : '';
+    if (/^\/\S+/.test(rawText)) {
+      await sendAdminNotice(
+        env,
+        message,
+        '未识别到管理员权限，请先确认：\n1) 你的用户 ID 已加入 ADMIN_IDS 或 ADMIN_ID；\n2) 若使用群管理员自动识别，请将机器人设为该管理群管理员后重试。',
+      );
+    }
     return;
   }
 
@@ -823,11 +920,22 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = nul
     });
   }
 
-  if (message.chat.type !== 'private' && chatId !== adminChatId) {
+  const privateRelayAdminIds = isTopicModeEnabled(env) ? [] : await getPrivateRelayAdminUserIds(env);
+  const isPrivateRelayAdminChat = !isTopicModeEnabled(env) && privateRelayAdminIds.includes(chatId);
+  const isGroupAdminChat = message.chat.type !== 'private' && chatId === adminChatId;
+  const isAuthorizedPrivateAdminChat =
+    message.chat.type === 'private' && (chatId === adminChatId || isPrivateRelayAdminChat || Boolean(senderId && authorized));
+
+  if (!isGroupAdminChat && !isAuthorizedPrivateAdminChat) {
     return;
   }
 
   if (isIgnoredAdminServiceMessage(message)) {
+    return;
+  }
+
+  const welcomeSetupHandled = await tryConsumePendingWelcomeSetup(message, env);
+  if (welcomeSetupHandled) {
     return;
   }
 
@@ -886,7 +994,13 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = nul
       await sendAdminNotice(
         env,
         message,
-        '未识别到目标用户。请在对应用户话题内直接回复，或回复带 #UID 的提示消息，或使用 /reply 用户ID 内容。',
+        '未识别到目标用户。请回复包含 #UID 的转发消息，或使用 /reply userId 内容。',
+      );
+    } else if (message.chat.type === 'private' && isPrivateRelayAdminChat) {
+      await sendAdminNotice(
+        env,
+        message,
+        '未识别到目标用户。请回复包含 #UID 的转发消息，或使用 /reply userId 内容。',
       );
     }
     return;
@@ -919,6 +1033,7 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
   const trimmed = message.text.trim();
   const senderId = message.from?.id ? Number(message.from.id) : null;
   const rootAdmin = senderId ? isRootAdmin(env, senderId) : false;
+  const pendingScope = getWelcomeSetupScopeKey(message);
 
   if (trimmed === '/start' || trimmed === '/help') {
     await sendAdminNotice(
@@ -943,13 +1058,44 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
         '13. 手动放行验证：/verifypass 用户ID',
         '14. 清理历史数据：/cleanup （按保留期）或 /cleanup 天数',
         '15. 检测已注销账户并清理：/sweepdeleted',
+        '16. 彻底删除用户（含历史消息）：/deleteuser 用户ID',
+        '17. 设置欢迎内容：/setwelcome（下一条消息自动识别并回填）',
+        '18. 取消欢迎设置：/cancelwelcome',
       ].join('\n'),
     );
     return true;
   }
 
+  if (/^\/(?:cancelwelcome|cancelsetwelcome|welcomecancel)\s*$/i.test(trimmed)) {
+    await clearPendingWelcomeSetup(env, pendingScope);
+    await sendAdminNotice(env, message, '已取消欢迎内容设置。');
+    return true;
+  }
+
+  const setWelcomeMatch = trimmed.match(/^\/(?:setwelcome|welcome|setupwelcome)(?:\s+(text|photo|video|animation|audio|voice|sticker|document|auto))?\s*$/i);
+  if (setWelcomeMatch) {
+    const requestedType = String(setWelcomeMatch[1] || 'auto').trim().toLowerCase();
+    const normalizedType = requestedType === 'auto' ? 'auto' : normalizeWelcomeTypeForSetup(requestedType);
+    await setPendingWelcomeSetup(env, pendingScope, {
+      requestedType: normalizedType,
+      createdBy: formatAdminOperator(message.from),
+      chatId: Number(message.chat?.id || 0) || null,
+      threadId: Number(message.message_thread_id || 0) || null,
+    });
+    const tipLines = [
+      `欢迎设置已开启（模式：${normalizedType === 'auto' ? '自动识别' : normalizedType}）。`,
+      '请发送下一条消息作为欢迎内容：',
+      '1) 纯文本：自动更新 WELCOME_TEXT，并将类型设为 text',
+      '2) 图片/视频/动图/音频/语音/贴纸/文件：自动提取 file_id 并更新 WELCOME_MEDIA 与类型',
+      '3) 若媒体带 caption，会同时写入 WELCOME_TEXT',
+      '可用 /cancelwelcome 取消本次设置。',
+    ];
+    await sendAdminNotice(env, message, tipLines.join('\n'));
+    return true;
+  }
+
   if (/^\/(?:panel|openpanel|adminpanel|admin)\s*$/i.test(trimmed)) {
-    const panelUrl = await resolveAdminPanelUrl(env, publicBaseUrl);
+    const panelUrl = getAdminPanelEntryUrl(env, publicBaseUrl) || await resolveAdminPanelUrl(env, publicBaseUrl);
     await sendAdminNotice(
       env,
       message,
@@ -1210,6 +1356,32 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
     return true;
   }
 
+  const deleteUserMatch = trimmed.match(/^\/(?:deleteuser|deluser|removeuser|purgeuser)\s*(\-?\d+)?\s*$/i);
+  if (deleteUserMatch) {
+    const userId = deleteUserMatch[1] ? Number(deleteUserMatch[1]) : defaultTargetUserId;
+    if (!userId) {
+      await sendAdminNotice(env, message, '请使用 /deleteuser 用户ID，或在回复/话题上下文中直接发送 /deleteuser');
+      return true;
+    }
+
+    const result = await purgeDeletedUserData(env, userId);
+    const lines = [
+      `已删除用户：${userId}`,
+      `删除档案：${result.kv.deletedUsers}`,
+      `删除验证状态：${result.kv.deletedVerifyStates}`,
+      `删除话题映射：${result.kv.deletedTopicMappings}`,
+      `删除黑名单：${result.kv.deletedBlacklistEntries}`,
+      `删除信任：${result.kv.deletedTrustEntries}`,
+      `删除管理员：${result.kv.deletedAdminEntries}`,
+      `删除历史消息：${result.d1.deletedMessages}`,
+      `删除会话：${result.d1.deletedConversations}`,
+      result.kv.errors > 0 ? `KV 异常：${result.kv.errors}` : '',
+      result.d1.errors > 0 ? `D1 异常：${result.d1.errors}` : '',
+    ].filter(Boolean);
+    await sendAdminNotice(env, message, lines.join('\n'));
+    return true;
+  }
+
   const usersMatch = trimmed.match(/^\/users(?:\s+(\d+))?\s*$/i);
   if (usersMatch) {
     const users = await listUsers(env, parseLimit(usersMatch[1], 20));
@@ -1262,8 +1434,8 @@ async function handleAdminActionCallback(callbackQuery, env) {
 
   if (action === 'reply') {
     const tip = isTopicModeEnabled(env)
-      ? '直接在当前话题发送消息即可回复该用户。'
-      : '请直接回复这条提示消息，或使用 /reply 用户ID 内容。';
+      ? '请直接在当前话题中回复用户消息。'
+      : '请在机器人私聊中回复包含 #UID 的转发消息，或使用 /reply userId 内容。';
     await answerCallback(env, callbackQuery.id, tip, true);
     return;
   }
@@ -1603,6 +1775,10 @@ function getWelcomeType(env) {
   const raw = String(env?.WELCOME_TYPE || WELCOME_TYPE_TEXT).trim().toLowerCase();
   if (raw === WELCOME_TYPE_PHOTO) return WELCOME_TYPE_PHOTO;
   if (raw === WELCOME_TYPE_VIDEO) return WELCOME_TYPE_VIDEO;
+  if (raw === WELCOME_TYPE_ANIMATION) return WELCOME_TYPE_ANIMATION;
+  if (raw === WELCOME_TYPE_AUDIO) return WELCOME_TYPE_AUDIO;
+  if (raw === WELCOME_TYPE_VOICE) return WELCOME_TYPE_VOICE;
+  if (raw === WELCOME_TYPE_STICKER) return WELCOME_TYPE_STICKER;
   if (raw === WELCOME_TYPE_DOCUMENT) return WELCOME_TYPE_DOCUMENT;
   return WELCOME_TYPE_TEXT;
 }
@@ -1645,6 +1821,48 @@ async function sendWelcomeMessage(env, chatId, options = {}) {
       document: media,
       caption: trimText(text, 1024),
     });
+    return;
+  }
+
+  if (welcomeType === WELCOME_TYPE_ANIMATION && media) {
+    await telegram(env, 'sendAnimation', {
+      chat_id: userId,
+      animation: media,
+      caption: trimText(text, 1024),
+    });
+    return;
+  }
+
+  if (welcomeType === WELCOME_TYPE_AUDIO && media) {
+    await telegram(env, 'sendAudio', {
+      chat_id: userId,
+      audio: media,
+      caption: trimText(text, 1024),
+    });
+    return;
+  }
+
+  if (welcomeType === WELCOME_TYPE_VOICE && media) {
+    await telegram(env, 'sendVoice', {
+      chat_id: userId,
+      voice: media,
+      caption: trimText(text, 1024),
+    });
+    return;
+  }
+
+  if (welcomeType === WELCOME_TYPE_STICKER && media) {
+    await telegram(env, 'sendSticker', {
+      chat_id: userId,
+      sticker: media,
+    });
+
+    if (text.trim()) {
+      await telegram(env, 'sendMessage', {
+        chat_id: userId,
+        text,
+      });
+    }
     return;
   }
 
@@ -1723,6 +1941,9 @@ async function syncTelegramCommands(env) {
     { command: 'verifypass', description: '手动放行验证：/verifypass 用户ID' },
     { command: 'user', description: '查看用户详情：/user 用户ID' },
     { command: 'users', description: '查看最近用户：/users 20' },
+    { command: 'deleteuser', description: '彻底删除用户：/deleteuser 用户ID' },
+    { command: 'setwelcome', description: '设置欢迎内容：/setwelcome' },
+    { command: 'cancelwelcome', description: '取消欢迎设置：/cancelwelcome' },
     { command: 'blacklist', description: '查看黑名单列表' },
     { command: 'admins', description: '查看管理员列表' },
     { command: 'adminadd', description: '授权管理员：/adminadd 用户ID 备注' },
@@ -1925,6 +2146,12 @@ async function resolveAdminTargetUserId(message, env, adminChatId) {
 
   if (isTopicModeEnabled(env) && Number(message.chat.id) === adminChatId && message.message_thread_id) {
     return getUserIdByThread(env, message.message_thread_id);
+  }
+
+  const textPool = [message?.text, message?.caption].filter(Boolean).join('\n');
+  const selfMetaMatch = textPool.match(/#UID:(-?\d+)/);
+  if (selfMetaMatch) {
+    return Number(selfMetaMatch[1]);
   }
 
   return null;
@@ -4838,6 +5065,14 @@ async function getRuntimeEnv(env) {
     'WELCOME_TYPE',
     'WELCOME_MEDIA',
     'WELCOME_TEXT',
+    'BOT_DESCRIPTION',
+    'BOT_SHORT_DESCRIPTION',
+    'BOT_DESCRIPTION_DEFAULT',
+    'BOT_SHORT_DESCRIPTION_DEFAULT',
+    'BOT_DESCRIPTION_ZH_CN',
+    'BOT_SHORT_DESCRIPTION_ZH_CN',
+    'BOT_DESCRIPTION_EN_US',
+    'BOT_SHORT_DESCRIPTION_EN_US',
     'BLOCKED_TEXT',
     'DATA_RETENTION_DAYS',
     'DATA_CLEANUP_BATCH_SIZE',
@@ -4855,6 +5090,23 @@ async function getRuntimeEnv(env) {
     if (typeof value === 'string' && value.trim()) {
       runtime[key] = value.trim();
     }
+  }
+
+  if (!String(runtime.BOT_DESCRIPTION || '').trim()) {
+    runtime.BOT_DESCRIPTION = String(
+      systemConfig?.BOT_DESCRIPTION_DEFAULT ||
+        systemConfig?.BOT_DESCRIPTION_ZH_CN ||
+        systemConfig?.BOT_DESCRIPTION_EN_US ||
+        '',
+    ).trim();
+  }
+  if (!String(runtime.BOT_SHORT_DESCRIPTION || '').trim()) {
+    runtime.BOT_SHORT_DESCRIPTION = String(
+      systemConfig?.BOT_SHORT_DESCRIPTION_DEFAULT ||
+        systemConfig?.BOT_SHORT_DESCRIPTION_ZH_CN ||
+        systemConfig?.BOT_SHORT_DESCRIPTION_EN_US ||
+        '',
+    ).trim();
   }
 
   return runtime;
@@ -4959,12 +5211,217 @@ function extractPrimaryMediaFileId(message) {
   );
 }
 
+function getWelcomeSetupScopeKey(message) {
+  const chatId = Number(message?.chat?.id || 0) || 0;
+  const threadId = Number(message?.message_thread_id || 0) || 0;
+  return `${chatId}:${threadId}`;
+}
+
+function normalizeWelcomeTypeForSetup(value) {
+  const type = String(value || '').trim().toLowerCase();
+  if (type === WELCOME_TYPE_TEXT) return WELCOME_TYPE_TEXT;
+  if (type === WELCOME_TYPE_PHOTO) return WELCOME_TYPE_PHOTO;
+  if (type === WELCOME_TYPE_VIDEO) return WELCOME_TYPE_VIDEO;
+  if (type === WELCOME_TYPE_ANIMATION) return WELCOME_TYPE_ANIMATION;
+  if (type === WELCOME_TYPE_AUDIO) return WELCOME_TYPE_AUDIO;
+  if (type === WELCOME_TYPE_VOICE) return WELCOME_TYPE_VOICE;
+  if (type === WELCOME_TYPE_STICKER) return WELCOME_TYPE_STICKER;
+  if (type === WELCOME_TYPE_DOCUMENT) return WELCOME_TYPE_DOCUMENT;
+  throw new AppError(400, '欢迎类型仅支持 text/photo/video/animation/audio/voice/sticker/document');
+}
+
+function detectWelcomeTypeFromMessage(message) {
+  if (typeof message?.text === 'string' && message.text.trim()) return WELCOME_TYPE_TEXT;
+  if (message?.photo?.length) return WELCOME_TYPE_PHOTO;
+  if (message?.video) return WELCOME_TYPE_VIDEO;
+  if (message?.animation) return WELCOME_TYPE_ANIMATION;
+  if (message?.audio) return WELCOME_TYPE_AUDIO;
+  if (message?.voice) return WELCOME_TYPE_VOICE;
+  if (message?.sticker) return WELCOME_TYPE_STICKER;
+  if (message?.document) return WELCOME_TYPE_DOCUMENT;
+  return '';
+}
+
+function extractWelcomeMediaFileIdFromMessageByType(message, type) {
+  if (type === WELCOME_TYPE_PHOTO && Array.isArray(message?.photo) && message.photo.length) {
+    return message.photo[message.photo.length - 1]?.file_id || '';
+  }
+  if (type === WELCOME_TYPE_VIDEO) return String(message?.video?.file_id || '');
+  if (type === WELCOME_TYPE_ANIMATION) return String(message?.animation?.file_id || '');
+  if (type === WELCOME_TYPE_AUDIO) return String(message?.audio?.file_id || '');
+  if (type === WELCOME_TYPE_VOICE) return String(message?.voice?.file_id || '');
+  if (type === WELCOME_TYPE_STICKER) return String(message?.sticker?.file_id || '');
+  if (type === WELCOME_TYPE_DOCUMENT) return String(message?.document?.file_id || '');
+  return '';
+}
+
+async function getPendingWelcomeSetup(env, scopeKey) {
+  if (!env?.BOT_KV || !scopeKey) return null;
+  return getJson(env.BOT_KV, `${WELCOME_SETUP_PENDING_PREFIX}${scopeKey}`);
+}
+
+async function setPendingWelcomeSetup(env, scopeKey, payload = {}) {
+  ensureKv(env);
+  if (!scopeKey) return;
+  const now = new Date().toISOString();
+  const record = {
+    scopeKey,
+    requestedType: String(payload.requestedType || 'auto').trim().toLowerCase() || 'auto',
+    createdBy: payload.createdBy || null,
+    chatId: Number(payload.chatId || 0) || null,
+    threadId: Number(payload.threadId || 0) || null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  await env.BOT_KV.put(`${WELCOME_SETUP_PENDING_PREFIX}${scopeKey}`, JSON.stringify(record), {
+    expirationTtl: WELCOME_SETUP_PENDING_TTL_SECONDS,
+  });
+}
+
+async function clearPendingWelcomeSetup(env, scopeKey) {
+  if (!env?.BOT_KV || !scopeKey) return;
+  await env.BOT_KV.delete(`${WELCOME_SETUP_PENDING_PREFIX}${scopeKey}`);
+}
+
+async function applyWelcomeSetupFromAdminMessage(env, message, pending) {
+  const resolvedType =
+    pending?.requestedType && pending.requestedType !== 'auto'
+      ? normalizeWelcomeTypeForSetup(pending.requestedType)
+      : detectWelcomeTypeFromMessage(message);
+  if (!resolvedType) {
+    throw new AppError(400, '未识别到可设置内容，请发送文本或支持的媒体消息。');
+  }
+
+  const text = extractMessageText(message).trim();
+  const mediaFileId = extractWelcomeMediaFileIdFromMessageByType(message, resolvedType);
+  if (resolvedType !== WELCOME_TYPE_TEXT && !mediaFileId) {
+    throw new AppError(400, '未能提取媒体 file_id，请改用原生媒体消息发送（不要仅发送链接）。');
+  }
+
+  const config = await getSystemConfig(env);
+  const next = {
+    ...config,
+    WELCOME_TYPE: resolvedType,
+    WELCOME_MEDIA: resolvedType === WELCOME_TYPE_TEXT ? '' : mediaFileId,
+    WELCOME_TEXT: text,
+    updatedAt: new Date().toISOString(),
+  };
+  await setSystemConfig(env, next);
+
+  const runtimeEnv = await getRuntimeEnv(env);
+  return {
+    welcomeType: resolvedType,
+    welcomeMedia: resolvedType === WELCOME_TYPE_TEXT ? '' : mediaFileId,
+    welcomeText: text,
+    runtimeEnv,
+  };
+}
+
+async function tryConsumePendingWelcomeSetup(message, env) {
+  if (!env?.BOT_KV) return false;
+  const text = typeof message?.text === 'string' ? message.text.trim() : '';
+  if (/^\/(?:setwelcome|welcome|setupwelcome|cancelwelcome|cancelsetwelcome|welcomecancel)\b/i.test(text)) {
+    return false;
+  }
+
+  const scopeKey = getWelcomeSetupScopeKey(message);
+  const pending = await getPendingWelcomeSetup(env, scopeKey);
+  if (!pending) return false;
+
+  try {
+    const result = await applyWelcomeSetupFromAdminMessage(env, message, pending);
+    await clearPendingWelcomeSetup(env, scopeKey);
+    await sendAdminNotice(
+      env,
+      message,
+      [
+        '欢迎内容设置成功：',
+        `类型：${result.welcomeType}`,
+        result.welcomeMedia ? `媒体 file_id：${result.welcomeMedia}` : '媒体：已清空',
+        `文案：${result.welcomeText || '（空）'}`,
+      ].join('\n'),
+    );
+    return true;
+  } catch (error) {
+    await sendAdminNotice(
+      env,
+      message,
+      `欢迎内容设置失败：${trimText(formatErrorMessage(error), 300)}\n请重发目标内容，或使用 /cancelwelcome 取消。`,
+    );
+    return true;
+  }
+}
+
 function safeJsonStringify(value) {
   try {
     return JSON.stringify(value ?? null);
   } catch (error) {
     return null;
   }
+}
+
+function getWelcomeUploadEndpointByType(type) {
+  const normalized = String(type || '').trim().toLowerCase();
+  if (normalized === WELCOME_TYPE_PHOTO) return { method: 'sendPhoto', field: 'photo' };
+  if (normalized === WELCOME_TYPE_VIDEO) return { method: 'sendVideo', field: 'video' };
+  if (normalized === WELCOME_TYPE_ANIMATION) return { method: 'sendAnimation', field: 'animation' };
+  if (normalized === WELCOME_TYPE_AUDIO) return { method: 'sendAudio', field: 'audio' };
+  if (normalized === WELCOME_TYPE_VOICE) return { method: 'sendVoice', field: 'voice' };
+  if (normalized === WELCOME_TYPE_STICKER) return { method: 'sendSticker', field: 'sticker' };
+  if (normalized === WELCOME_TYPE_DOCUMENT) return { method: 'sendDocument', field: 'document' };
+  throw new AppError(400, '当前欢迎类型不支持上传文件，请先切换到图片/视频/动图/音频/语音/贴纸/文件');
+}
+
+function extractWelcomeMediaFileIdByType(type, message = {}) {
+  const normalized = String(type || '').trim().toLowerCase();
+  if (normalized === WELCOME_TYPE_PHOTO && Array.isArray(message.photo) && message.photo.length) {
+    return message.photo[message.photo.length - 1]?.file_id || '';
+  }
+  if (normalized === WELCOME_TYPE_VIDEO) return String(message?.video?.file_id || '');
+  if (normalized === WELCOME_TYPE_ANIMATION) return String(message?.animation?.file_id || '');
+  if (normalized === WELCOME_TYPE_AUDIO) return String(message?.audio?.file_id || '');
+  if (normalized === WELCOME_TYPE_VOICE) return String(message?.voice?.file_id || '');
+  if (normalized === WELCOME_TYPE_STICKER) return String(message?.sticker?.file_id || '');
+  if (normalized === WELCOME_TYPE_DOCUMENT) return String(message?.document?.file_id || '');
+  return '';
+}
+
+async function uploadWelcomeMediaToTelegram(env, type, file) {
+  const endpoint = getWelcomeUploadEndpointByType(type);
+  const chatId = toChatId(env.ADMIN_CHAT_ID);
+  if (!chatId) {
+    throw new AppError(400, 'ADMIN_CHAT_ID 未配置，无法上传欢迎媒体');
+  }
+
+  const body = new FormData();
+  body.set('chat_id', String(chatId));
+  body.set(endpoint.field, file, file.name || `welcome-${Date.now()}`);
+
+  const data = await telegramMultipart(env, endpoint.method, body);
+  const fileId = extractWelcomeMediaFileIdByType(type, data);
+  if (!fileId) {
+    throw new AppError(500, '上传成功但未解析到 file_id，请更换文件类型后重试');
+  }
+
+  // 上传时 Telegram 会给管理员会话发一条消息，这里尝试撤回，避免干扰。
+  try {
+    if (data?.message_id) {
+      await telegram(env, 'deleteMessage', {
+        chat_id: chatId,
+        message_id: data.message_id,
+      });
+    }
+  } catch (error) {
+    // ignore cleanup failure
+  }
+
+  return {
+    type,
+    fileId,
+    fileName: String(file.name || '').trim() || null,
+    mimeType: String(file.type || '').trim() || null,
+    size: Number(file.size || 0) || 0,
+  };
 }
 
 async function getEffectiveSystemConfig(env) {
@@ -4983,6 +5440,14 @@ async function getEffectiveSystemConfig(env) {
     'USER_VERIFICATION',
     'WELCOME_TYPE',
     'WELCOME_MEDIA',
+    'BOT_DESCRIPTION',
+    'BOT_SHORT_DESCRIPTION',
+    'BOT_DESCRIPTION_DEFAULT',
+    'BOT_SHORT_DESCRIPTION_DEFAULT',
+    'BOT_DESCRIPTION_ZH_CN',
+    'BOT_SHORT_DESCRIPTION_ZH_CN',
+    'BOT_DESCRIPTION_EN_US',
+    'BOT_SHORT_DESCRIPTION_EN_US',
     'VERIFY_EXPIRE_MS',
     'VERIFY_FAIL_BLOCK_MS',
     'VERIFY_TIMEOUT_BLOCK_MS',
@@ -5219,6 +5684,8 @@ async function updateSystemConfig(env, payload) {
   ensureKv(env);
   const existing = await getSystemConfig(env);
   const next = { ...existing };
+  const botMetaPayload = readBotMetaUpdatePayload(payload || {}, existing || {});
+  validateBotMetaPayload(botMetaPayload);
   const allowed = [
     'VERIFY_EXPIRE_MS',
     'VERIFY_FAIL_BLOCK_MS',
@@ -5246,6 +5713,14 @@ async function updateSystemConfig(env, payload) {
     'WELCOME_TYPE',
     'WELCOME_MEDIA',
     'WELCOME_TEXT',
+    'BOT_DESCRIPTION',
+    'BOT_SHORT_DESCRIPTION',
+    'BOT_DESCRIPTION_DEFAULT',
+    'BOT_SHORT_DESCRIPTION_DEFAULT',
+    'BOT_DESCRIPTION_ZH_CN',
+    'BOT_SHORT_DESCRIPTION_ZH_CN',
+    'BOT_DESCRIPTION_EN_US',
+    'BOT_SHORT_DESCRIPTION_EN_US',
     'BLOCKED_TEXT',
     'DATA_RETENTION_DAYS',
     'DATA_CLEANUP_BATCH_SIZE',
@@ -5269,11 +5744,103 @@ async function updateSystemConfig(env, payload) {
   }
 
   next.updatedAt = new Date().toISOString();
+  const normalizedDescription = String(botMetaPayload?.values?.BOT_DESCRIPTION || '').trim();
+  const normalizedShortDescription = String(botMetaPayload?.values?.BOT_SHORT_DESCRIPTION || '').trim();
+  next.BOT_DESCRIPTION = normalizedDescription;
+  next.BOT_SHORT_DESCRIPTION = normalizedShortDescription;
+  // Keep legacy keys aligned to avoid stale reads from old deployments.
+  next.BOT_DESCRIPTION_DEFAULT = normalizedDescription;
+  next.BOT_SHORT_DESCRIPTION_DEFAULT = normalizedShortDescription;
+  delete next.BOT_DESCRIPTION_ZH_CN;
+  delete next.BOT_SHORT_DESCRIPTION_ZH_CN;
+  delete next.BOT_DESCRIPTION_EN_US;
+  delete next.BOT_SHORT_DESCRIPTION_EN_US;
   await setSystemConfig(env, next);
-  return next;
+
+  const shouldSyncBotMeta = botMetaPayload.updated;
+  let metaSync = { synced: false, error: null };
+  if (shouldSyncBotMeta && env.BOT_TOKEN) {
+    try {
+      await syncTelegramBotProfileMeta(env, next);
+      metaSync = { synced: true, error: null };
+    } catch (error) {
+      const errorText = formatErrorMessage(error);
+      metaSync = { synced: false, error: errorText };
+      throw new AppError(400, `机器人简介同步失败：${errorText}`);
+    }
+  }
+
+  return { ...next, metaSync };
+}
+
+function readBotMetaUpdatePayload(payload = {}, existing = {}) {
+  const hasDescription = Object.prototype.hasOwnProperty.call(payload, 'BOT_DESCRIPTION');
+  const hasShortDescription = Object.prototype.hasOwnProperty.call(payload, 'BOT_SHORT_DESCRIPTION');
+  const hasLegacyDescription = Object.prototype.hasOwnProperty.call(payload, 'BOT_DESCRIPTION_DEFAULT');
+  const hasLegacyShortDescription = Object.prototype.hasOwnProperty.call(payload, 'BOT_SHORT_DESCRIPTION_DEFAULT');
+
+  const description = hasDescription
+    ? payload.BOT_DESCRIPTION
+    : hasLegacyDescription
+      ? payload.BOT_DESCRIPTION_DEFAULT
+      : existing.BOT_DESCRIPTION;
+  const shortDescription = hasShortDescription
+    ? payload.BOT_SHORT_DESCRIPTION
+    : hasLegacyShortDescription
+      ? payload.BOT_SHORT_DESCRIPTION_DEFAULT
+      : existing.BOT_SHORT_DESCRIPTION;
+
+  return {
+    updated: hasDescription || hasShortDescription || hasLegacyDescription || hasLegacyShortDescription,
+    values: {
+      BOT_DESCRIPTION: String(description ?? '').trim(),
+      BOT_SHORT_DESCRIPTION: String(shortDescription ?? '').trim(),
+    },
+  };
+}
+
+function validateBotMetaPayload(payload = {}) {
+  const description = String(payload?.values?.BOT_DESCRIPTION || '').trim();
+  const shortDescription = String(payload?.values?.BOT_SHORT_DESCRIPTION || '').trim();
+
+  if (description.length > BOT_DESCRIPTION_MAX_LENGTH) {
+    throw new AppError(400, `BOT_DESCRIPTION 最长 ${BOT_DESCRIPTION_MAX_LENGTH} 个字符`);
+  }
+  if (shortDescription.length > BOT_SHORT_DESCRIPTION_MAX_LENGTH) {
+    throw new AppError(400, `BOT_SHORT_DESCRIPTION 最长 ${BOT_SHORT_DESCRIPTION_MAX_LENGTH} 个字符`);
+  }
+}
+
+async function syncTelegramBotProfileMeta(env, config = {}) {
+  const description = String(config?.BOT_DESCRIPTION || '').trim();
+  const shortDescription = String(config?.BOT_SHORT_DESCRIPTION || '').trim();
+
+  await telegram(env, 'setMyDescription', { description });
+  await telegram(env, 'setMyShortDescription', { short_description: shortDescription });
+
+  // Clear legacy locale-specific overrides if they ever existed.
+  try {
+    await telegram(env, 'setMyDescription', { description: '', language_code: 'zh-hans' });
+    await telegram(env, 'setMyShortDescription', { short_description: '', language_code: 'zh-hans' });
+    await telegram(env, 'setMyDescription', { description: '', language_code: 'en' });
+    await telegram(env, 'setMyShortDescription', { short_description: '', language_code: 'en' });
+  } catch (error) {
+    // ignore cleanup failures
+  }
 }
 
 function buildSystemConfigView(config) {
+  const description = String(
+    config.BOT_DESCRIPTION || config.BOT_DESCRIPTION_DEFAULT || config.BOT_DESCRIPTION_ZH_CN || config.BOT_DESCRIPTION_EN_US || '',
+  ).trim();
+  const shortDescription = String(
+    config.BOT_SHORT_DESCRIPTION ||
+      config.BOT_SHORT_DESCRIPTION_DEFAULT ||
+      config.BOT_SHORT_DESCRIPTION_ZH_CN ||
+      config.BOT_SHORT_DESCRIPTION_EN_US ||
+      '',
+  ).trim();
+
   return {
     BOT_TOKEN: maskSecret(config.BOT_TOKEN),
     ADMIN_CHAT_ID: config.ADMIN_CHAT_ID || '',
@@ -5300,6 +5867,8 @@ function buildSystemConfigView(config) {
     WELCOME_TYPE: config.WELCOME_TYPE || '',
     WELCOME_MEDIA: config.WELCOME_MEDIA || '',
     WELCOME_TEXT: config.WELCOME_TEXT || '',
+    BOT_DESCRIPTION: description,
+    BOT_SHORT_DESCRIPTION: shortDescription,
     BLOCKED_TEXT: config.BLOCKED_TEXT || '',
     DATA_RETENTION_DAYS: config.DATA_RETENTION_DAYS || '',
     DATA_CLEANUP_BATCH_SIZE: config.DATA_CLEANUP_BATCH_SIZE || '',
@@ -5915,6 +6484,19 @@ async function telegram(env, method, payload) {
     method: 'POST',
     headers: { 'content-type': 'application/json; charset=UTF-8' },
     body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+  if (!response.ok || !data.ok) {
+    throw new Error(data.description || `Telegram API error: ${response.status}`);
+  }
+  return data.result;
+}
+
+async function telegramMultipart(env, method, formData) {
+  const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+    method: 'POST',
+    body: formData,
   });
 
   const data = await response.json();

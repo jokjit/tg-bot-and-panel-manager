@@ -233,3 +233,14 @@ export function sendReply(payload) {
 export function fetchHistory(params = {}) {
   return api.get('/admin/api/history', { params }).then((r) => r.data);
 }
+
+export function uploadWelcomeMedia(type, file) {
+  const formData = new FormData();
+  formData.set('type', String(type || '').trim());
+  formData.set('file', file);
+  return api
+    .post('/admin/api/welcome-media/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    .then((r) => r.data);
+}

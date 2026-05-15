@@ -106,6 +106,16 @@
                 >
                   {{ t('users.restart') }}
                 </n-button>
+                <n-button
+                  round
+                  size="small"
+                  type="error"
+                  ghost
+                  :loading="actionLoading[user.userId] === 'delete'"
+                  @click="confirmDeleteUser(user)"
+                >
+                  {{ t('users.deleteUser') }}
+                </n-button>
               </div>
             </div>
 
@@ -354,6 +364,7 @@ async function handleUserAction(user, action) {
       trust: t('users.trustSuccess'),
       untrust: t('users.untrustSuccess'),
       restart: t('users.restartSuccess'),
+      delete: t('users.deleteSuccess'),
     };
 
     message.success(successMap[action] || t('users.actionSuccess'));
@@ -363,6 +374,14 @@ async function handleUserAction(user, action) {
   } finally {
     delete actionLoading[userId];
   }
+}
+
+async function confirmDeleteUser(user) {
+  const userId = String(user?.userId || '').trim();
+  if (!userId) return;
+  const ok = window.confirm(t('users.deleteConfirm', { userId }));
+  if (!ok) return;
+  await handleUserAction(user, 'delete');
 }
 
 async function sendToUser() {
