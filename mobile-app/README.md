@@ -49,6 +49,16 @@ npm run cap:open
 - 之后每次改动前端后，执行 `npm run build && npm run cap:sync`。
 - 在 Android Studio 中可直接运行到真机，或 `Build > Build APK(s)` 导出 APK。
 
+## 打包约定（默认流程）
+
+- 测试包使用 debug：
+  - `cd android && gradlew.bat assembleDebug`
+  - 产物：`android/app/build/outputs/apk/debug/app-debug.apk`
+- 正式发布使用签名 release：
+  - `cd android && gradlew.bat assembleRelease`
+  - 如果检测到 `android/keystore/release-v2.3.credentials.txt`（或同名环境变量），会自动使用签名配置；
+  - 产物：`android/app/build/outputs/apk/release/app-release.apk`
+
 ## 注意事项
 
 - 在桌面浏览器调试时，Cloudflare API 可能受 CORS 影响；安卓原生运行会走 `CapacitorHttp`，不受浏览器 CORS 限制。

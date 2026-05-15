@@ -1,5 +1,41 @@
 apply plugin: 'com.android.application'
 
+def releaseKeyPropsFile = rootProject.file("keystore/release-v2.3.credentials.txt")
+def releaseKeyProps = [:]
+if (releaseKeyPropsFile.exists() && releaseKeyPropsFile.isFile()) {
+    releaseKeyPropsFile.readLines('UTF-8').each { rawLine ->
+        def line = (rawLine ?: '').replace('\uFEFF', '').trim()
+        if (line && !line.startsWith('#') && !line.startsWith(';')) {
+            def idx = line.indexOf('=')
+            if (idx > 0) {
+                def key = line.substring(0, idx).trim()
+                def value = line.substring(idx + 1).trim()
+                if (key) {
+                    releaseKeyProps[key] = value
+                }
+            }
+        }
+    }
+}
+
+def readReleaseKeyProp = { String key ->
+    def value = String.valueOf(releaseKeyProps[key] ?: "").trim()
+    if (!value) {
+        value = (System.getenv(key) ?: "").trim()
+    }
+    return value
+}
+
+def releaseStorePath = readReleaseKeyProp("KEYSTORE_PATH")
+def releaseStorePass = readReleaseKeyProp("STORE_PASS")
+def releaseKeyAlias = readReleaseKeyProp("ALIAS")
+def releaseKeyPass = releaseStorePass
+if (releaseStorePath && releaseStorePath.contains("\\")) {
+    releaseStorePath = releaseStorePath.replace("\\", "/")
+}
+def releaseStoreFile = releaseStorePath ? file(releaseStorePath) : null
+def releaseSigningReady = releaseStoreFile?.exists() && releaseStorePass && releaseKeyAlias && releaseKeyPass
+
 android {
     namespace = "com.tgbot.deploy"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -16,8 +52,21 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (releaseSigningReady) {
+                storeFile file(releaseStorePath)
+                storePassword releaseStorePass
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPass
+            }
+        }
+    }
     buildTypes {
         release {
+            if (releaseSigningReady) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
