@@ -93,10 +93,10 @@ export default {
       const runtimeEnv = await getRuntimeEnv(env);
       const webhookPath = normalizeWebhookPath(runtimeEnv.WEBHOOK_PATH);
       const publicBaseUrl = getPublicBaseUrl(url, runtimeEnv);
-      if (ctx && isDataCleanupAutoEnabled(runtimeEnv) && shouldScheduleAutoCleanupCheck()) {
+      if (ctx?.waitUntil && isDataCleanupAutoEnabled(runtimeEnv) && shouldScheduleAutoCleanupCheck()) {
         ctx.waitUntil(runDataCleanupIfDue(runtimeEnv).catch(() => {}));
       }
-      if (ctx && isDeletedAccountSweepAutoEnabled(runtimeEnv) && shouldScheduleDeletedAccountSweepCheck()) {
+      if (ctx?.waitUntil && isDeletedAccountSweepAutoEnabled(runtimeEnv) && shouldScheduleDeletedAccountSweepCheck()) {
         ctx.waitUntil(runDeletedAccountSweepIfDue(runtimeEnv).catch(() => {}));
       }
 
@@ -2552,6 +2552,42 @@ function setPixel(pixels, width, height, x, y, color) {
   pixels[idx + 2] = color[2];
 }
 
+function blendPixel(pixels, width, height, x, y, color, alpha = 1) {
+  if (x < 0 || y < 0 || x >= width || y >= height) return;
+  const idx = (Math.floor(y) * width + Math.floor(x)) * 3;
+  const a = clamp(Number(alpha), 0, 1);
+  pixels[idx] = Math.round(pixels[idx] * (1 - a) + color[0] * a);
+  pixels[idx + 1] = Math.round(pixels[idx + 1] * (1 - a) + color[1] * a);
+  pixels[idx + 2] = Math.round(pixels[idx + 2] * (1 - a) + color[2] * a);
+}
+
+function drawFilledCircle(pixels, width, height, cx, cy, radius, color, alpha = 1) {
+  const r = Math.max(0, Number(radius || 0));
+  const minX = Math.floor(cx - r);
+  const maxX = Math.ceil(cx + r);
+  const minY = Math.floor(cy - r);
+  const maxY = Math.ceil(cy + r);
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const dx = x - cx;
+      const dy = y - cy;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance > r) continue;
+      blendPixel(pixels, width, height, x, y, color, alpha * Math.max(0, 1 - distance / Math.max(1, r + 1)));
+    }
+  }
+}
+
+function drawCircleOutline(pixels, width, height, cx, cy, radius, color) {
+  const r = Math.max(1, Number(radius || 0));
+  for (let i = 0; i < 720; i += 1) {
+    const angle = (Math.PI * 2 * i) / 720;
+    const x = Math.round(cx + Math.cos(angle) * r);
+    const y = Math.round(cy + Math.sin(angle) * r);
+    blendPixel(pixels, width, height, x, y, color, 0.55);
+  }
+}
+
 function createSeededRandom(seedText) {
   let state = 2166136261;
   for (let i = 0; i < seedText.length; i += 1) {
@@ -4019,7 +4055,7 @@ async function createOrRefreshVerificationWebSession(env, userId, options = {}) 
   );
 
   if (sessionValid && !forceNew) {
-    return existing;
+    return await ensureVerificationSliderProofState(env, userId, existing);
   }
 
   if (forceNew && existing?.promptMessageId) {
@@ -4056,11 +4092,31 @@ async function createOrRefreshVerificationWebSession(env, userId, options = {}) 
   return nextState;
 }
 
+async function ensureVerificationSliderProofState(env, userId, state) {
+  if (state?.stage !== 'slider' || !state?.slider || state.slider.submitNonce) {
+    return state;
+  }
+
+  const nextState = {
+    ...state,
+    slider: {
+      ...(state.slider || {}),
+      submitNonce: createChallengeToken(),
+      submitNonceIssuedAt: new Date().toISOString(),
+    },
+    updatedAt: new Date().toISOString(),
+  };
+  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await persistLatestVerificationSession(env, userId, nextState);
+  return nextState;
+}
+
 function createSliderChallengeForWebVerification() {
   const size = 240;
   const maxAngle = 360;
   const startAngle = randomInt(35, 325);
   const targetAngle = normalizeRotationAngle(360 - startAngle);
+  const nonce = createChallengeToken();
   return {
     type: 'rotation',
     size,
@@ -4068,6 +4124,8 @@ function createSliderChallengeForWebVerification() {
     startAngle,
     targetAngle,
     seed: createChallengeToken(),
+    submitNonce: nonce,
+    submitNonceIssuedAt: new Date().toISOString(),
     attempts: 0,
     createdAt: new Date().toISOString(),
   };
@@ -4125,7 +4183,7 @@ function buildVerificationWebUrl(state, userId, publicBaseUrl = '') {
   return `${base}${VERIFY_WEB_PATH}?${params.toString()}`;
 }
 
-function buildVerificationSessionPayload(state, env, publicBaseUrl = '') {
+async function buildVerificationSessionPayload(state, env, publicBaseUrl = '') {
   if (state?.verified) {
     return {
       status: 'verified',
@@ -4174,12 +4232,15 @@ function buildVerificationSessionPayload(state, env, publicBaseUrl = '') {
   if (stage === 'slider') {
     const slider = state?.slider || createSliderChallengeForWebVerification();
     const isRotation = slider?.type === 'rotation';
+    const proof = await buildSliderSubmitProof(env, state, slider);
     payload.slider = isRotation
       ? {
           type: 'rotation',
           size: Number(slider.size || 240),
           maxAngle: Number(slider.maxAngle || 360),
           image: buildRotationCaptchaDataUrl(slider),
+          nonce: proof.nonce,
+          signature: proof.signature,
           attemptsUsed: Number(slider.attempts || 0),
         }
       : {
@@ -4190,6 +4251,8 @@ function buildVerificationSessionPayload(state, env, publicBaseUrl = '') {
           targetY: Number(slider.targetY || 52),
           maxX: Number(slider.maxX || 250),
           background: buildSliderBackgroundDataUrl(slider),
+          nonce: proof.nonce,
+          signature: proof.signature,
           attemptsUsed: Number(slider.attempts || 0),
         };
     return payload;
@@ -4222,90 +4285,200 @@ function getRotationAngleDelta(left, right) {
   return Math.min(diff, 360 - diff);
 }
 
+function rotatePoint(x, y, angle) {
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return {
+    x: x * cos - y * sin,
+    y: x * sin + y * cos,
+  };
+}
+
+function mixColor(left, right, amount) {
+  const ratio = clamp(Number(amount), 0, 1);
+  return [
+    Math.round(left[0] * (1 - ratio) + right[0] * ratio),
+    Math.round(left[1] * (1 - ratio) + right[1] * ratio),
+    Math.round(left[2] * (1 - ratio) + right[2] * ratio),
+  ];
+}
+
+function hslToRgb(hue, saturation, lightness) {
+  const h = ((((Number(hue) || 0) % 360) + 360) % 360) / 360;
+  const s = clamp(Number(saturation), 0, 1);
+  const l = clamp(Number(lightness), 0, 1);
+  if (s === 0) {
+    const value = Math.round(l * 255);
+    return [value, value, value];
+  }
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const channels = [h + 1 / 3, h, h - 1 / 3].map((t) => {
+    let value = t;
+    if (value < 0) value += 1;
+    if (value > 1) value -= 1;
+    if (value < 1 / 6) return p + (q - p) * 6 * value;
+    if (value < 1 / 2) return q;
+    if (value < 2 / 3) return p + (q - p) * (2 / 3 - value) * 6;
+    return p;
+  });
+  return channels.map((value) => Math.round(value * 255));
+}
+
+function distanceToSegment(px, py, ax, ay, bx, by) {
+  const vx = bx - ax;
+  const vy = by - ay;
+  const wx = px - ax;
+  const wy = py - ay;
+  const lenSq = vx * vx + vy * vy;
+  const t = lenSq > 0 ? clamp((wx * vx + wy * vy) / lenSq, 0, 1) : 0;
+  const x = ax + vx * t;
+  const y = ay + vy * t;
+  const dx = px - x;
+  const dy = py - y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function distanceToArrow(x, y, radius) {
+  const shaft = distanceToSegment(x, y, 0, -radius + 68, 0, radius - 40);
+  const leftHead = distanceToSegment(x, y, 0, -radius + 30, -18, -radius + 74);
+  const rightHead = distanceToSegment(x, y, 0, -radius + 30, 18, -radius + 74);
+  return Math.min(shaft, leftHead, rightHead);
+}
+
+function nearestCompassMark(x, y, radius) {
+  const distance = Math.sqrt(x * x + y * y);
+  if (distance < radius - 22 || distance > radius - 6) return Infinity;
+  const angle = Math.atan2(y, x);
+  const step = (Math.PI * 2) / 24;
+  const nearest = Math.round(angle / step) * step;
+  const angular = Math.abs(Math.atan2(Math.sin(angle - nearest), Math.cos(angle - nearest)));
+  return angular * distance;
+}
+
+async function buildSliderSubmitProof(env, state, slider) {
+  const nonce = String(slider?.submitNonce || '').trim();
+  return {
+    nonce,
+    signature: await signSliderSubmitNonce(env, state, slider, nonce),
+  };
+}
+
+async function signSliderSubmitNonce(env, state, slider, nonce) {
+  const payload = [
+    Number(state?.userId || 0),
+    String(state?.sessionToken || ''),
+    String(slider?.type || 'slider'),
+    String(slider?.seed || ''),
+    String(slider?.createdAt || ''),
+    String(nonce || ''),
+  ].join(':');
+  return hmacSha256Hex(getVerificationProofSecret(env, state), payload);
+}
+
+async function validateSliderSubmitProof(env, state, slider, body) {
+  const nonce = String(body?.nonce || '').trim();
+  const signature = String(body?.signature || '').trim();
+  const expectedNonce = String(slider?.submitNonce || '').trim();
+  if (!nonce || !signature || !expectedNonce) {
+    return { ok: false, reason: 'proof_missing' };
+  }
+  if (!timingSafeEqualText(nonce, expectedNonce)) {
+    return { ok: false, reason: 'proof_nonce_mismatch' };
+  }
+
+  const issuedAtMs = slider?.submitNonceIssuedAt ? new Date(slider.submitNonceIssuedAt).getTime() : 0;
+  const maxAgeMs = Math.max(30 * 1000, Math.min(getVerifyWebSessionExpireMs(env), 10 * 60 * 1000));
+  if (!issuedAtMs || Date.now() - issuedAtMs > maxAgeMs) {
+    return { ok: false, reason: 'proof_expired' };
+  }
+
+  const expectedSignature = await signSliderSubmitNonce(env, state, slider, nonce);
+  if (!timingSafeEqualText(signature, expectedSignature)) {
+    return { ok: false, reason: 'proof_signature_mismatch' };
+  }
+
+  return { ok: true, reason: 'ok' };
+}
+
 function buildRotationCaptchaDataUrl(slider) {
-  const size = Number(slider?.size || 240);
+  const png = renderRotationCaptchaPng(slider);
+  return `data:image/png;base64,${base64EncodeBytes(png)}`;
+}
+
+function renderRotationCaptchaPng(slider) {
+  const size = clamp(Math.round(Number(slider?.size || 240)), 160, 360);
   const center = size / 2;
   const radius = Math.round(size * 0.42);
   const seed = String(slider?.seed || createChallengeToken());
   const rand = createSeededRandom(seed);
   const startAngle = normalizeRotationAngle(slider?.startAngle || 0);
-  const hue = 175 + Math.floor(rand() * 100);
-  const accent = 18 + Math.floor(rand() * 60);
-  const marks = [];
-  const specks = [];
+  const pixels = new Uint8Array(size * size * 3);
+  const baseHue = 175 + Math.floor(rand() * 100);
+  const accentHue = 18 + Math.floor(rand() * 60);
+  const rotation = (startAngle * Math.PI) / 180;
 
-  for (let i = 0; i < 24; i += 1) {
-    const angle = (Math.PI * 2 * i) / 24;
-    const outer = radius - 6;
-    const inner = i % 3 === 0 ? radius - 20 : radius - 13;
-    const x1 = center + Math.cos(angle) * inner;
-    const y1 = center + Math.sin(angle) * inner;
-    const x2 = center + Math.cos(angle) * outer;
-    const y2 = center + Math.sin(angle) * outer;
-    const width = i % 6 === 0 ? 3 : 1.5;
-    marks.push(
-      `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="rgba(33,61,86,.58)" stroke-width="${width}" stroke-linecap="round" />`,
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const dx = x - center;
+      const dy = y - center;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      let color = [232, 243, 251];
+
+      if (distance <= radius) {
+        const local = rotatePoint(dx, dy, -rotation);
+        const radial = Math.min(1, distance / radius);
+        const sweep = (Math.atan2(local.y, local.x) + Math.PI) / (Math.PI * 2);
+        const warm = hslToRgb(accentHue, 0.86, 0.72);
+        const cool = hslToRgb(baseHue + sweep * 28, 0.78, 0.68 + (1 - radial) * 0.16);
+        color = mixColor(cool, warm, Math.max(0, radial - 0.45) * 0.9);
+
+        const wave1 = Math.abs(local.y - Math.sin(local.x / 28) * 20 - 24);
+        if (wave1 < 10) color = mixColor(color, [255, 255, 255], 0.32 * (1 - wave1 / 10));
+
+        const wave2 = Math.abs(local.y + Math.cos(local.x / 34) * 17 + 24);
+        if (wave2 < 8) color = mixColor(color, [24, 76, 101], 0.15 * (1 - wave2 / 8));
+
+        const arrowDistance = distanceToArrow(local.x, local.y, radius);
+        if (arrowDistance < 5.2) color = mixColor([20, 50, 75], [255, 255, 255], arrowDistance / 8.5);
+
+        const centerDot = Math.sqrt(local.x * local.x + local.y * local.y);
+        if (centerDot < 16) color = mixColor(color, [255, 255, 255], 0.76 * (1 - centerDot / 16));
+
+        const mark = nearestCompassMark(local.x, local.y, radius);
+        if (mark < 3.2) color = mixColor(color, [24, 54, 82], 0.5 * (1 - mark / 3.2));
+
+        const grain = rand() * 10 - 5;
+        color = color.map((v) => clamp(Math.round(v + grain), 0, 255));
+      } else if (distance <= radius + 3) {
+        color = [64, 96, 120];
+      }
+
+      setPixel(pixels, size, size, x, y, color);
+    }
+  }
+
+  for (let i = 0; i < 34; i += 1) {
+    const angle = rand() * Math.PI * 2;
+    const distance = rand() * radius * 0.78;
+    const local = { x: Math.cos(angle) * distance, y: Math.sin(angle) * distance };
+    const rotated = rotatePoint(local.x, local.y, rotation);
+    drawFilledCircle(
+      pixels,
+      size,
+      size,
+      Math.round(center + rotated.x),
+      Math.round(center + rotated.y),
+      1 + Math.floor(rand() * 3),
+      [238 + Math.floor(rand() * 17), 244 + Math.floor(rand() * 10), 255],
+      0.34,
     );
   }
 
-  for (let i = 0; i < 28; i += 1) {
-    const angle = rand() * Math.PI * 2;
-    const distance = rand() * radius * 0.82;
-    const cx = center + Math.cos(angle) * distance;
-    const cy = center + Math.sin(angle) * distance;
-    const r = 1.2 + rand() * 3.4;
-    const alpha = (0.16 + rand() * 0.22).toFixed(3);
-    specks.push(`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r.toFixed(1)}" fill="rgba(255,255,255,${alpha})" />`);
-  }
-
-  const arrow = [
-    `${center},${center - radius + 31}`,
-    `${center - 18},${center - radius + 74}`,
-    `${center - 5},${center - radius + 67}`,
-    `${center - 5},${center + radius - 38}`,
-    `${center + 5},${center + radius - 38}`,
-    `${center + 5},${center - radius + 67}`,
-    `${center + 18},${center - radius + 74}`,
-  ].join(' ');
-
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
-    <defs>
-      <radialGradient id="disc" cx="38%" cy="28%" r="72%">
-        <stop offset="0%" stop-color="hsl(${hue},90%,88%)" />
-        <stop offset="58%" stop-color="hsl(${hue + 18},78%,70%)" />
-        <stop offset="100%" stop-color="hsl(${accent},92%,72%)" />
-      </radialGradient>
-      <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
-        <feDropShadow dx="0" dy="10" stdDeviation="8" flood-color="#1a466e" flood-opacity=".22"/>
-      </filter>
-      <filter id="grain" x="-20%" y="-20%" width="140%" height="140%">
-        <feTurbulence type="fractalNoise" baseFrequency=".75" numOctaves="2" seed="${Math.floor(rand() * 1000)}" />
-        <feColorMatrix type="saturate" values="0"/>
-        <feComponentTransfer>
-          <feFuncA type="table" tableValues="0 0.08"/>
-        </feComponentTransfer>
-      </filter>
-      <clipPath id="clipDisc">
-        <circle cx="${center}" cy="${center}" r="${radius}" />
-      </clipPath>
-    </defs>
-    <rect width="${size}" height="${size}" fill="#eaf3fb" />
-    <g transform="rotate(${startAngle} ${center} ${center})" filter="url(#softShadow)">
-      <circle cx="${center}" cy="${center}" r="${radius}" fill="url(#disc)" stroke="rgba(36,70,96,.68)" stroke-width="4" />
-      <g clip-path="url(#clipDisc)">
-        ${specks.join('')}
-        <path d="M ${center - radius} ${center + 34} C ${center - 45} ${center + 8}, ${center + 26} ${center + 82}, ${center + radius} ${center + 36}" fill="none" stroke="rgba(255,255,255,.42)" stroke-width="18" stroke-linecap="round" />
-        <path d="M ${center - radius + 18} ${center - 26} C ${center - 25} ${center - 54}, ${center + 36} ${center - 18}, ${center + radius - 16} ${center - 54}" fill="none" stroke="rgba(26,76,101,.18)" stroke-width="14" stroke-linecap="round" />
-      </g>
-      ${marks.join('')}
-      <polygon points="${arrow}" fill="rgba(20,50,75,.82)" stroke="rgba(255,255,255,.62)" stroke-width="2" stroke-linejoin="round" />
-      <circle cx="${center}" cy="${center}" r="16" fill="rgba(255,255,255,.78)" stroke="rgba(34,70,100,.42)" stroke-width="2" />
-      <text x="${center}" y="${center - radius + 26}" text-anchor="middle" fill="rgba(20,50,75,.86)" font-size="24" font-weight="900" font-family="Arial,sans-serif">N</text>
-      <circle cx="${center}" cy="${center}" r="${radius - 2}" fill="transparent" filter="url(#grain)" />
-    </g>
-  </svg>`;
-
-  return `data:image/svg+xml;base64,${base64Encode(svg)}`;
+  const north = rotatePoint(0, -radius + 25, rotation);
+  drawChar(pixels, size, size, 'N', Math.round(center + north.x - 10), Math.round(center + north.y - 13), 4, [24, 54, 82]);
+  drawCircleOutline(pixels, size, size, Math.round(center), Math.round(center), radius, [48, 84, 112]);
+  return encodePngRgb(size, size, pixels);
 }
 
 function buildSliderBackgroundDataUrl(slider) {
@@ -4374,8 +4547,12 @@ function buildSliderBackgroundDataUrl(slider) {
 function base64Encode(input) {
   const text = String(input || '');
   const bytes = new TextEncoder().encode(text);
+  return base64EncodeBytes(bytes);
+}
+
+function base64EncodeBytes(bytes) {
   let binary = '';
-  for (const byte of bytes) {
+  for (const byte of bytes || []) {
     binary += String.fromCharCode(byte);
   }
   return btoa(binary);
@@ -4515,14 +4692,15 @@ async function handleVerificationSessionApi(env, body, publicBaseUrl = '') {
 
   const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
   if (blockedUntilMs && blockedUntilMs > Date.now()) {
-    return buildVerificationSessionPayload(state, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(state, env, publicBaseUrl);
   }
 
   if (isVerificationSessionExpired(state)) {
     throw new AppError(410, '验证会话已过期，请返回 Telegram 重新获取最新验证按钮。');
   }
 
-  return buildVerificationSessionPayload(state, env, publicBaseUrl);
+  state = await ensureVerificationSliderProofState(env, userId, state);
+  return await buildVerificationSessionPayload(state, env, publicBaseUrl);
 }
 
 async function handleVerificationSliderApi(env, body, publicBaseUrl = '') {
@@ -4538,7 +4716,7 @@ async function handleVerificationSliderApi(env, body, publicBaseUrl = '') {
   }
 
   if (current?.verified) {
-    return buildVerificationSessionPayload(current, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
   }
 
   if (isVerificationSessionExpired(current)) {
@@ -4546,20 +4724,35 @@ async function handleVerificationSliderApi(env, body, publicBaseUrl = '') {
   }
 
   if (current?.stage !== 'slider') {
-    return buildVerificationSessionPayload(current, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
   }
 
-  const validation = validateSliderAttemptHuman(current?.slider, body, env);
+  const hadSubmitProof = Boolean(current?.slider?.submitNonce);
+  current = await ensureVerificationSliderProofState(env, userId, current);
+  if (!hadSubmitProof && (!body?.nonce || !body?.signature)) {
+    return {
+      ...(await buildVerificationSessionPayload(current, env, publicBaseUrl)),
+      status: 'slider_failed',
+      reason: 'proof_missing',
+    };
+  }
+
+  const validation = await validateSliderAttemptHuman(current, body, env);
   if (validation.ok) {
     const nextState = {
       ...current,
       stage: 'grid',
+      slider: {
+        ...(current?.slider || {}),
+        submitNonce: null,
+        submitNonceIssuedAt: null,
+      },
       sessionExpiresAt: new Date(Date.now() + getVerifyWebSessionExpireMs(env)).toISOString(),
       updatedAt: new Date().toISOString(),
     };
     await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
     await persistLatestVerificationSession(env, userId, nextState);
-    return buildVerificationSessionPayload(nextState, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(nextState, env, publicBaseUrl);
   }
 
   const maxAttempts = getVerifyStageMaxAttempts(env);
@@ -4569,6 +4762,8 @@ async function handleVerificationSliderApi(env, body, publicBaseUrl = '') {
     slider: {
       ...(current?.slider || {}),
       attempts: nextAttempts,
+      submitNonce: createChallengeToken(),
+      submitNonceIssuedAt: new Date().toISOString(),
       lastReason: validation.reason,
       lastFailedAt: new Date().toISOString(),
     },
@@ -4580,13 +4775,13 @@ async function handleVerificationSliderApi(env, body, publicBaseUrl = '') {
       stage: 'slider',
       reason: validation.reason,
     });
-    return buildVerificationSessionPayload(locked, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(locked, env, publicBaseUrl);
   }
 
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
   await persistLatestVerificationSession(env, userId, nextState);
   return {
-    ...buildVerificationSessionPayload(nextState, env, publicBaseUrl),
+    ...(await buildVerificationSessionPayload(nextState, env, publicBaseUrl)),
     status: 'slider_failed',
     reason: validation.reason,
   };
@@ -4605,7 +4800,7 @@ async function handleVerificationGridApi(env, body, publicBaseUrl = '') {
   }
 
   if (current?.verified) {
-    return buildVerificationSessionPayload(current, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
   }
 
   if (isVerificationSessionExpired(current)) {
@@ -4613,7 +4808,7 @@ async function handleVerificationGridApi(env, body, publicBaseUrl = '') {
   }
 
   if (current?.stage !== 'grid') {
-    return buildVerificationSessionPayload(current, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
   }
 
   const selections = Array.isArray(body?.selections)
@@ -4629,7 +4824,7 @@ async function handleVerificationGridApi(env, body, publicBaseUrl = '') {
       notifyUser: true,
       keepSession: false,
     });
-    return buildVerificationSessionPayload(nextState, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(nextState, env, publicBaseUrl);
   }
 
   const maxAttempts = getVerifyStageMaxAttempts(env);
@@ -4650,13 +4845,13 @@ async function handleVerificationGridApi(env, body, publicBaseUrl = '') {
       reason: 'grid_selection_mismatch',
       selections,
     });
-    return buildVerificationSessionPayload(locked, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(locked, env, publicBaseUrl);
   }
 
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
   await persistLatestVerificationSession(env, userId, nextState);
   return {
-    ...buildVerificationSessionPayload(nextState, env, publicBaseUrl),
+    ...(await buildVerificationSessionPayload(nextState, env, publicBaseUrl)),
     status: 'grid_failed',
     reason: 'grid_selection_mismatch',
   };
@@ -4675,7 +4870,7 @@ async function handleVerificationChoiceApi(env, body, publicBaseUrl = '') {
   }
 
   if (current?.verified) {
-    return buildVerificationSessionPayload(current, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
   }
 
   if (isVerificationSessionExpired(current)) {
@@ -4683,7 +4878,7 @@ async function handleVerificationChoiceApi(env, body, publicBaseUrl = '') {
   }
 
   if (current?.stage !== 'choice') {
-    return buildVerificationSessionPayload(current, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
   }
 
   const answer = String(body?.answer ?? '').trim();
@@ -4693,7 +4888,7 @@ async function handleVerificationChoiceApi(env, body, publicBaseUrl = '') {
       notifyUser: true,
       keepSession: false,
     });
-    return buildVerificationSessionPayload(nextState, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(nextState, env, publicBaseUrl);
   }
 
   const maxAttempts = getVerifyStageMaxAttempts(env);
@@ -4716,21 +4911,27 @@ async function handleVerificationChoiceApi(env, body, publicBaseUrl = '') {
       reason: 'choice_selection_mismatch',
       selectedAnswer: answer,
     });
-    return buildVerificationSessionPayload(locked, env, publicBaseUrl);
+    return await buildVerificationSessionPayload(locked, env, publicBaseUrl);
   }
 
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
   await persistLatestVerificationSession(env, userId, nextState);
   return {
-    ...buildVerificationSessionPayload(nextState, env, publicBaseUrl),
+    ...(await buildVerificationSessionPayload(nextState, env, publicBaseUrl)),
     status: 'choice_failed',
     reason: 'choice_selection_mismatch',
   };
 }
 
-function validateSliderAttemptHuman(slider, body, env) {
+async function validateSliderAttemptHuman(state, body, env) {
+  const slider = state?.slider;
   if (!slider) {
     return { ok: false, reason: 'slider_missing' };
+  }
+
+  const proof = await validateSliderSubmitProof(env, state, slider, body);
+  if (!proof.ok) {
+    return proof;
   }
 
   if (slider?.type === 'rotation') {
@@ -4749,7 +4950,7 @@ function validateSliderAttemptHuman(slider, body, env) {
   }
 
   const trace = normalizeSliderTrace(body?.trace);
-  if (trace.length < 2) {
+  if (trace.length < 5) {
     return { ok: false, reason: 'trace_too_short' };
   }
 
@@ -4774,7 +4975,7 @@ function validateSliderAttemptHuman(slider, body, env) {
   }
 
   const totalMoves = forwardMoves + backwardMoves;
-  if (totalMoves < 1) {
+  if (totalMoves < 4) {
     return { ok: false, reason: 'trace_not_enough_segments' };
   }
   if (forwardMoves / totalMoves < 0.55) {
@@ -4784,6 +4985,11 @@ function validateSliderAttemptHuman(slider, body, env) {
   const expectedDistance = Math.max(20, Math.abs(value - trace[0].x));
   if (totalDistance < expectedDistance * 0.55) {
     return { ok: false, reason: 'trace_distance_invalid' };
+  }
+
+  const shape = scoreTraceShapeRisk(trace, value, { allowSingleDirection: false });
+  if (!shape.ok) {
+    return { ok: false, reason: shape.reason };
   }
 
   const risk = scoreSliderInteractionRisk(trace, body?.interaction, value);
@@ -4807,13 +5013,22 @@ function validateRotationAttemptHuman(slider, body, env) {
   }
 
   const trace = normalizeSliderTrace(body?.trace);
-  if (trace.length < 2) {
+  if (trace.length < 6) {
     return { ok: false, reason: 'trace_too_short' };
   }
 
   const durationMs = trace[trace.length - 1].t - trace[0].t;
   if (durationMs < getVerifyMinSliderTimeMs(env)) {
     return { ok: false, reason: 'trace_too_fast' };
+  }
+
+  const shape = scoreTraceShapeRisk(trace, value, {
+    allowSingleDirection: true,
+    stationaryRatioLimit: 0.88,
+    stationaryDelta: 0.35,
+  });
+  if (!shape.ok) {
+    return { ok: false, reason: shape.reason };
   }
 
   const risk = scoreRotationInteractionRisk(trace, body?.interaction, value);
@@ -4830,14 +5045,17 @@ function scoreRotationInteractionRisk(trace, interaction, value) {
   const durationMs = Number(interaction?.durationMs || (trace[trace.length - 1]?.t - trace[0]?.t) || 0);
   const endX = Number(interaction?.endX ?? value);
   const averageIntervalMs = Number(interaction?.averageIntervalMs || 0);
+  const dragStarted = interaction?.dragStarted === true;
   let risk = 0;
 
-  if (eventCount < 2) risk += 3;
-  else if (eventCount < 4) risk += 1;
-  if (durationMs < 180) risk += 3;
-  else if (durationMs < 260) risk += 1;
+  if (!dragStarted) risk += 3;
+  if (eventCount < 5) risk += 3;
+  else if (eventCount < 8) risk += 1;
+  if (durationMs < 260) risk += 4;
+  else if (durationMs < 420) risk += 1;
   if (getRotationAngleDelta(endX, value) > 2) risk += 2;
-  if (averageIntervalMs > 0 && averageIntervalMs < 6 && eventCount > 10) risk += 1;
+  if (averageIntervalMs > 0 && averageIntervalMs < 8 && eventCount > 10) risk += 1;
+  if (averageIntervalMs > 180 && eventCount < 8) risk += 1;
   if (pointerType && !['mouse', 'touch', 'pen'].includes(pointerType)) risk += 1;
 
   if (risk >= 5) {
@@ -4857,19 +5075,89 @@ function scoreSliderInteractionRisk(trace, interaction, value) {
   let risk = 0;
 
   if (!dragStarted) risk += 4;
-  if (eventCount < 3) risk += 3;
-  else if (eventCount < 5) risk += 1;
-  if (durationMs < 220) risk += 4;
-  else if (durationMs < 360) risk += 1;
+  if (eventCount < 5) risk += 3;
+  else if (eventCount < 8) risk += 1;
+  if (durationMs < 320) risk += 4;
+  else if (durationMs < 480) risk += 1;
   if (Math.abs(startX) > 18) risk += 1;
   if (Math.abs(endX - value) > 2) risk += 2;
-  if (averageIntervalMs > 0 && averageIntervalMs < 8 && eventCount > 8) risk += 1;
+  if (averageIntervalMs > 0 && averageIntervalMs < 10 && eventCount > 8) risk += 1;
+  if (averageIntervalMs > 180 && eventCount < 8) risk += 1;
   if (pointerType && !['mouse', 'touch', 'pen'].includes(pointerType)) risk += 1;
 
   if (risk >= 5) {
     return { ok: false, reason: 'interaction_risk_high', risk };
   }
   return { ok: true, reason: 'ok', risk };
+}
+
+function scoreTraceShapeRisk(trace, value, options = {}) {
+  if (!Array.isArray(trace) || trace.length < 5) {
+    return { ok: false, reason: 'trace_too_short' };
+  }
+
+  const allowSingleDirection = options?.allowSingleDirection !== false;
+  const stationaryDelta = Number.isFinite(Number(options?.stationaryDelta)) ? Number(options.stationaryDelta) : 0.8;
+  const stationaryRatioLimit = Number.isFinite(Number(options?.stationaryRatioLimit))
+    ? Number(options.stationaryRatioLimit)
+    : 0.72;
+  const maxValue = Math.max(Number(value || 0), ...trace.map((item) => Number(item.x || 0)), 1);
+  const deltas = [];
+  const intervals = [];
+  const speeds = [];
+  let reversals = 0;
+  let stationary = 0;
+  let previousDirection = 0;
+  let maxStep = 0;
+
+  for (let i = 1; i < trace.length; i += 1) {
+    const dx = Number(trace[i].x - trace[i - 1].x);
+    const dt = Number(trace[i].t - trace[i - 1].t);
+    if (dt <= 0) {
+      return { ok: false, reason: 'trace_time_invalid' };
+    }
+    if (trace[i].x < -2 || trace[i].x > maxValue + 12) {
+      return { ok: false, reason: 'trace_range_invalid' };
+    }
+    const absDx = Math.abs(dx);
+    if (absDx < stationaryDelta) stationary += 1;
+    maxStep = Math.max(maxStep, absDx);
+    deltas.push(dx);
+    intervals.push(dt);
+    speeds.push(absDx / dt);
+    const direction = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+    if (direction && previousDirection && direction !== previousDirection) {
+      reversals += 1;
+    }
+    if (direction) previousDirection = direction;
+  }
+
+  if (stationary / Math.max(1, deltas.length) > stationaryRatioLimit) {
+    return { ok: false, reason: 'trace_distance_invalid' };
+  }
+  if (maxStep > Math.max(42, maxValue * 0.45)) {
+    return { ok: false, reason: 'trace_jump_invalid' };
+  }
+
+  const intervalVariance = computeVariance(intervals);
+  const speedVariance = computeVariance(speeds);
+  const deltaVariance = computeVariance(deltas.map((item) => Math.abs(item)));
+  const mostlySyntheticCadence = intervalVariance < 9 && trace.length >= 8;
+  const mostlySyntheticMotion = speedVariance < 0.00012 && deltaVariance < 4 && trace.length >= 8;
+  if (mostlySyntheticCadence && mostlySyntheticMotion) {
+    return { ok: false, reason: 'trace_too_linear' };
+  }
+
+  if (!allowSingleDirection && reversals === 0 && trace.length >= 9 && deltaVariance < 7) {
+    return { ok: false, reason: 'trace_variance_too_low' };
+  }
+
+  const durationMs = trace[trace.length - 1].t - trace[0].t;
+  if (durationMs > 0 && Math.abs(value - trace[trace.length - 1].x) > Math.max(3, maxValue * 0.015)) {
+    return { ok: false, reason: 'trace_end_mismatch' };
+  }
+
+  return { ok: true, reason: 'ok' };
 }
 
 function normalizeSliderTrace(trace) {
@@ -4997,6 +5285,14 @@ function formatVerificationReasonText(reason) {
   if (normalized === 'interaction_risk_high') return '交互行为风险较高';
   if (normalized === 'trace_too_linear') return '轨迹过于线性';
   if (normalized === 'trace_variance_too_low') return '轨迹波动不足';
+  if (normalized === 'trace_time_invalid') return 'trace timestamp invalid';
+  if (normalized === 'trace_range_invalid') return 'trace range invalid';
+  if (normalized === 'trace_jump_invalid') return 'trace jump invalid';
+  if (normalized === 'trace_end_mismatch') return 'trace endpoint mismatch';
+  if (normalized === 'proof_missing') return 'proof missing';
+  if (normalized === 'proof_nonce_mismatch') return 'proof nonce mismatch';
+  if (normalized === 'proof_signature_mismatch') return 'proof signature mismatch';
+  if (normalized === 'proof_expired') return 'proof expired';
   if (normalized === 'grid_selection_mismatch') return '九宫格选择错误';
   if (normalized === 'choice_selection_mismatch') return '数字选择错误';
   if (normalized === 'verification_failed') return '验证失败';
@@ -6078,6 +6374,7 @@ async function getRuntimeEnv(env) {
     'VERIFY_MIN_SLIDER_TIME_MS',
     'VERIFY_SLIDER_TOLERANCE',
     'VERIFY_ROTATION_TOLERANCE',
+    'VERIFY_PROOF_SECRET',
     'VERIFY_OBSERVE_MESSAGE_COUNT',
     'VERIFY_FAIL_TOPIC_ID',
     'BOT_TOKEN',
@@ -6488,6 +6785,7 @@ async function getEffectiveSystemConfig(env) {
     'VERIFY_MIN_SLIDER_TIME_MS',
     'VERIFY_SLIDER_TOLERANCE',
     'VERIFY_ROTATION_TOLERANCE',
+    'VERIFY_PROOF_SECRET',
     'VERIFY_OBSERVE_MESSAGE_COUNT',
     'VERIFY_FAIL_TOPIC_ID',
     'WELCOME_TEXT',
@@ -6728,6 +7026,7 @@ async function updateSystemConfig(env, payload) {
     'VERIFY_MIN_SLIDER_TIME_MS',
     'VERIFY_SLIDER_TOLERANCE',
     'VERIFY_ROTATION_TOLERANCE',
+    'VERIFY_PROOF_SECRET',
     'VERIFY_OBSERVE_MESSAGE_COUNT',
     'VERIFY_FAIL_TOPIC_ID',
     'BOT_TOKEN',
@@ -6893,6 +7192,7 @@ function buildSystemConfigView(config) {
     VERIFY_MIN_SLIDER_TIME_MS: config.VERIFY_MIN_SLIDER_TIME_MS || '',
     VERIFY_SLIDER_TOLERANCE: config.VERIFY_SLIDER_TOLERANCE || '',
     VERIFY_ROTATION_TOLERANCE: config.VERIFY_ROTATION_TOLERANCE || '',
+    VERIFY_PROOF_SECRET: maskSecret(config.VERIFY_PROOF_SECRET),
     VERIFY_OBSERVE_MESSAGE_COUNT: config.VERIFY_OBSERVE_MESSAGE_COUNT || '',
     VERIFY_FAIL_TOPIC_ID: config.VERIFY_FAIL_TOPIC_ID || '',
     WELCOME_TYPE: config.WELCOME_TYPE || '',
@@ -6935,6 +7235,29 @@ function createChallengeToken() {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
   return `${Date.now().toString(36)}${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes || [], (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function hmacSha256Hex(secret, payload) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(String(secret || '')),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(String(payload || '')));
+  return bytesToHex(new Uint8Array(signature));
+}
+
+function getVerificationProofSecret(env, state = null) {
+  const configured = String(env?.VERIFY_PROOF_SECRET || env?.WEBHOOK_SECRET || env?.BOT_TOKEN || '').trim();
+  if (configured) return configured;
+  return String(state?.sessionToken || 'verification-proof-fallback');
 }
 
 function createBootstrapPassword(length = 12) {
@@ -8298,6 +8621,7 @@ function renderVerificationWebPage() {
         sliderScale: 1,
         sliderView: null,
         sliderInteraction: null,
+        sliderProof: null,
         selectedChoice: '',
         selected: new Set(),
         blockedTimer: null,
@@ -8548,6 +8872,10 @@ function renderVerificationWebPage() {
           targetY,
           maxX,
         };
+        state.sliderProof = {
+          nonce: String(slider.nonce || ''),
+          signature: String(slider.signature || ''),
+        };
         syncSliderPieceVisual();
         syncSliderTrackVisual();
 
@@ -8569,6 +8897,10 @@ function renderVerificationWebPage() {
         if (text === 'slider_missing') return '题目已失效';
         if (text === 'rotation_angle_mismatch') return '图片还没有转正';
         if (text === 'rotation_value_invalid') return '旋转角度无效';
+        if (text === 'proof_missing') return '验证令牌缺失';
+        if (text === 'proof_nonce_mismatch') return '验证令牌已失效';
+        if (text === 'proof_signature_mismatch') return '验证签名异常';
+        if (text === 'proof_expired') return '验证令牌已过期';
         if (text === 'trace_too_short') return '拖动轨迹过短，请按住滑块拖动';
         if (text === 'trace_too_fast') return '拖动太快，请稍微慢一点';
         if (text === 'trace_not_enough_segments') return '拖动轨迹不足';
@@ -8784,12 +9116,16 @@ function renderVerificationWebPage() {
 
       function pushTrace() {
         const now = performance.now();
+        const x = Number(el.sliderInput.value || 0);
+        const last = state.sliderTrace[state.sliderTrace.length - 1];
+        if (last && Math.abs(Number(last.x || 0) - x) < 0.001 && now - state.sliderDragStart - Number(last.t || 0) < 120) {
+          return;
+        }
         state.sliderTrace.push({
-          x: Number(el.sliderInput.value || 0),
+          x,
           t: Math.round(now - state.sliderDragStart),
         });
         if (state.sliderInteraction) {
-          const x = Number(el.sliderInput.value || 0);
           state.sliderInteraction.eventCount = Number(state.sliderInteraction.eventCount || 0) + 1;
           if (state.sliderInteraction.eventCount === 1) {
             state.sliderInteraction.startX = x;
@@ -8803,14 +9139,14 @@ function renderVerificationWebPage() {
         el.sliderSubmitBtn.disabled = true;
         try {
           const finalX = Number(el.sliderInput.value || 0);
-          if (state.sliderTrace.length < 6 && finalX > 0) {
-            state.sliderTrace = buildFallbackSliderTrace(finalX);
-          }
           const interaction = buildSliderInteractionSummary(finalX);
+          const proof = state.sliderProof || {};
           const payload = await callApi('/slider', {
             value: finalX,
             trace: state.sliderTrace.slice(-80),
             interaction,
+            nonce: proof.nonce || '',
+            signature: proof.signature || '',
           });
           state.payload = payload;
           renderByPayload(payload);
@@ -8841,21 +9177,6 @@ function renderVerificationWebPage() {
           endX: Number(base.endX ?? finalX),
           trackWidth: Number(base.trackWidth || el.sliderTrack.clientWidth || 0),
         };
-      }
-
-      function buildFallbackSliderTrace(finalX) {
-        const points = [];
-        const segments = 10;
-        for (let i = 0; i <= segments; i += 1) {
-          const ratio = i / segments;
-          const eased = 1 - Math.pow(1 - ratio, 2);
-          const wobble = i > 1 && i < segments ? Math.sin(i * 1.7) * 1.6 : 0;
-          points.push({
-            x: Math.max(0, Math.round(finalX * eased + wobble)),
-            t: i * 135 + (i % 3) * 17,
-          });
-        }
-        return points;
       }
 
       function bindChoiceEvents() {
