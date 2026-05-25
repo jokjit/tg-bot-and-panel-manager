@@ -145,7 +145,7 @@
                     <strong>{{ t('settings.verifyCaptchaEnabled') }}</strong>
                     <span>{{ form.VERIFY_CAPTCHA_ENABLED_BOOL ? t('app.enabled') : t('app.disabled') }}</span>
                   </div>
-                  <n-switch v-model:value="form.VERIFY_CAPTCHA_ENABLED_BOOL" />
+                  <n-switch :value="form.VERIFY_CAPTCHA_ENABLED_BOOL" @update:value="onVerifyCaptchaToggle" />
                 </div>
 
                 <div class="switch-tile">
@@ -153,7 +153,7 @@
                     <strong>{{ t('settings.verifyMathEnabled') }}</strong>
                     <span>{{ form.VERIFY_MATH_ENABLED_BOOL ? t('app.enabled') : t('app.disabled') }}</span>
                   </div>
-                  <n-switch v-model:value="form.VERIFY_MATH_ENABLED_BOOL" />
+                  <n-switch :value="form.VERIFY_MATH_ENABLED_BOOL" @update:value="onVerifyMathToggle" />
                 </div>
               </div>
             </div>
@@ -335,8 +335,18 @@ function assignConfig(cfg = {}) {
   form.VERIFY_PUBLIC_BASE_URL = cfg.VERIFY_PUBLIC_BASE_URL || '';
   form.TOPIC_MODE_BOOL = String(cfg.TOPIC_MODE || 'true') !== 'false';
   form.USER_VERIFICATION_BOOL = String(cfg.USER_VERIFICATION || 'true') !== 'false';
-  form.VERIFY_CAPTCHA_ENABLED_BOOL = String(cfg.VERIFY_CAPTCHA_ENABLED ?? 'true') !== 'false';
-  form.VERIFY_MATH_ENABLED_BOOL = String(cfg.VERIFY_MATH_ENABLED ?? 'true') !== 'false';
+  const captchaEnabled = String(cfg.VERIFY_CAPTCHA_ENABLED ?? 'true') !== 'false';
+  const mathEnabled = String(cfg.VERIFY_MATH_ENABLED ?? 'true') !== 'false';
+  if (!captchaEnabled && !mathEnabled) {
+    form.VERIFY_CAPTCHA_ENABLED_BOOL = true;
+    form.VERIFY_MATH_ENABLED_BOOL = false;
+  } else if (captchaEnabled && mathEnabled) {
+    form.VERIFY_CAPTCHA_ENABLED_BOOL = true;
+    form.VERIFY_MATH_ENABLED_BOOL = false;
+  } else {
+    form.VERIFY_CAPTCHA_ENABLED_BOOL = captchaEnabled;
+    form.VERIFY_MATH_ENABLED_BOOL = mathEnabled;
+  }
   form.VERIFY_EXPIRE_MINUTES = msToMinutes(cfg.VERIFY_EXPIRE_MS, DEFAULT_VERIFY_EXPIRE_MS);
   form.VERIFY_FAIL_BLOCK_SECONDS = msToSeconds(cfg.VERIFY_FAIL_BLOCK_MS, DEFAULT_VERIFY_FAIL_BLOCK_MS);
   form.VERIFY_TIMEOUT_BLOCK_SECONDS = msToSeconds(cfg.VERIFY_TIMEOUT_BLOCK_MS, DEFAULT_VERIFY_TIMEOUT_BLOCK_MS);
@@ -361,6 +371,30 @@ async function load() {
     message.error(error.message || t('settings.loadFailed'));
   } finally {
     loading.value = false;
+  }
+}
+
+function onVerifyCaptchaToggle(nextValue) {
+  const enabled = Boolean(nextValue);
+  form.VERIFY_CAPTCHA_ENABLED_BOOL = enabled;
+  if (enabled) {
+    form.VERIFY_MATH_ENABLED_BOOL = false;
+    return;
+  }
+  if (!form.VERIFY_MATH_ENABLED_BOOL) {
+    form.VERIFY_MATH_ENABLED_BOOL = true;
+  }
+}
+
+function onVerifyMathToggle(nextValue) {
+  const enabled = Boolean(nextValue);
+  form.VERIFY_MATH_ENABLED_BOOL = enabled;
+  if (enabled) {
+    form.VERIFY_CAPTCHA_ENABLED_BOOL = false;
+    return;
+  }
+  if (!form.VERIFY_CAPTCHA_ENABLED_BOOL) {
+    form.VERIFY_CAPTCHA_ENABLED_BOOL = true;
   }
 }
 

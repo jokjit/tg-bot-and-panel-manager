@@ -11,6 +11,7 @@ mobile-app/dist/
 mobile-app/public/deploy-assets/
 mobile-app/release-apk/
 mobile-app/android/keystore/
+release-packages/
 npm-debug.log*
 
 # Wrangler / Cloudflare

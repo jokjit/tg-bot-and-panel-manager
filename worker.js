@@ -25,8 +25,9 @@ const VERIFY_API_PREFIX = '/verify/api';
 const VERIFY_WEB_SESSION_EXPIRE_MS = 15 * 60 * 1000;
 const VERIFY_RETRY_BLOCK_MS = 60 * 60 * 1000;
 const VERIFY_STAGE_MAX_ATTEMPTS = 3;
-const VERIFY_MIN_SLIDER_TIME_MS = 900;
-const VERIFY_SLIDER_TOLERANCE = 8;
+const VERIFY_MIN_SLIDER_TIME_MS = 250;
+const VERIFY_SLIDER_TOLERANCE = 18;
+const VERIFY_ROTATION_TOLERANCE = 12;
 const VERIFY_OBSERVE_MESSAGE_COUNT = 5;
 const DEFAULT_DATA_RETENTION_DAYS = 90;
 const DEFAULT_DATA_CLEANUP_BATCH_SIZE = 200;
@@ -60,12 +61,23 @@ const SYSTEM_CONFIG_CACHE_TTL_MS = 5 * 1000;
 const GROUP_ADMIN_MEMBER_CACHE_TTL_MS = 90 * 1000;
 const GROUP_ADMIN_LIST_CACHE_TTL_MS = 60 * 1000;
 const LOCAL_CACHE_MAX_ENTRIES = 2048;
+const VERIFICATION_PASS_CACHE_TTL_MS = 10 * 60 * 1000;
+const VERIFICATION_D1_SCHEMA_RETRY_MS = 60 * 1000;
+const VERIFICATION_SESSION_CACHE_TTL_MS = 20 * 60 * 1000;
+const VERIFICATION_SESSION_D1_SCHEMA_RETRY_MS = 60 * 1000;
 
 const groupAdminMembershipCache = new Map();
 const groupAdminListCache = new Map();
+const verificationPassedCache = new Map();
+const verificationClearedCache = new Map();
+const verificationSessionCache = new Map();
 let systemConfigCache = { value: null, expiresAt: 0 };
 let lastAutoCleanupCheckAt = 0;
 let lastDeletedAccountSweepCheckAt = 0;
+let verificationStatusD1SchemaReady = false;
+let verificationStatusD1SchemaLastErrorAt = 0;
+let verificationSessionD1SchemaReady = false;
+let verificationSessionD1SchemaLastErrorAt = 0;
 
 export default {
   async fetch(request, env, ctx) {
@@ -1899,9 +1911,25 @@ async function ensureUserVerifiedOrPrompt(message, env, publicBaseUrl = '', opti
 
   ensureKv(env);
   const userId = Number(message.chat.id);
-  const state = await getUserVerificationState(env, userId);
+  let state = await getUserVerificationState(env, userId);
   if (stateRef) stateRef.value = state || null;
   if (state?.verified) {
+    const profile = await getUserProfile(env, userId);
+    if (await isVerificationStateActive(env, userId, state, profile)) {
+      if (!isProfileVerificationPassed(profile)) {
+        await markUserProfileVerificationPassed(env, userId, state.verifiedAt || state.answeredAt || state.updatedAt);
+      }
+      return true;
+    }
+
+    state = await resetVerificationStateAfterProfileRevocation(env, userId, state);
+    if (stateRef) stateRef.value = state || null;
+  }
+
+  const profile = await getUserProfile(env, userId);
+  const repairedState = await repairVerificationStateFromProfile(env, userId, state, profile);
+  if (repairedState?.verified) {
+    if (stateRef) stateRef.value = repairedState;
     return true;
   }
 
@@ -1920,7 +1948,7 @@ async function ensureUserVerifiedOrPrompt(message, env, publicBaseUrl = '', opti
     forceNew: true,
   });
   if (stateRef) stateRef.value = nextState;
-  await sendVerificationWebPrompt(env, userId, nextState, publicBaseUrl);
+  await sendVerificationWebPrompt(env, userId, nextState, publicBaseUrl, true);
   return false;
 }
 
@@ -2749,13 +2777,51 @@ function generateMathChallenge() {
   };
 }
 
+function generateNumericCode(length = 4) {
+  let code = '';
+  for (let i = 0; i < length; i += 1) {
+    code += String(randomInt(0, 9));
+  }
+  return code;
+}
+
+function mutateNumericCode(code) {
+  const chars = String(code).split('');
+  const index = randomInt(0, chars.length - 1);
+  let next = chars[index];
+  while (next === chars[index]) {
+    next = String(randomInt(0, 9));
+  }
+  chars[index] = next;
+  return chars.join('');
+}
+
+function generateNumericChoiceChallenge() {
+  const correct = generateNumericCode(4);
+  const options = new Set([correct]);
+  while (options.size < 4) {
+    options.add(mutateNumericCode(correct));
+  }
+
+  return {
+    mode: 'numeric',
+    token: createChallengeToken(),
+    question: '请选择图片中的数字验证码',
+    imageText: correct,
+    correct,
+    options: shuffleArray(Array.from(options)).slice(0, 4),
+    attempts: 0,
+    createdAt: new Date().toISOString(),
+  };
+}
+
 function generateVerificationChallenge(env = {}) {
   const captchaEnabled = getVerificationCaptchaEnabled(env);
   const mathEnabled = getVerificationMathEnabled(env);
   if (captchaEnabled && mathEnabled) {
-    return randomInt(0, 1) === 0 ? generateCaptchaChallenge() : generateMathChallenge();
+    return randomInt(0, 1) === 0 ? generateCaptchaChallenge() : generateNumericChoiceChallenge();
   }
-  if (mathEnabled) return generateMathChallenge();
+  if (mathEnabled) return generateNumericChoiceChallenge();
   return generateCaptchaChallenge();
 }
 
@@ -2846,6 +2912,27 @@ async function clearVerificationPromptMessage(env, chatId, messageId, text) {
   } catch (error) {
     // Ignore stale or already-deleted prompt messages.
   }
+}
+
+async function deleteVerificationPromptMessage(env, chatId, messageId) {
+  const id = Number(messageId || 0);
+  if (!id) return false;
+  try {
+    await telegram(env, 'deleteMessage', {
+      chat_id: chatId,
+      message_id: id,
+    });
+    return true;
+  } catch (error) {
+    // Telegram may reject deletes for older/already changed messages; make the stale entry harmless.
+  }
+
+  try {
+    await clearVerificationPromptMessage(env, chatId, id, '此验证入口已失效，请使用最新验证消息。');
+  } catch (error) {
+    // Ignore stale prompt cleanup failure.
+  }
+  return false;
 }
 
 async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
@@ -2965,6 +3052,10 @@ async function upsertUserProfile(env, message) {
     lastProfileSyncAt: existing?.lastProfileSyncAt || null,
     profileSyncError: existing?.profileSyncError || null,
     profileSource: existing?.profileSource || 'message',
+    verificationStatus: existing?.verificationStatus || null,
+    verificationPassedAt: existing?.verificationPassedAt || null,
+    verificationClearedAt: existing?.verificationClearedAt || null,
+    verificationUpdatedAt: existing?.verificationUpdatedAt || null,
   };
 
   const record = await syncTelegramProfile(env, userId, {
@@ -2973,6 +3064,7 @@ async function upsertUserProfile(env, message) {
     chat: message.chat,
     persist: false,
   });
+  await applyResolvedVerificationStatusToProfile(env, userId, record);
 
   await env.BOT_KV.put(userKey(userId), JSON.stringify(record));
   return record;
@@ -2981,6 +3073,528 @@ async function upsertUserProfile(env, message) {
 async function getUserProfile(env, userId) {
   if (!env.BOT_KV) return null;
   return getJson(env.BOT_KV, userKey(userId));
+}
+
+function parseIsoTimeMs(value) {
+  if (!value) return 0;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function normalizeIsoTime(value) {
+  const ms = parseIsoTimeMs(value);
+  return ms ? new Date(ms).toISOString() : null;
+}
+
+function verificationCacheKey(userId) {
+  return String(Number(userId));
+}
+
+function sanitizeVerificationSessionState(state) {
+  if (!state || typeof state !== 'object') return null;
+  return JSON.parse(JSON.stringify(state));
+}
+
+function isVerificationSessionUsable(state, token = '') {
+  if (!state || state.verified || !state.sessionToken) return false;
+  if (token && !timingSafeEqualText(String(token), String(state.sessionToken))) return false;
+  if (isVerificationSessionExpired(state)) return false;
+  return true;
+}
+
+function writeLocalVerificationSession(userId, state) {
+  const snapshot = sanitizeVerificationSessionState(state);
+  if (!snapshot?.sessionToken) return null;
+  writeTimedCacheValue(
+    verificationSessionCache,
+    verificationCacheKey(userId),
+    snapshot,
+    VERIFICATION_SESSION_CACHE_TTL_MS,
+  );
+  return snapshot;
+}
+
+function readLocalVerificationSession(userId, token = '') {
+  const snapshot = readTimedCacheValue(verificationSessionCache, verificationCacheKey(userId));
+  if (!isVerificationSessionUsable(snapshot, token)) return null;
+  return sanitizeVerificationSessionState(snapshot);
+}
+
+function clearLocalVerificationSession(userId) {
+  verificationSessionCache.delete(verificationCacheKey(userId));
+}
+
+function getLocalVerificationClearedAt(userId) {
+  const cached = readTimedCacheValue(verificationClearedCache, verificationCacheKey(userId));
+  return normalizeIsoTime(cached?.clearedAt);
+}
+
+function getLocalVerificationPassedAt(userId, profile = null) {
+  const cached = readTimedCacheValue(verificationPassedCache, verificationCacheKey(userId));
+  const passedAt = normalizeIsoTime(cached?.passedAt);
+  if (!passedAt) return null;
+  if (isVerificationPassedAtCleared(userId, passedAt, profile)) return null;
+  return passedAt;
+}
+
+function writeLocalVerificationPassed(userId, passedAt = null) {
+  const normalized = normalizeIsoTime(passedAt) || new Date().toISOString();
+  const key = verificationCacheKey(userId);
+  verificationClearedCache.delete(key);
+  writeTimedCacheValue(verificationPassedCache, key, { passedAt: normalized }, VERIFICATION_PASS_CACHE_TTL_MS);
+  return normalized;
+}
+
+function writeLocalVerificationCleared(userId, clearedAt = null) {
+  const normalized = normalizeIsoTime(clearedAt) || new Date().toISOString();
+  const key = verificationCacheKey(userId);
+  verificationPassedCache.delete(key);
+  writeTimedCacheValue(verificationClearedCache, key, { clearedAt: normalized }, VERIFICATION_PASS_CACHE_TTL_MS);
+  return normalized;
+}
+
+function isVerificationPassedAtCleared(userId, passedAt, profile = null) {
+  const passedMs = parseIsoTimeMs(passedAt);
+  if (!passedMs) return true;
+
+  const profileClearedMs = parseIsoTimeMs(profile?.verificationClearedAt);
+  if (profileClearedMs && profileClearedMs >= passedMs) return true;
+
+  const localClearedMs = parseIsoTimeMs(getLocalVerificationClearedAt(userId));
+  if (localClearedMs && localClearedMs >= passedMs) return true;
+
+  return false;
+}
+
+function getProfileVerificationPassedAt(profile) {
+  const passedAt = profile?.verificationPassedAt || null;
+  if (!passedAt) return null;
+
+  const passedMs = parseIsoTimeMs(passedAt);
+  if (!passedMs) return null;
+
+  const clearedMs = parseIsoTimeMs(profile?.verificationClearedAt);
+  if (clearedMs && clearedMs >= passedMs) return null;
+
+  const status = String(profile?.verificationStatus || '').toLowerCase();
+  if (['pending', 'reset', 'revoked', 'deleted'].includes(status)) return null;
+
+  return new Date(passedMs).toISOString();
+}
+
+function isProfileVerificationPassed(profile) {
+  return Boolean(getProfileVerificationPassedAt(profile));
+}
+
+function isVerificationStateInvalidatedByProfile(state, profile) {
+  if (!state?.verified) return false;
+
+  const verifiedMs =
+    parseIsoTimeMs(state.verifiedAt) || parseIsoTimeMs(state.answeredAt) || parseIsoTimeMs(state.updatedAt);
+  const clearedMs = parseIsoTimeMs(profile?.verificationClearedAt);
+  if (clearedMs && (!verifiedMs || clearedMs >= verifiedMs)) return true;
+
+  const firstSeenMs = parseIsoTimeMs(profile?.firstSeenAt);
+  if (firstSeenMs && verifiedMs && firstSeenMs > verifiedMs + 1000) return true;
+
+  return false;
+}
+
+async function markUserProfileVerificationPassed(env, userId, verifiedAt = null) {
+  if (!env.BOT_KV) return null;
+  const nowIso = new Date().toISOString();
+  const passedAt = writeLocalVerificationPassed(userId, verifiedAt || nowIso);
+  await writeD1VerificationStatusPassed(env, userId, passedAt, nowIso);
+  const existing = (await getUserProfile(env, userId)) || { userId: Number(userId) };
+  const next = {
+    ...existing,
+    userId: Number(userId),
+    verificationStatus: 'verified',
+    verificationPassedAt: passedAt,
+    verificationClearedAt: null,
+    verificationUpdatedAt: nowIso,
+  };
+  await env.BOT_KV.put(userKey(userId), JSON.stringify(next));
+  return next;
+}
+
+async function clearUserProfileVerificationPassed(env, userId) {
+  const nowIso = new Date().toISOString();
+  writeLocalVerificationCleared(userId, nowIso);
+  await writeD1VerificationStatusCleared(env, userId, nowIso);
+
+  if (!env.BOT_KV) return null;
+  const existing = await getUserProfile(env, userId);
+  if (!existing) return null;
+
+  const next = {
+    ...existing,
+    userId: Number(userId),
+    verificationStatus: 'pending',
+    verificationPassedAt: null,
+    verificationClearedAt: nowIso,
+    verificationUpdatedAt: nowIso,
+  };
+  await env.BOT_KV.put(userKey(userId), JSON.stringify(next));
+  return next;
+}
+
+async function ensureVerificationStatusD1Schema(env) {
+  if (!env?.DB) return false;
+  if (verificationStatusD1SchemaReady) return true;
+  if (
+    verificationStatusD1SchemaLastErrorAt &&
+    Date.now() - verificationStatusD1SchemaLastErrorAt < VERIFICATION_D1_SCHEMA_RETRY_MS
+  ) {
+    return false;
+  }
+
+  try {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS user_verification_status (
+        user_id INTEGER PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'pending',
+        passed_at TEXT,
+        cleared_at TEXT,
+        updated_at TEXT NOT NULL
+      )`,
+    ).run();
+    verificationStatusD1SchemaReady = true;
+    verificationStatusD1SchemaLastErrorAt = 0;
+    return true;
+  } catch (error) {
+    verificationStatusD1SchemaLastErrorAt = Date.now();
+    console.warn('Failed to ensure user_verification_status table', formatErrorMessage(error));
+    return false;
+  }
+}
+
+async function writeD1VerificationStatusPassed(env, userId, passedAt, updatedAt = null) {
+  if (!(await ensureVerificationStatusD1Schema(env))) return false;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO user_verification_status (user_id, status, passed_at, cleared_at, updated_at)
+       VALUES (?1, 'verified', ?2, NULL, ?3)
+       ON CONFLICT(user_id) DO UPDATE SET
+         status = 'verified',
+         passed_at = excluded.passed_at,
+         cleared_at = NULL,
+         updated_at = excluded.updated_at`,
+    )
+      .bind(Number(userId), normalizeIsoTime(passedAt) || new Date().toISOString(), updatedAt || new Date().toISOString())
+      .run();
+    return true;
+  } catch (error) {
+    console.warn('Failed to write D1 verification pass status', formatErrorMessage(error));
+    return false;
+  }
+}
+
+async function writeD1VerificationStatusCleared(env, userId, clearedAt = null) {
+  if (!(await ensureVerificationStatusD1Schema(env))) return false;
+  const nowIso = normalizeIsoTime(clearedAt) || new Date().toISOString();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO user_verification_status (user_id, status, passed_at, cleared_at, updated_at)
+       VALUES (?1, 'pending', NULL, ?2, ?2)
+       ON CONFLICT(user_id) DO UPDATE SET
+         status = 'pending',
+         passed_at = NULL,
+         cleared_at = excluded.cleared_at,
+         updated_at = excluded.updated_at`,
+    )
+      .bind(Number(userId), nowIso)
+      .run();
+    return true;
+  } catch (error) {
+    console.warn('Failed to write D1 verification clear status', formatErrorMessage(error));
+    return false;
+  }
+}
+
+async function getD1VerificationStatus(env, userId) {
+  if (!(await ensureVerificationStatusD1Schema(env))) return null;
+  try {
+    return await env.DB.prepare(
+      `SELECT
+        user_id AS userId,
+        status,
+        passed_at AS passedAt,
+        cleared_at AS clearedAt,
+        updated_at AS updatedAt
+       FROM user_verification_status
+       WHERE user_id = ?1
+       LIMIT 1`,
+    )
+      .bind(Number(userId))
+      .first();
+  } catch (error) {
+    console.warn('Failed to read D1 verification status', formatErrorMessage(error));
+    return null;
+  }
+}
+
+async function getD1VerificationPassedAt(env, userId, profile = null) {
+  const record = await getD1VerificationStatus(env, userId);
+  if (!record) return null;
+
+  const clearedAt = normalizeIsoTime(record.clearedAt);
+  if (clearedAt && String(record.status || '').toLowerCase() !== 'verified') {
+    writeLocalVerificationCleared(userId, clearedAt);
+    return null;
+  }
+
+  const passedAt = normalizeIsoTime(record.passedAt);
+  if (String(record.status || '').toLowerCase() !== 'verified' || !passedAt) return null;
+  if (clearedAt && parseIsoTimeMs(clearedAt) >= parseIsoTimeMs(passedAt)) {
+    writeLocalVerificationCleared(userId, clearedAt);
+    return null;
+  }
+  if (isVerificationPassedAtCleared(userId, passedAt, profile)) return null;
+
+  writeLocalVerificationPassed(userId, passedAt);
+  return passedAt;
+}
+
+async function ensureVerificationSessionD1Schema(env) {
+  if (!env?.DB) return false;
+  if (verificationSessionD1SchemaReady) return true;
+  if (
+    verificationSessionD1SchemaLastErrorAt &&
+    Date.now() - verificationSessionD1SchemaLastErrorAt < VERIFICATION_SESSION_D1_SCHEMA_RETRY_MS
+  ) {
+    return false;
+  }
+
+  try {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS user_verification_sessions (
+        user_id INTEGER PRIMARY KEY,
+        session_token TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+    ).run();
+    verificationSessionD1SchemaReady = true;
+    verificationSessionD1SchemaLastErrorAt = 0;
+    return true;
+  } catch (error) {
+    verificationSessionD1SchemaLastErrorAt = Date.now();
+    console.warn('Failed to ensure user_verification_sessions table', formatErrorMessage(error));
+    return false;
+  }
+}
+
+async function writeD1VerificationSession(env, userId, state) {
+  const snapshot = sanitizeVerificationSessionState(state);
+  if (!snapshot?.sessionToken || !(await ensureVerificationSessionD1Schema(env))) return false;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO user_verification_sessions (user_id, session_token, state_json, expires_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5)
+       ON CONFLICT(user_id) DO UPDATE SET
+         session_token = excluded.session_token,
+         state_json = excluded.state_json,
+         expires_at = excluded.expires_at,
+         updated_at = excluded.updated_at`,
+    )
+      .bind(
+        Number(userId),
+        String(snapshot.sessionToken),
+        JSON.stringify(snapshot),
+        snapshot.sessionExpiresAt || new Date(Date.now() + getVerifyWebSessionExpireMs(env)).toISOString(),
+        new Date().toISOString(),
+      )
+      .run();
+    return true;
+  } catch (error) {
+    console.warn('Failed to write D1 verification session', formatErrorMessage(error));
+    return false;
+  }
+}
+
+async function getD1VerificationSession(env, userId, token = '') {
+  if (!(await ensureVerificationSessionD1Schema(env))) return null;
+  try {
+    const record = await env.DB.prepare(
+      `SELECT session_token AS sessionToken, state_json AS stateJson, expires_at AS expiresAt
+       FROM user_verification_sessions
+       WHERE user_id = ?1
+       LIMIT 1`,
+    )
+      .bind(Number(userId))
+      .first();
+    if (!record?.stateJson) return null;
+    if (token && !timingSafeEqualText(String(token), String(record.sessionToken || ''))) return null;
+    const state = JSON.parse(String(record.stateJson || '{}'));
+    if (!isVerificationSessionUsable(state, token)) return null;
+    writeLocalVerificationSession(userId, state);
+    return state;
+  } catch (error) {
+    console.warn('Failed to read D1 verification session', formatErrorMessage(error));
+    return null;
+  }
+}
+
+async function clearD1VerificationSession(env, userId) {
+  if (!(await ensureVerificationSessionD1Schema(env))) return false;
+  try {
+    await env.DB.prepare('DELETE FROM user_verification_sessions WHERE user_id = ?1').bind(Number(userId)).run();
+    return true;
+  } catch (error) {
+    console.warn('Failed to clear D1 verification session', formatErrorMessage(error));
+    return false;
+  }
+}
+
+async function persistLatestVerificationSession(env, userId, state) {
+  writeLocalVerificationSession(userId, state);
+  await writeD1VerificationSession(env, userId, state);
+}
+
+async function clearLatestVerificationSession(env, userId) {
+  clearLocalVerificationSession(userId);
+  await clearD1VerificationSession(env, userId);
+}
+
+async function getLatestVerificationSessionState(env, userId, token = '') {
+  const local = readLocalVerificationSession(userId, token);
+  if (local) return local;
+  return getD1VerificationSession(env, userId, token);
+}
+
+async function isVerificationStateInvalidatedByD1(env, userId, state) {
+  if (!state?.verified) return false;
+  const record = await getD1VerificationStatus(env, userId);
+  if (!record) return false;
+
+  const status = String(record.status || '').toLowerCase();
+  const verifiedMs =
+    parseIsoTimeMs(state.verifiedAt) || parseIsoTimeMs(state.answeredAt) || parseIsoTimeMs(state.updatedAt);
+  const clearedMs = parseIsoTimeMs(record.clearedAt);
+  if (status !== 'verified' && clearedMs && (!verifiedMs || clearedMs >= verifiedMs)) {
+    writeLocalVerificationCleared(userId, record.clearedAt);
+    return true;
+  }
+
+  return false;
+}
+
+async function isVerificationStateActive(env, userId, state, profile = null) {
+  if (!state?.verified) return false;
+  if (isVerificationStateInvalidatedByProfile(state, profile)) return false;
+  if (await isVerificationStateInvalidatedByD1(env, userId, state)) return false;
+  writeLocalVerificationPassed(userId, state.verifiedAt || state.answeredAt || state.updatedAt);
+  return true;
+}
+
+async function resolveVerificationPassedAt(env, userId, profile = null) {
+  const profilePassedAt = getProfileVerificationPassedAt(profile);
+  if (profilePassedAt && !isVerificationPassedAtCleared(userId, profilePassedAt, profile)) {
+    writeLocalVerificationPassed(userId, profilePassedAt);
+    return profilePassedAt;
+  }
+
+  const localPassedAt = getLocalVerificationPassedAt(userId, profile);
+  if (localPassedAt) return localPassedAt;
+
+  return getD1VerificationPassedAt(env, userId, profile);
+}
+
+async function applyResolvedVerificationStatusToProfile(env, userId, profile) {
+  if (!profile || typeof profile !== 'object' || !isUserVerificationEnabled(env)) return profile;
+
+  const passedAt = await resolveVerificationPassedAt(env, userId, profile);
+  if (passedAt) {
+    profile.verificationStatus = 'verified';
+    profile.verificationPassedAt = passedAt;
+    profile.verificationClearedAt = null;
+    profile.verificationUpdatedAt = profile.verificationUpdatedAt || new Date().toISOString();
+    return profile;
+  }
+
+  const clearedAt = getLocalVerificationClearedAt(userId);
+  if (clearedAt) {
+    profile.verificationStatus = 'pending';
+    profile.verificationPassedAt = null;
+    profile.verificationClearedAt = clearedAt;
+    profile.verificationUpdatedAt = profile.verificationUpdatedAt || new Date().toISOString();
+  }
+  return profile;
+}
+
+async function repairVerificationStateFromProfile(env, userId, state = null, profile = null) {
+  const passedAt = await resolveVerificationPassedAt(env, userId, profile);
+  if (!passedAt) return null;
+
+  const nowIso = new Date().toISOString();
+  const remaining = Number(state?.postVerifyRemaining);
+  const promptMessageId = Number(state?.promptMessageId || 0);
+  const nextState = {
+    ...(state || {}),
+    userId: Number(userId),
+    verificationVersion: 'web-v2',
+    verified: true,
+    verifiedAt: state?.verifiedAt || passedAt,
+    answeredAt: state?.answeredAt || passedAt,
+    promptMessageId: null,
+    blockedUntil: null,
+    stage: 'passed',
+    sessionToken: null,
+    sessionIssuedAt: null,
+    sessionExpiresAt: null,
+    slider: null,
+    grid: null,
+    choice: null,
+    selectedAnswer: null,
+    correctAnswer: null,
+    challenge: null,
+    failureCount: 0,
+    postVerifyRemaining: Number.isFinite(remaining) && remaining > 0 ? remaining : 0,
+    repairedFromProfileAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await clearLatestVerificationSession(env, userId);
+  await markUserProfileVerificationPassed(env, userId, passedAt);
+  if (promptMessageId) {
+    await clearVerificationPromptMessage(env, userId, promptMessageId, '✅ 验证已通过，当前验证入口已自动失效。');
+  }
+  return nextState;
+}
+
+async function resetVerificationStateAfterProfileRevocation(env, userId, state = null) {
+  const nowIso = new Date().toISOString();
+  const nextState = {
+    ...(state || {}),
+    userId: Number(userId),
+    verificationVersion: 'web-v2',
+    flowMode: null,
+    verified: false,
+    verifiedAt: null,
+    answeredAt: null,
+    promptMessageId: null,
+    blockedUntil: null,
+    stage: null,
+    sessionToken: null,
+    sessionIssuedAt: null,
+    sessionExpiresAt: null,
+    slider: null,
+    grid: null,
+    choice: null,
+    selectedAnswer: null,
+    correctAnswer: null,
+    challenge: null,
+    failureCount: 0,
+    postVerifyRemaining: 0,
+    resetFromProfileAt: nowIso,
+    updatedAt: nowIso,
+  };
+  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await clearLatestVerificationSession(env, userId);
+  return nextState;
 }
 
 async function listUsers(env, requestedLimit = 50) {
@@ -2995,6 +3609,9 @@ async function listUsers(env, requestedLimit = 50) {
         getUserVerificationState(env, item.userId),
       ]);
 
+      const profileVerified = isProfileVerificationPassed(item);
+      const verified = Boolean(verifyState?.verified || profileVerified);
+
       return {
         ...item,
         displayName: item.displayName || buildDisplayName(item) || `用户 ${item.userId}`,
@@ -3003,9 +3620,9 @@ async function listUsers(env, requestedLimit = 50) {
         blacklistReason: blacklist?.reason || null,
         trusted: Boolean(trust),
         trustNote: trust?.note || null,
-        verified: Boolean(verifyState?.verified),
+        verified,
         verificationStatus:
-          verifyState?.verified
+          verified
             ? 'verified'
             : verifyState?.challenge || verifyState?.sessionToken || verifyState?.stage
               ? 'pending'
@@ -3366,11 +3983,24 @@ async function getUserVerificationState(env, userId) {
 async function createOrRefreshVerificationWebSession(env, userId, options = {}) {
   ensureKv(env);
   const forceNew = Boolean(options.forceNew);
-  const preserveToken = String(options.preserveToken || '').trim();
-  const existing = (await getUserVerificationState(env, userId)) || {};
+  let existing = (await getUserVerificationState(env, userId)) || {};
+  const flowMode = getVerificationFlowMode(env);
 
   if (existing?.verified) {
-    return existing;
+    const profile = await getUserProfile(env, userId);
+    if (await isVerificationStateActive(env, userId, existing, profile)) {
+      if (!isProfileVerificationPassed(profile)) {
+        await markUserProfileVerificationPassed(env, userId, existing.verifiedAt || existing.answeredAt || existing.updatedAt);
+      }
+      return existing;
+    }
+    existing = await resetVerificationStateAfterProfileRevocation(env, userId, existing);
+  }
+
+  const profile = await getUserProfile(env, userId);
+  const repairedState = await repairVerificationStateFromProfile(env, userId, existing, profile);
+  if (repairedState?.verified) {
+    return repairedState;
   }
 
   const blockedUntilMs = existing?.blockedUntil ? new Date(existing.blockedUntil).getTime() : 0;
@@ -3382,13 +4012,18 @@ async function createOrRefreshVerificationWebSession(env, userId, options = {}) 
   const sessionValid = Boolean(
     existing?.sessionToken &&
       sessionExpiresAtMs > Date.now() &&
-      (existing?.stage === 'slider' || existing?.stage === 'grid') &&
-      existing?.slider &&
-      existing?.grid,
+      existing?.flowMode === flowMode &&
+      (flowMode === 'numeric-choice'
+        ? existing?.stage === 'choice' && existing?.choice
+        : (existing?.stage === 'slider' || existing?.stage === 'grid') && existing?.slider && existing?.grid),
   );
 
   if (sessionValid && !forceNew) {
     return existing;
+  }
+
+  if (forceNew && existing?.promptMessageId) {
+    await deleteVerificationPromptMessage(env, userId, existing.promptMessageId);
   }
 
   const now = Date.now();
@@ -3396,43 +4031,42 @@ async function createOrRefreshVerificationWebSession(env, userId, options = {}) 
     ...(existing || {}),
     userId: Number(userId),
     verificationVersion: 'web-v2',
+    flowMode,
     verified: false,
     verifiedAt: null,
     answeredAt: null,
+    promptMessageId: forceNew ? null : existing?.promptMessageId || null,
     blockedUntil: null,
     selectedAnswer: null,
     correctAnswer: null,
     challenge: null,
     failureCount: 0,
-    stage: 'slider',
-    sessionToken: preserveToken || createSessionToken(),
+    stage: flowMode === 'numeric-choice' ? 'choice' : 'slider',
+    sessionToken: createSessionToken(),
     sessionIssuedAt: new Date(now).toISOString(),
     sessionExpiresAt: new Date(now + getVerifyWebSessionExpireMs(env)).toISOString(),
-    slider: createSliderChallengeForWebVerification(),
-    grid: createGridChallengeForWebVerification(),
+    slider: flowMode === 'numeric-choice' ? null : createSliderChallengeForWebVerification(),
+    grid: flowMode === 'numeric-choice' ? null : createGridChallengeForWebVerification(),
+    choice: flowMode === 'numeric-choice' ? generateNumericChoiceChallenge() : null,
     updatedAt: new Date(now).toISOString(),
   };
 
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await persistLatestVerificationSession(env, userId, nextState);
   return nextState;
 }
 
 function createSliderChallengeForWebVerification() {
-  const width = 320;
-  const height = 180;
-  const piece = 46;
-  const minX = 48;
-  const maxX = width - piece - 24;
-  const targetX = randomInt(minX, maxX);
-  const targetY = randomInt(28, height - piece - 16);
+  const size = 240;
+  const maxAngle = 360;
+  const startAngle = randomInt(35, 325);
+  const targetAngle = normalizeRotationAngle(360 - startAngle);
   return {
-    width,
-    height,
-    piece,
-    minX,
-    maxX,
-    targetX,
-    targetY,
+    type: 'rotation',
+    size,
+    maxAngle,
+    startAngle,
+    targetAngle,
     seed: createChallengeToken(),
     attempts: 0,
     createdAt: new Date().toISOString(),
@@ -3491,7 +4125,7 @@ function buildVerificationWebUrl(state, userId, publicBaseUrl = '') {
   return `${base}${VERIFY_WEB_PATH}?${params.toString()}`;
 }
 
-function buildVerificationSessionPayload(state, env) {
+function buildVerificationSessionPayload(state, env, publicBaseUrl = '') {
   if (state?.verified) {
     return {
       status: 'verified',
@@ -3508,28 +4142,56 @@ function buildVerificationSessionPayload(state, env) {
     };
   }
 
-  const stage = state?.stage === 'grid' ? 'grid' : 'slider';
+  const flowMode = state?.flowMode === 'numeric-choice' ? 'numeric-choice' : 'graphic-two-step';
+  const stage = flowMode === 'numeric-choice' ? 'choice' : state?.stage === 'grid' ? 'grid' : 'slider';
   const maxAttempts = getVerifyStageMaxAttempts(env);
   const payload = {
     status: 'in_progress',
+    flowMode,
     stage,
     sessionExpiresAt: state?.sessionExpiresAt || null,
     stageMaxAttempts: maxAttempts,
-    sliderAttemptsLeft: Math.max(0, maxAttempts - Number(state?.slider?.attempts || 0)),
-    gridAttemptsLeft: Math.max(0, maxAttempts - Number(state?.grid?.attempts || 0)),
   };
+
+  if (stage === 'choice') {
+    const choice = state?.choice || generateNumericChoiceChallenge();
+    payload.choiceAttemptsLeft = Math.max(0, maxAttempts - Number(choice?.attempts || 0));
+    payload.choice = {
+      question: String(choice?.question || '请选择图片中的数字验证码'),
+      image: buildVerificationImageUrl(
+        choice,
+        getVerificationBaseUrl(env, publicBaseUrl || env?.PUBLIC_BASE_URL || ''),
+      ),
+      options: Array.isArray(choice?.options) ? choice.options.slice(0, 4).map((item) => String(item)) : [],
+      attemptsUsed: Number(choice?.attempts || 0),
+    };
+    return payload;
+  }
+
+  payload.sliderAttemptsLeft = Math.max(0, maxAttempts - Number(state?.slider?.attempts || 0));
+  payload.gridAttemptsLeft = Math.max(0, maxAttempts - Number(state?.grid?.attempts || 0));
 
   if (stage === 'slider') {
     const slider = state?.slider || createSliderChallengeForWebVerification();
-    payload.slider = {
-      width: Number(slider.width || 320),
-      height: Number(slider.height || 180),
-      piece: Number(slider.piece || 46),
-      targetY: Number(slider.targetY || 52),
-      maxX: Number(slider.maxX || 250),
-      background: buildSliderBackgroundDataUrl(slider),
-      attemptsUsed: Number(slider.attempts || 0),
-    };
+    const isRotation = slider?.type === 'rotation';
+    payload.slider = isRotation
+      ? {
+          type: 'rotation',
+          size: Number(slider.size || 240),
+          maxAngle: Number(slider.maxAngle || 360),
+          image: buildRotationCaptchaDataUrl(slider),
+          attemptsUsed: Number(slider.attempts || 0),
+        }
+      : {
+          type: 'puzzle',
+          width: Number(slider.width || 320),
+          height: Number(slider.height || 180),
+          piece: Number(slider.piece || 46),
+          targetY: Number(slider.targetY || 52),
+          maxX: Number(slider.maxX || 250),
+          background: buildSliderBackgroundDataUrl(slider),
+          attemptsUsed: Number(slider.attempts || 0),
+        };
     return payload;
   }
 
@@ -3547,6 +4209,103 @@ function buildVerificationSessionPayload(state, env) {
       : [],
   };
   return payload;
+}
+
+function normalizeRotationAngle(value) {
+  const angle = Number(value);
+  if (!Number.isFinite(angle)) return 0;
+  return ((angle % 360) + 360) % 360;
+}
+
+function getRotationAngleDelta(left, right) {
+  const diff = Math.abs(normalizeRotationAngle(left) - normalizeRotationAngle(right));
+  return Math.min(diff, 360 - diff);
+}
+
+function buildRotationCaptchaDataUrl(slider) {
+  const size = Number(slider?.size || 240);
+  const center = size / 2;
+  const radius = Math.round(size * 0.42);
+  const seed = String(slider?.seed || createChallengeToken());
+  const rand = createSeededRandom(seed);
+  const startAngle = normalizeRotationAngle(slider?.startAngle || 0);
+  const hue = 175 + Math.floor(rand() * 100);
+  const accent = 18 + Math.floor(rand() * 60);
+  const marks = [];
+  const specks = [];
+
+  for (let i = 0; i < 24; i += 1) {
+    const angle = (Math.PI * 2 * i) / 24;
+    const outer = radius - 6;
+    const inner = i % 3 === 0 ? radius - 20 : radius - 13;
+    const x1 = center + Math.cos(angle) * inner;
+    const y1 = center + Math.sin(angle) * inner;
+    const x2 = center + Math.cos(angle) * outer;
+    const y2 = center + Math.sin(angle) * outer;
+    const width = i % 6 === 0 ? 3 : 1.5;
+    marks.push(
+      `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="rgba(33,61,86,.58)" stroke-width="${width}" stroke-linecap="round" />`,
+    );
+  }
+
+  for (let i = 0; i < 28; i += 1) {
+    const angle = rand() * Math.PI * 2;
+    const distance = rand() * radius * 0.82;
+    const cx = center + Math.cos(angle) * distance;
+    const cy = center + Math.sin(angle) * distance;
+    const r = 1.2 + rand() * 3.4;
+    const alpha = (0.16 + rand() * 0.22).toFixed(3);
+    specks.push(`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r.toFixed(1)}" fill="rgba(255,255,255,${alpha})" />`);
+  }
+
+  const arrow = [
+    `${center},${center - radius + 31}`,
+    `${center - 18},${center - radius + 74}`,
+    `${center - 5},${center - radius + 67}`,
+    `${center - 5},${center + radius - 38}`,
+    `${center + 5},${center + radius - 38}`,
+    `${center + 5},${center - radius + 67}`,
+    `${center + 18},${center - radius + 74}`,
+  ].join(' ');
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+    <defs>
+      <radialGradient id="disc" cx="38%" cy="28%" r="72%">
+        <stop offset="0%" stop-color="hsl(${hue},90%,88%)" />
+        <stop offset="58%" stop-color="hsl(${hue + 18},78%,70%)" />
+        <stop offset="100%" stop-color="hsl(${accent},92%,72%)" />
+      </radialGradient>
+      <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+        <feDropShadow dx="0" dy="10" stdDeviation="8" flood-color="#1a466e" flood-opacity=".22"/>
+      </filter>
+      <filter id="grain" x="-20%" y="-20%" width="140%" height="140%">
+        <feTurbulence type="fractalNoise" baseFrequency=".75" numOctaves="2" seed="${Math.floor(rand() * 1000)}" />
+        <feColorMatrix type="saturate" values="0"/>
+        <feComponentTransfer>
+          <feFuncA type="table" tableValues="0 0.08"/>
+        </feComponentTransfer>
+      </filter>
+      <clipPath id="clipDisc">
+        <circle cx="${center}" cy="${center}" r="${radius}" />
+      </clipPath>
+    </defs>
+    <rect width="${size}" height="${size}" fill="#eaf3fb" />
+    <g transform="rotate(${startAngle} ${center} ${center})" filter="url(#softShadow)">
+      <circle cx="${center}" cy="${center}" r="${radius}" fill="url(#disc)" stroke="rgba(36,70,96,.68)" stroke-width="4" />
+      <g clip-path="url(#clipDisc)">
+        ${specks.join('')}
+        <path d="M ${center - radius} ${center + 34} C ${center - 45} ${center + 8}, ${center + 26} ${center + 82}, ${center + radius} ${center + 36}" fill="none" stroke="rgba(255,255,255,.42)" stroke-width="18" stroke-linecap="round" />
+        <path d="M ${center - radius + 18} ${center - 26} C ${center - 25} ${center - 54}, ${center + 36} ${center - 18}, ${center + radius - 16} ${center - 54}" fill="none" stroke="rgba(26,76,101,.18)" stroke-width="14" stroke-linecap="round" />
+      </g>
+      ${marks.join('')}
+      <polygon points="${arrow}" fill="rgba(20,50,75,.82)" stroke="rgba(255,255,255,.62)" stroke-width="2" stroke-linejoin="round" />
+      <circle cx="${center}" cy="${center}" r="16" fill="rgba(255,255,255,.78)" stroke="rgba(34,70,100,.42)" stroke-width="2" />
+      <text x="${center}" y="${center - radius + 26}" text-anchor="middle" fill="rgba(20,50,75,.86)" font-size="24" font-weight="900" font-family="Arial,sans-serif">N</text>
+      <circle cx="${center}" cy="${center}" r="${radius - 2}" fill="transparent" filter="url(#grain)" />
+    </g>
+  </svg>`;
+
+  return `data:image/svg+xml;base64,${base64Encode(svg)}`;
 }
 
 function buildSliderBackgroundDataUrl(slider) {
@@ -3629,17 +4388,25 @@ async function sendVerificationWebPrompt(env, userId, state, publicBaseUrl = '',
     getVerificationBaseUrl(env, publicBaseUrl || env.PUBLIC_BASE_URL || ''),
   );
   const maxAttempts = getVerifyStageMaxAttempts(env);
-  const lines = [
-    '🔐 首次私聊验证（双重挑战）',
-    `1) 滑块拼图：最多 ${maxAttempts} 次`,
-    `2) 九宫格点选（九选二）：最多 ${maxAttempts} 次`,
-    `失败超过次数后会锁定 ${Math.round(getVerifyRetryBlockMs(env) / 60000)} 分钟`,
-  ];
+  const isNumericChoice = state?.flowMode === 'numeric-choice';
+  const lines = isNumericChoice
+    ? [
+        '🔐 首次私聊验证（数字图片验证）',
+        `打开验证页后识别图片中的 4 位数字，并从四个选项中选择正确答案。`,
+        `最多 ${maxAttempts} 次，失败超过次数后会锁定 ${Math.round(getVerifyRetryBlockMs(env) / 60000)} 分钟`,
+      ]
+    : [
+        '🔐 首次私聊验证（图形双重挑战）',
+        `1) 旋转验证：最多 ${maxAttempts} 次`,
+        `2) 九宫格点选（九选二）：最多 ${maxAttempts} 次`,
+        `失败超过次数后会锁定 ${Math.round(getVerifyRetryBlockMs(env) / 60000)} 分钟`,
+      ];
 
   if (!verifyUrl) {
     lines.push('未找到可用验证链接，请联系管理员配置 VERIFY_PUBLIC_BASE_URL 或 PUBLIC_BASE_URL。');
   } else {
-    lines.push('点击下方按钮打开验证页面。');
+    lines.push('点击下方按钮打开验证页面。本链接一次一码，新消息会使旧链接立即失效。');
+    await persistLatestVerificationSession(env, userId, state);
   }
 
   const payload = {
@@ -3671,7 +4438,7 @@ async function sendVerificationWebPrompt(env, userId, state, publicBaseUrl = '',
   }
 }
 
-async function handleVerificationApiRequest(request, url, env) {
+async function handleVerificationApiRequest(request, url, env, publicBaseUrl = '') {
   if (!isUserVerificationEnabled(env)) {
     throw new AppError(403, '当前未开启验证');
   }
@@ -3686,17 +4453,22 @@ async function handleVerificationApiRequest(request, url, env) {
   const pathname = url.pathname;
 
   if (pathname === `${VERIFY_API_PREFIX}/session`) {
-    const result = await handleVerificationSessionApi(env, body);
+    const result = await handleVerificationSessionApi(env, body, publicBaseUrl);
     return json({ ok: true, ...result }, 200, noCacheHeaders, request);
   }
 
   if (pathname === `${VERIFY_API_PREFIX}/slider`) {
-    const result = await handleVerificationSliderApi(env, body);
+    const result = await handleVerificationSliderApi(env, body, publicBaseUrl);
     return json({ ok: true, ...result }, 200, noCacheHeaders, request);
   }
 
   if (pathname === `${VERIFY_API_PREFIX}/grid`) {
-    const result = await handleVerificationGridApi(env, body);
+    const result = await handleVerificationGridApi(env, body, publicBaseUrl);
+    return json({ ok: true, ...result }, 200, noCacheHeaders, request);
+  }
+
+  if (pathname === `${VERIFY_API_PREFIX}/choice`) {
+    const result = await handleVerificationChoiceApi(env, body, publicBaseUrl);
     return json({ ok: true, ...result }, 200, noCacheHeaders, request);
   }
 
@@ -3720,9 +4492,14 @@ function isVerificationSessionExpired(state) {
   return !expiresMs || expiresMs <= Date.now();
 }
 
-async function handleVerificationSessionApi(env, body) {
+async function handleVerificationSessionApi(env, body, publicBaseUrl = '') {
   const { userId, token } = parseVerificationApiIdentity(body);
-  const state = await getUserVerificationState(env, userId);
+  let state = await getUserVerificationState(env, userId);
+  const latestState = await getLatestVerificationSessionState(env, userId, token);
+  if (latestState && (!state?.sessionToken || !timingSafeEqualText(token, state.sessionToken))) {
+    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(latestState));
+    state = latestState;
+  }
   if (!state) {
     throw new AppError(401, '验证会话不存在');
   }
@@ -3738,37 +4515,38 @@ async function handleVerificationSessionApi(env, body) {
 
   const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
   if (blockedUntilMs && blockedUntilMs > Date.now()) {
-    return buildVerificationSessionPayload(state, env);
+    return buildVerificationSessionPayload(state, env, publicBaseUrl);
   }
 
   if (isVerificationSessionExpired(state)) {
-    const refreshed = await createOrRefreshVerificationWebSession(env, userId, {
-      forceNew: true,
-      preserveToken: token,
-    });
-    return buildVerificationSessionPayload(refreshed, env);
+    throw new AppError(410, '验证会话已过期，请返回 Telegram 重新获取最新验证按钮。');
   }
 
-  return buildVerificationSessionPayload(state, env);
+  return buildVerificationSessionPayload(state, env, publicBaseUrl);
 }
 
-async function handleVerificationSliderApi(env, body) {
+async function handleVerificationSliderApi(env, body, publicBaseUrl = '') {
   const { userId, token } = parseVerificationApiIdentity(body);
-  const current = await getUserVerificationState(env, userId);
+  let current = await getUserVerificationState(env, userId);
+  const latestState = await getLatestVerificationSessionState(env, userId, token);
+  if (latestState && (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken))) {
+    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(latestState));
+    current = latestState;
+  }
   if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
     throw new AppError(401, '验证会话不匹配');
   }
 
   if (current?.verified) {
-    return buildVerificationSessionPayload(current, env);
+    return buildVerificationSessionPayload(current, env, publicBaseUrl);
   }
 
   if (isVerificationSessionExpired(current)) {
     throw new AppError(410, '验证会话已过期');
   }
 
-  if (current?.stage === 'grid') {
-    return buildVerificationSessionPayload(current, env);
+  if (current?.stage !== 'slider') {
+    return buildVerificationSessionPayload(current, env, publicBaseUrl);
   }
 
   const validation = validateSliderAttemptHuman(current?.slider, body, env);
@@ -3780,7 +4558,8 @@ async function handleVerificationSliderApi(env, body) {
       updatedAt: new Date().toISOString(),
     };
     await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
-    return buildVerificationSessionPayload(nextState, env);
+    await persistLatestVerificationSession(env, userId, nextState);
+    return buildVerificationSessionPayload(nextState, env, publicBaseUrl);
   }
 
   const maxAttempts = getVerifyStageMaxAttempts(env);
@@ -3801,26 +4580,32 @@ async function handleVerificationSliderApi(env, body) {
       stage: 'slider',
       reason: validation.reason,
     });
-    return buildVerificationSessionPayload(locked, env);
+    return buildVerificationSessionPayload(locked, env, publicBaseUrl);
   }
 
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await persistLatestVerificationSession(env, userId, nextState);
   return {
-    ...buildVerificationSessionPayload(nextState, env),
+    ...buildVerificationSessionPayload(nextState, env, publicBaseUrl),
     status: 'slider_failed',
     reason: validation.reason,
   };
 }
 
-async function handleVerificationGridApi(env, body) {
+async function handleVerificationGridApi(env, body, publicBaseUrl = '') {
   const { userId, token } = parseVerificationApiIdentity(body);
-  const current = await getUserVerificationState(env, userId);
+  let current = await getUserVerificationState(env, userId);
+  const latestState = await getLatestVerificationSessionState(env, userId, token);
+  if (latestState && (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken))) {
+    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(latestState));
+    current = latestState;
+  }
   if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
     throw new AppError(401, '验证会话不匹配');
   }
 
   if (current?.verified) {
-    return buildVerificationSessionPayload(current, env);
+    return buildVerificationSessionPayload(current, env, publicBaseUrl);
   }
 
   if (isVerificationSessionExpired(current)) {
@@ -3828,7 +4613,7 @@ async function handleVerificationGridApi(env, body) {
   }
 
   if (current?.stage !== 'grid') {
-    return buildVerificationSessionPayload(current, env);
+    return buildVerificationSessionPayload(current, env, publicBaseUrl);
   }
 
   const selections = Array.isArray(body?.selections)
@@ -3844,7 +4629,7 @@ async function handleVerificationGridApi(env, body) {
       notifyUser: true,
       keepSession: false,
     });
-    return buildVerificationSessionPayload(nextState, env);
+    return buildVerificationSessionPayload(nextState, env, publicBaseUrl);
   }
 
   const maxAttempts = getVerifyStageMaxAttempts(env);
@@ -3865,20 +4650,91 @@ async function handleVerificationGridApi(env, body) {
       reason: 'grid_selection_mismatch',
       selections,
     });
-    return buildVerificationSessionPayload(locked, env);
+    return buildVerificationSessionPayload(locked, env, publicBaseUrl);
   }
 
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await persistLatestVerificationSession(env, userId, nextState);
   return {
-    ...buildVerificationSessionPayload(nextState, env),
+    ...buildVerificationSessionPayload(nextState, env, publicBaseUrl),
     status: 'grid_failed',
     reason: 'grid_selection_mismatch',
+  };
+}
+
+async function handleVerificationChoiceApi(env, body, publicBaseUrl = '') {
+  const { userId, token } = parseVerificationApiIdentity(body);
+  let current = await getUserVerificationState(env, userId);
+  const latestState = await getLatestVerificationSessionState(env, userId, token);
+  if (latestState && (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken))) {
+    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(latestState));
+    current = latestState;
+  }
+  if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
+    throw new AppError(401, '验证会话不匹配');
+  }
+
+  if (current?.verified) {
+    return buildVerificationSessionPayload(current, env, publicBaseUrl);
+  }
+
+  if (isVerificationSessionExpired(current)) {
+    throw new AppError(410, '验证会话已过期');
+  }
+
+  if (current?.stage !== 'choice') {
+    return buildVerificationSessionPayload(current, env, publicBaseUrl);
+  }
+
+  const answer = String(body?.answer ?? '').trim();
+  const expected = String(current?.choice?.correct ?? '').trim();
+  if (answer && expected && timingSafeEqualText(answer, expected)) {
+    const nextState = await adminApproveUserVerification(env, userId, 'web-verification', {
+      notifyUser: true,
+      keepSession: false,
+    });
+    return buildVerificationSessionPayload(nextState, env, publicBaseUrl);
+  }
+
+  const maxAttempts = getVerifyStageMaxAttempts(env);
+  const nextAttempts = Number(current?.choice?.attempts || 0) + 1;
+  const nextState = {
+    ...current,
+    selectedAnswer: answer,
+    correctAnswer: expected,
+    choice: {
+      ...(current?.choice || {}),
+      attempts: nextAttempts,
+      lastFailedAt: new Date().toISOString(),
+    },
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (nextAttempts >= maxAttempts) {
+    const locked = await lockVerificationAndReport(env, userId, nextState, {
+      stage: 'choice',
+      reason: 'choice_selection_mismatch',
+      selectedAnswer: answer,
+    });
+    return buildVerificationSessionPayload(locked, env, publicBaseUrl);
+  }
+
+  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await persistLatestVerificationSession(env, userId, nextState);
+  return {
+    ...buildVerificationSessionPayload(nextState, env, publicBaseUrl),
+    status: 'choice_failed',
+    reason: 'choice_selection_mismatch',
   };
 }
 
 function validateSliderAttemptHuman(slider, body, env) {
   if (!slider) {
     return { ok: false, reason: 'slider_missing' };
+  }
+
+  if (slider?.type === 'rotation') {
+    return validateRotationAttemptHuman(slider, body, env);
   }
 
   const value = Number(body?.value);
@@ -3893,7 +4749,7 @@ function validateSliderAttemptHuman(slider, body, env) {
   }
 
   const trace = normalizeSliderTrace(body?.trace);
-  if (trace.length < 6) {
+  if (trace.length < 2) {
     return { ok: false, reason: 'trace_too_short' };
   }
 
@@ -3905,7 +4761,6 @@ function validateSliderAttemptHuman(slider, body, env) {
   let forwardMoves = 0;
   let backwardMoves = 0;
   let totalDistance = 0;
-  const speeds = [];
   for (let i = 1; i < trace.length; i += 1) {
     const dx = trace[i].x - trace[i - 1].x;
     const dt = trace[i].t - trace[i - 1].t;
@@ -3916,32 +4771,105 @@ function validateSliderAttemptHuman(slider, body, env) {
       backwardMoves += 1;
     }
     totalDistance += Math.abs(dx);
-    speeds.push(Math.abs(dx) / dt);
   }
 
   const totalMoves = forwardMoves + backwardMoves;
-  if (totalMoves < 5) {
+  if (totalMoves < 1) {
     return { ok: false, reason: 'trace_not_enough_segments' };
   }
-  if (forwardMoves / totalMoves < 0.72) {
+  if (forwardMoves / totalMoves < 0.55) {
     return { ok: false, reason: 'trace_direction_invalid' };
   }
 
   const expectedDistance = Math.max(20, Math.abs(value - trace[0].x));
-  if (totalDistance < expectedDistance * 0.88) {
+  if (totalDistance < expectedDistance * 0.55) {
     return { ok: false, reason: 'trace_distance_invalid' };
   }
 
-  if (backwardMoves === 0 && trace.length <= 8) {
-    return { ok: false, reason: 'trace_too_linear' };
-  }
-
-  const variance = computeVariance(speeds);
-  if (variance < 0.00008) {
-    return { ok: false, reason: 'trace_variance_too_low' };
+  const risk = scoreSliderInteractionRisk(trace, body?.interaction, value);
+  if (!risk.ok) {
+    return { ok: false, reason: risk.reason };
   }
 
   return { ok: true, reason: 'ok' };
+}
+
+function validateRotationAttemptHuman(slider, body, env) {
+  const value = Number(body?.value);
+  if (!Number.isFinite(value)) {
+    return { ok: false, reason: 'rotation_value_invalid' };
+  }
+
+  const targetAngle = normalizeRotationAngle(slider?.targetAngle || 0);
+  const delta = getRotationAngleDelta(value, targetAngle);
+  if (delta > getVerifyRotationTolerance(env)) {
+    return { ok: false, reason: 'rotation_angle_mismatch', delta: Math.round(delta) };
+  }
+
+  const trace = normalizeSliderTrace(body?.trace);
+  if (trace.length < 2) {
+    return { ok: false, reason: 'trace_too_short' };
+  }
+
+  const durationMs = trace[trace.length - 1].t - trace[0].t;
+  if (durationMs < getVerifyMinSliderTimeMs(env)) {
+    return { ok: false, reason: 'trace_too_fast' };
+  }
+
+  const risk = scoreRotationInteractionRisk(trace, body?.interaction, value);
+  if (!risk.ok) {
+    return { ok: false, reason: risk.reason };
+  }
+
+  return { ok: true, reason: 'ok' };
+}
+
+function scoreRotationInteractionRisk(trace, interaction, value) {
+  const eventCount = Number(interaction?.eventCount || trace.length || 0);
+  const pointerType = String(interaction?.pointerType || '').toLowerCase();
+  const durationMs = Number(interaction?.durationMs || (trace[trace.length - 1]?.t - trace[0]?.t) || 0);
+  const endX = Number(interaction?.endX ?? value);
+  const averageIntervalMs = Number(interaction?.averageIntervalMs || 0);
+  let risk = 0;
+
+  if (eventCount < 2) risk += 3;
+  else if (eventCount < 4) risk += 1;
+  if (durationMs < 180) risk += 3;
+  else if (durationMs < 260) risk += 1;
+  if (getRotationAngleDelta(endX, value) > 2) risk += 2;
+  if (averageIntervalMs > 0 && averageIntervalMs < 6 && eventCount > 10) risk += 1;
+  if (pointerType && !['mouse', 'touch', 'pen'].includes(pointerType)) risk += 1;
+
+  if (risk >= 5) {
+    return { ok: false, reason: 'interaction_risk_high', risk };
+  }
+  return { ok: true, reason: 'ok', risk };
+}
+
+function scoreSliderInteractionRisk(trace, interaction, value) {
+  const eventCount = Number(interaction?.eventCount || trace.length || 0);
+  const dragStarted = interaction?.dragStarted === true;
+  const pointerType = String(interaction?.pointerType || '').toLowerCase();
+  const durationMs = Number(interaction?.durationMs || (trace[trace.length - 1]?.t - trace[0]?.t) || 0);
+  const startX = Number(interaction?.startX ?? trace[0]?.x ?? 0);
+  const endX = Number(interaction?.endX ?? value);
+  const averageIntervalMs = Number(interaction?.averageIntervalMs || 0);
+  let risk = 0;
+
+  if (!dragStarted) risk += 4;
+  if (eventCount < 3) risk += 3;
+  else if (eventCount < 5) risk += 1;
+  if (durationMs < 220) risk += 4;
+  else if (durationMs < 360) risk += 1;
+  if (Math.abs(startX) > 18) risk += 1;
+  if (Math.abs(endX - value) > 2) risk += 2;
+  if (averageIntervalMs > 0 && averageIntervalMs < 8 && eventCount > 8) risk += 1;
+  if (pointerType && !['mouse', 'touch', 'pen'].includes(pointerType)) risk += 1;
+
+  if (risk >= 5) {
+    return { ok: false, reason: 'interaction_risk_high', risk };
+  }
+  return { ok: true, reason: 'ok', risk };
 }
 
 function normalizeSliderTrace(trace) {
@@ -3998,6 +4926,7 @@ async function lockVerificationAndReport(env, userId, state, detail = {}) {
   };
 
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await clearLatestVerificationSession(env, userId);
 
   try {
     await telegram(env, 'sendMessage', {
@@ -4028,8 +4957,9 @@ async function reportVerificationFailureToTopic(env, userId, state) {
       `阶段：${stageText} (${stage})`,
       `原因：${reasonText} (${reason})`,
       `锁定至：${state?.blockedUntil || '未知'}`,
-      `滑块尝试：${Number(state?.slider?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
+      `旋转尝试：${Number(state?.slider?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
       `九宫格尝试：${Number(state?.grid?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
+      `数字选择尝试：${Number(state?.choice?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
     ].join('\n');
 
     await telegramWithThreadFallback(env, 'sendMessage', {
@@ -4045,8 +4975,9 @@ async function reportVerificationFailureToTopic(env, userId, state) {
 
 function formatVerificationStageText(stage) {
   const normalized = String(stage || '').toLowerCase();
-  if (normalized === 'slider') return '滑块拼图';
+  if (normalized === 'slider') return '旋转验证';
   if (normalized === 'grid') return '九宫格点选';
+  if (normalized === 'choice') return '数字四选一';
   if (normalized === 'blocked') return '锁定状态';
   return '未知阶段';
 }
@@ -4056,14 +4987,18 @@ function formatVerificationReasonText(reason) {
   if (normalized === 'slider_position_mismatch') return '滑块位置不匹配';
   if (normalized === 'slider_value_invalid') return '滑块值无效';
   if (normalized === 'slider_missing') return '滑块题目缺失';
+  if (normalized === 'rotation_angle_mismatch') return '旋转角度未对齐';
+  if (normalized === 'rotation_value_invalid') return '旋转角度无效';
   if (normalized === 'trace_too_short') return '滑动轨迹过短';
   if (normalized === 'trace_too_fast') return '滑动速度过快';
   if (normalized === 'trace_not_enough_segments') return '滑动轨迹分段不足';
   if (normalized === 'trace_direction_invalid') return '轨迹方向异常';
   if (normalized === 'trace_distance_invalid') return '轨迹位移异常';
+  if (normalized === 'interaction_risk_high') return '交互行为风险较高';
   if (normalized === 'trace_too_linear') return '轨迹过于线性';
   if (normalized === 'trace_variance_too_low') return '轨迹波动不足';
   if (normalized === 'grid_selection_mismatch') return '九宫格选择错误';
+  if (normalized === 'choice_selection_mismatch') return '数字选择错误';
   if (normalized === 'verification_failed') return '验证失败';
   return '未知原因';
 }
@@ -4087,6 +5022,7 @@ async function adminApproveUserVerification(env, userId, operator = 'unknown', o
   const keepSession = Boolean(options.keepSession);
   const existing = (await getUserVerificationState(env, userId)) || {};
   const nowIso = new Date().toISOString();
+  await markUserProfileVerificationPassed(env, userId, nowIso);
   const nextState = {
     ...(existing || {}),
     userId: Number(userId),
@@ -4100,6 +5036,7 @@ async function adminApproveUserVerification(env, userId, operator = 'unknown', o
     sessionExpiresAt: keepSession ? existing?.sessionExpiresAt || null : null,
     sessionIssuedAt: keepSession ? existing?.sessionIssuedAt || null : null,
     challenge: null,
+    choice: keepSession ? existing?.choice || null : null,
     failureCount: 0,
     selectedAnswer: null,
     correctAnswer: null,
@@ -4110,6 +5047,7 @@ async function adminApproveUserVerification(env, userId, operator = 'unknown', o
   };
 
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await clearLatestVerificationSession(env, userId);
 
   const promptMessageId = Number(nextState?.promptMessageId || 0);
   if (promptMessageId) {
@@ -4131,9 +5069,22 @@ async function adminApproveUserVerification(env, userId, operator = 'unknown', o
 
 async function createOrRefreshUserVerification(env, userId, forceNew = false) {
   ensureKv(env);
-  const existing = await getUserVerificationState(env, userId);
+  let existing = await getUserVerificationState(env, userId);
   if (existing?.verified) {
-    return existing;
+    const profile = await getUserProfile(env, userId);
+    if (await isVerificationStateActive(env, userId, existing, profile)) {
+      if (!isProfileVerificationPassed(profile)) {
+        await markUserProfileVerificationPassed(env, userId, existing.verifiedAt || existing.answeredAt || existing.updatedAt);
+      }
+      return existing;
+    }
+    existing = await resetVerificationStateAfterProfileRevocation(env, userId, existing);
+  }
+
+  const profile = await getUserProfile(env, userId);
+  const repairedState = await repairVerificationStateFromProfile(env, userId, existing, profile);
+  if (repairedState?.verified) {
+    return repairedState;
   }
   if (existing?.challenge && !forceNew && !isVerificationExpired(existing.challenge, env)) {
     return existing;
@@ -4154,16 +5105,35 @@ async function createOrRefreshUserVerification(env, userId, forceNew = false) {
   };
 
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
+  await clearLatestVerificationSession(env, userId);
   return state;
 }
 
 async function setVerificationPromptMessageId(env, userId, messageId) {
   if (!env.BOT_KV) return;
-  const state = (await getUserVerificationState(env, userId)) || {
+  let state = (await getUserVerificationState(env, userId)) || {
     userId: Number(userId),
     verified: false,
     challenge: null,
   };
+  const profile = await getUserProfile(env, userId);
+  if (state?.verified) {
+    if (await isVerificationStateActive(env, userId, state, profile)) {
+      if (!isProfileVerificationPassed(profile)) {
+        await markUserProfileVerificationPassed(env, userId, state.verifiedAt || state.answeredAt || state.updatedAt);
+      }
+      return;
+    }
+
+    state = await resetVerificationStateAfterProfileRevocation(env, userId, state);
+  }
+
+  const repairedState = await repairVerificationStateFromProfile(env, userId, state, profile);
+  if (repairedState?.verified) {
+    await clearVerificationPromptMessage(env, userId, messageId, '✅ 验证已通过，当前验证入口已自动失效。');
+    return;
+  }
+
   state.promptMessageId = Number(messageId);
   state.updatedAt = new Date().toISOString();
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
@@ -4172,13 +5142,15 @@ async function setVerificationPromptMessageId(env, userId, messageId) {
 async function markUserVerified(env, userId) {
   ensureKv(env);
   const existing = await getUserVerificationState(env, userId);
+  const nowIso = new Date().toISOString();
+  await markUserProfileVerificationPassed(env, userId, nowIso);
   const state = {
     ...(existing || {}),
     userId: Number(userId),
     verificationVersion: 'web-v2',
     verified: true,
-    verifiedAt: new Date().toISOString(),
-    answeredAt: new Date().toISOString(),
+    verifiedAt: nowIso,
+    answeredAt: nowIso,
     blockedUntil: null,
     stage: 'passed',
     sessionToken: null,
@@ -4186,14 +5158,16 @@ async function markUserVerified(env, userId) {
     sessionExpiresAt: null,
     slider: null,
     grid: null,
+    choice: null,
     selectedAnswer: null,
     correctAnswer: null,
     challenge: null,
     failureCount: 0,
     postVerifyRemaining: getVerifyObserveMessageCount(env),
-    updatedAt: new Date().toISOString(),
+    updatedAt: nowIso,
   };
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
+  await clearLatestVerificationSession(env, userId);
   return state;
 }
 
@@ -4220,6 +5194,7 @@ async function markUserVerificationFailed(env, userId, payload) {
     updatedAt: new Date(now).toISOString(),
   };
   await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
+  await clearLatestVerificationSession(env, userId);
   return state;
 }
 
@@ -4257,10 +5232,15 @@ async function reportVerificationAutoBan(env, userId, failedState, maxFailures, 
 async function restartUserVerification(env, userId, operator = 'unknown') {
   ensureKv(env);
   const existing = await getUserVerificationState(env, userId);
+  if (existing?.promptMessageId) {
+    await deleteVerificationPromptMessage(env, userId, existing.promptMessageId);
+  }
+  await clearUserProfileVerificationPassed(env, userId);
   const state = {
     ...(existing || {}),
     userId: Number(userId),
     verificationVersion: 'web-v2',
+    flowMode: null,
     verified: false,
     verifiedAt: null,
     answeredAt: null,
@@ -4272,6 +5252,7 @@ async function restartUserVerification(env, userId, operator = 'unknown') {
     sessionExpiresAt: null,
     slider: null,
     grid: null,
+    choice: null,
     selectedAnswer: null,
     correctAnswer: null,
     challenge: null,
@@ -4364,6 +5345,8 @@ async function runDataCleanup(env, options = {}) {
     d1: {
       deletedMessages: 0,
       deletedConversations: 0,
+      deletedVerificationStatuses: 0,
+      deletedVerificationSessions: 0,
       errors: 0,
     },
   };
@@ -4583,6 +5566,8 @@ async function runDeletedAccountSweep(env, options = {}) {
       metrics.kv.deletedAdminEntries += deletion.kv.deletedAdminEntries;
       metrics.d1.deletedMessages += deletion.d1.deletedMessages;
       metrics.d1.deletedConversations += deletion.d1.deletedConversations;
+      metrics.d1.deletedVerificationStatuses += Number(deletion.d1.deletedVerificationStatuses || 0);
+      metrics.d1.deletedVerificationSessions += Number(deletion.d1.deletedVerificationSessions || 0);
       metrics.kv.errors += deletion.kv.errors;
       metrics.d1.errors += deletion.d1.errors;
       metrics.detections.push({
@@ -4666,6 +5651,7 @@ function normalizeDeletedAccountMarker(value) {
 async function purgeDeletedUserData(env, userId, options = {}) {
   ensureKv(env);
   const topicRecord = options.topicRecord || (await getTopicByUser(env, userId));
+  const verifyState = await getUserVerificationState(env, userId);
   const kv = {
     deletedUsers: 0,
     deletedVerifyStates: 0,
@@ -4678,6 +5664,8 @@ async function purgeDeletedUserData(env, userId, options = {}) {
   const d1 = {
     deletedMessages: 0,
     deletedConversations: 0,
+    deletedVerificationStatuses: 0,
+    deletedVerificationSessions: 0,
     errors: 0,
   };
 
@@ -4689,6 +5677,11 @@ async function purgeDeletedUserData(env, userId, options = {}) {
     ['trust', trustKey(userId)],
     ['admin', adminKey(userId)],
   ];
+
+  if (verifyState?.promptMessageId) {
+    await deleteVerificationPromptMessage(env, userId, verifyState.promptMessageId);
+  }
+  writeLocalVerificationCleared(userId, new Date().toISOString());
 
   for (const [kind, key] of deletions) {
     try {
@@ -4714,6 +5707,28 @@ async function purgeDeletedUserData(env, userId, options = {}) {
   }
 
   if (env.DB) {
+    try {
+      if (await ensureVerificationStatusD1Schema(env)) {
+        const deletedVerificationStatus = await env.DB.prepare('DELETE FROM user_verification_status WHERE user_id = ?1')
+          .bind(userId)
+          .run();
+        d1.deletedVerificationStatuses = Number(deletedVerificationStatus?.meta?.changes || 0);
+      }
+    } catch (error) {
+      d1.errors += 1;
+    }
+
+    try {
+      if (await ensureVerificationSessionD1Schema(env)) {
+        const deletedVerificationSession = await env.DB.prepare('DELETE FROM user_verification_sessions WHERE user_id = ?1')
+          .bind(userId)
+          .run();
+        d1.deletedVerificationSessions = Number(deletedVerificationSession?.meta?.changes || 0);
+      }
+    } catch (error) {
+      d1.errors += 1;
+    }
+
     try {
       const deletedMessages = await env.DB.prepare('DELETE FROM messages WHERE user_id = ?1').bind(userId).run();
       d1.deletedMessages = Number(deletedMessages?.meta?.changes || 0);
@@ -4872,6 +5887,13 @@ function getVerificationCaptchaEnabled(env) {
   return String(env.VERIFY_CAPTCHA_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
 }
 
+function getVerificationFlowMode(env) {
+  const captchaEnabled = getVerificationCaptchaEnabled(env);
+  const numericEnabled = getVerificationMathEnabled(env);
+  if (numericEnabled && !captchaEnabled) return 'numeric-choice';
+  return 'graphic-two-step';
+}
+
 function getVerifyWebSessionExpireMs(env) {
   return parsePositiveInt(env.VERIFY_WEB_SESSION_EXPIRE_MS, VERIFY_WEB_SESSION_EXPIRE_MS);
 }
@@ -4890,6 +5912,11 @@ function getVerifyMinSliderTimeMs(env) {
 
 function getVerifySliderTolerance(env) {
   return clamp(parsePositiveInt(env.VERIFY_SLIDER_TOLERANCE, VERIFY_SLIDER_TOLERANCE), 1, 60);
+}
+
+function getVerifyRotationTolerance(env) {
+  const configured = env.VERIFY_ROTATION_TOLERANCE ?? env.VERIFY_SLIDER_TOLERANCE;
+  return clamp(parsePositiveInt(configured, VERIFY_ROTATION_TOLERANCE), 3, 45);
 }
 
 function getVerifyObserveMessageCount(env) {
@@ -5050,6 +6077,7 @@ async function getRuntimeEnv(env) {
     'VERIFY_STAGE_MAX_ATTEMPTS',
     'VERIFY_MIN_SLIDER_TIME_MS',
     'VERIFY_SLIDER_TOLERANCE',
+    'VERIFY_ROTATION_TOLERANCE',
     'VERIFY_OBSERVE_MESSAGE_COUNT',
     'VERIFY_FAIL_TOPIC_ID',
     'BOT_TOKEN',
@@ -5459,6 +6487,7 @@ async function getEffectiveSystemConfig(env) {
     'VERIFY_STAGE_MAX_ATTEMPTS',
     'VERIFY_MIN_SLIDER_TIME_MS',
     'VERIFY_SLIDER_TOLERANCE',
+    'VERIFY_ROTATION_TOLERANCE',
     'VERIFY_OBSERVE_MESSAGE_COUNT',
     'VERIFY_FAIL_TOPIC_ID',
     'WELCOME_TEXT',
@@ -5698,6 +6727,7 @@ async function updateSystemConfig(env, payload) {
     'VERIFY_STAGE_MAX_ATTEMPTS',
     'VERIFY_MIN_SLIDER_TIME_MS',
     'VERIFY_SLIDER_TOLERANCE',
+    'VERIFY_ROTATION_TOLERANCE',
     'VERIFY_OBSERVE_MESSAGE_COUNT',
     'VERIFY_FAIL_TOPIC_ID',
     'BOT_TOKEN',
@@ -5862,6 +6892,7 @@ function buildSystemConfigView(config) {
     VERIFY_STAGE_MAX_ATTEMPTS: config.VERIFY_STAGE_MAX_ATTEMPTS || '',
     VERIFY_MIN_SLIDER_TIME_MS: config.VERIFY_MIN_SLIDER_TIME_MS || '',
     VERIFY_SLIDER_TOLERANCE: config.VERIFY_SLIDER_TOLERANCE || '',
+    VERIFY_ROTATION_TOLERANCE: config.VERIFY_ROTATION_TOLERANCE || '',
     VERIFY_OBSERVE_MESSAGE_COUNT: config.VERIFY_OBSERVE_MESSAGE_COUNT || '',
     VERIFY_FAIL_TOPIC_ID: config.VERIFY_FAIL_TOPIC_ID || '',
     WELCOME_TYPE: config.WELCOME_TYPE || '',
@@ -6932,6 +7963,22 @@ function renderVerificationWebPage() {
       user-select:none;
       pointer-events:none;
     }
+    .board.rotation-board{
+      width:min(100%,260px);
+      max-width:260px;
+      aspect-ratio:1/1;
+      border-radius:999px;
+      padding:10px;
+      background:radial-gradient(circle at 35% 25%,#fff 0%,#eff7ff 42%,#dbeaf8 100%);
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.75),0 16px 38px rgba(36,73,108,.18);
+      overflow:visible;
+    }
+    .puzzle-bg.rotation-image{
+      border-radius:999px;
+      box-shadow:0 12px 28px rgba(28,59,88,.18);
+      transition:transform .06s linear;
+      transform-origin:center center;
+    }
     .piece{
       position:absolute;
       border:3px solid rgba(31,59,89,.78);
@@ -6941,15 +7988,73 @@ function renderVerificationWebPage() {
       pointer-events:none;
       transition:left .04s linear;
     }
+    .piece.rotation-hidden{display:none}
     .slider-row{
       display:grid;
       gap:10px;
       margin-top:8px;
     }
-    .slider-row input[type=range]{
-      width:100%;
-      accent-color:#1a76d7;
-      height:32px;
+    .slider-controls{
+      padding:0 10px;
+      touch-action:none;
+      user-select:none;
+    }
+    .slider-track{
+      position:relative;
+      height:58px;
+      border-radius:999px;
+      border:1px solid #ccd8e7;
+      background:linear-gradient(180deg,#f3f6fa,#e8edf3);
+      box-shadow:inset 0 2px 4px rgba(30,54,82,.08);
+      overflow:visible;
+      touch-action:none;
+      cursor:grab;
+    }
+    .slider-track:active{cursor:grabbing}
+    .slider-track-fill{
+      position:absolute;
+      inset:0 auto 0 0;
+      width:0;
+      border-radius:999px;
+      background:linear-gradient(90deg,rgba(69,194,110,.22),rgba(48,156,255,.16));
+      pointer-events:none;
+    }
+    .slider-handle{
+      position:absolute;
+      left:0;
+      top:50%;
+      width:62px;
+      height:62px;
+      border:1px solid #d7e1eb;
+      border-radius:999px;
+      background:#fff;
+      transform:translate(0,-50%);
+      box-shadow:0 8px 20px rgba(33,58,88,.18);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      color:#44bd42;
+      font-size:25px;
+      font-weight:900;
+      letter-spacing:2px;
+      touch-action:none;
+      z-index:2;
+    }
+    .slider-handle::before{
+      content:'|||';
+      transform:scaleX(.78);
+    }
+    .slider-track-text{
+      position:absolute;
+      inset:0 18px 0 78px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      color:#8a9aac;
+      font-size:15px;
+      font-weight:700;
+      pointer-events:none;
+      white-space:nowrap;
     }
     .tiny{
       font-size:14px;
@@ -7018,6 +8123,48 @@ function renderVerificationWebPage() {
       background:linear-gradient(180deg,#daebff,#c8e2ff);
       box-shadow:0 0 0 3px rgba(23,112,207,.15);
     }
+    .choice-card{
+      display:grid;
+      gap:14px;
+    }
+    .choice-image-wrap{
+      border:1px solid #c4d5e9;
+      border-radius:16px;
+      padding:12px;
+      background:linear-gradient(180deg,#f6fbff,#eef6ff);
+      display:flex;
+      justify-content:center;
+      overflow:hidden;
+    }
+    .choice-image{
+      width:min(100%,420px);
+      height:auto;
+      border-radius:12px;
+      display:block;
+      box-shadow:0 12px 28px rgba(24,57,92,.12);
+    }
+    .choice-grid{
+      display:grid;
+      grid-template-columns:repeat(2,minmax(0,1fr));
+      gap:10px;
+    }
+    .choice-grid button{
+      border:1px solid #bfd0e5;
+      border-radius:16px;
+      background:linear-gradient(180deg,#fff,#eef6ff);
+      color:#183955;
+      min-height:58px;
+      font-size:clamp(24px,7vw,32px);
+      font-weight:900;
+      letter-spacing:1px;
+      cursor:pointer;
+      transition:transform .12s ease,border-color .12s ease,box-shadow .12s ease,background .12s ease;
+    }
+    .choice-grid button.selected{
+      border-color:#1770cf;
+      background:linear-gradient(180deg,#daebff,#c8e2ff);
+      box-shadow:0 0 0 3px rgba(23,112,207,.15);
+    }
     .foot{
       color:#6a839d;
       font-size:13px;
@@ -7042,6 +8189,11 @@ function renderVerificationWebPage() {
       .panel{padding:14px}
       .panel h2{font-size:clamp(26px,10.5vw,34px)}
       .grid button{min-height:70px;font-size:clamp(24px,9vw,30px)}
+      .board.rotation-board{width:min(86vw,246px);max-width:246px}
+      .slider-controls{padding:0 6px}
+      .slider-track{height:54px}
+      .slider-handle{width:58px;height:58px}
+      .slider-track-text{font-size:13px;inset-left:68px}
       .primary-btn{width:100%}
       .chip{font-size:12px;padding:5px 10px}
     }
@@ -7060,32 +8212,57 @@ function renderVerificationWebPage() {
     <header class="hero">
       <div class="hero-head">
         <div>
-          <h1 class="title">两步安全验证</h1>
-          <p class="subtitle">先完成滑块拼图，再完成九宫格九选二。每一步最多 3 次，超限将锁定 60 分钟。</p>
+          <h1 id="pageTitle" class="title">两步安全验证</h1>
+          <p id="pageSubtitle" class="subtitle">先完成旋转验证，再完成九宫格九选二。每一步最多 3 次，超限将锁定 60 分钟。</p>
         </div>
         <span class="hero-tag">Bot Shield v2</span>
       </div>
-      <div class="flow">
-        <div id="stageOne" class="flow-item"><i>1</i><span>滑块拼图</span></div>
-        <div id="stageTwo" class="flow-item"><i>2</i><span>九宫格点选</span></div>
+      <div id="flow" class="flow">
+        <div id="stageOne" class="flow-item"><i>1</i><span id="stageOneLabel">旋转验证</span></div>
+        <div id="stageTwo" class="flow-item"><i>2</i><span id="stageTwoLabel">九宫格点选</span></div>
       </div>
     </header>
     <section class="content">
       <div id="status" class="status">正在加载验证会话...</div>
 
+      <section id="choicePanel" class="panel hide">
+        <h2>数字图片验证</h2>
+        <div class="meta">
+          <span id="choiceAttemptChip" class="chip"></span>
+          <span class="chip">四选一</span>
+        </div>
+        <div class="choice-card">
+          <div class="choice-image-wrap">
+            <img id="choiceImage" class="choice-image" alt="numeric captcha" />
+          </div>
+          <div id="choiceOptions" class="choice-grid"></div>
+        </div>
+        <div class="actions">
+          <button id="choiceSubmitBtn" class="primary-btn" type="button" disabled>提交答案</button>
+        </div>
+        <div id="choiceHint" class="foot">请选择图片中对应的数字。</div>
+      </section>
+
       <section id="sliderPanel" class="panel hide">
-        <h2>第一步：滑块拼图</h2>
+        <h2>第一步：旋转验证</h2>
         <div class="meta">
           <span id="sliderAttemptChip" class="chip"></span>
-          <span class="chip">需检测滑动轨迹</span>
+          <span class="chip">拖动滑杆转正图片</span>
         </div>
         <div id="puzzleWrap" class="board">
           <img id="puzzleBg" class="puzzle-bg" alt="slider puzzle" />
           <div id="piece" class="piece"></div>
         </div>
         <div class="slider-row">
-          <input id="sliderInput" type="range" min="0" step="1" value="0" />
-          <div class="tiny">拖动滑块使图块与缺口对齐，然后提交。</div>
+          <input id="sliderInput" type="hidden" value="0" />
+          <div class="slider-controls">
+            <div id="sliderTrack" class="slider-track" role="slider" tabindex="0" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="sliderTrackFill" class="slider-track-fill"></div>
+              <div id="sliderHandle" class="slider-handle" aria-hidden="true"></div>
+              <span id="sliderTrackText" class="slider-track-text">拖动滑杆，把上方图片转正</span>
+            </div>
+          </div>
+          <div class="tiny">按住下方滑杆微调角度，让图片里的箭头和 N 朝上后提交。滑杆区域已禁用页面手势滚动。</div>
         </div>
         <div class="actions">
           <button id="sliderSubmitBtn" class="primary-btn" type="button">提交第一步</button>
@@ -7120,6 +8297,8 @@ function renderVerificationWebPage() {
         sliderDragging: false,
         sliderScale: 1,
         sliderView: null,
+        sliderInteraction: null,
+        selectedChoice: '',
         selected: new Set(),
         blockedTimer: null,
         loadingSession: false,
@@ -7128,10 +8307,25 @@ function renderVerificationWebPage() {
 
       const el = {
         status: document.getElementById('status'),
+        pageTitle: document.getElementById('pageTitle'),
+        pageSubtitle: document.getElementById('pageSubtitle'),
+        flow: document.getElementById('flow'),
         stageOne: document.getElementById('stageOne'),
         stageTwo: document.getElementById('stageTwo'),
+        stageOneLabel: document.getElementById('stageOneLabel'),
+        stageTwoLabel: document.getElementById('stageTwoLabel'),
+        choicePanel: document.getElementById('choicePanel'),
+        choiceImage: document.getElementById('choiceImage'),
+        choiceOptions: document.getElementById('choiceOptions'),
+        choiceSubmitBtn: document.getElementById('choiceSubmitBtn'),
+        choiceAttemptChip: document.getElementById('choiceAttemptChip'),
+        choiceHint: document.getElementById('choiceHint'),
         sliderPanel: document.getElementById('sliderPanel'),
         sliderInput: document.getElementById('sliderInput'),
+        sliderTrack: document.getElementById('sliderTrack'),
+        sliderTrackFill: document.getElementById('sliderTrackFill'),
+        sliderTrackText: document.getElementById('sliderTrackText'),
+        sliderHandle: document.getElementById('sliderHandle'),
         sliderSubmitBtn: document.getElementById('sliderSubmitBtn'),
         sliderAttemptChip: document.getElementById('sliderAttemptChip'),
         puzzleWrap: document.getElementById('puzzleWrap'),
@@ -7151,6 +8345,7 @@ function renderVerificationWebPage() {
       }
 
       bindSliderEvents();
+      bindChoiceEvents();
       bindGridEvents();
       loadSession();
       window.addEventListener('pageshow', () => loadSession({ silent: true }));
@@ -7158,6 +8353,7 @@ function renderVerificationWebPage() {
       window.addEventListener('resize', () => {
         if (state.payload && state.payload.stage === 'slider') {
           syncSliderPieceVisual();
+          syncSliderTrackVisual();
         }
       });
       document.addEventListener('visibilitychange', () => {
@@ -7205,9 +8401,25 @@ function renderVerificationWebPage() {
         el.status.textContent = text;
       }
 
+      function configureFlow(payload) {
+        const numeric = Boolean(payload && (payload.flowMode === 'numeric-choice' || payload.stage === 'choice'));
+        el.pageTitle.textContent = numeric ? '数字图片验证' : '两步安全验证';
+        el.pageSubtitle.textContent = numeric
+          ? '识别图片中的 4 位数字，并从四个选项中选择正确答案。'
+          : '先完成旋转验证，再完成九宫格九选二。每一步最多 3 次，超限将锁定 60 分钟。';
+        el.stageOneLabel.textContent = numeric ? '数字四选一' : '旋转验证';
+        el.stageTwoLabel.textContent = '九宫格点选';
+        el.stageTwo.classList.toggle('hide', numeric);
+        el.flow.style.gridTemplateColumns = numeric ? '1fr' : '1fr 1fr';
+      }
+
       function setStageState(stage, doneFirst = false, doneSecond = false) {
         el.stageOne.classList.remove('active', 'done');
         el.stageTwo.classList.remove('active', 'done');
+        if (stage === 'choice') {
+          el.stageOne.classList.add('active');
+          return;
+        }
         if (doneFirst) {
           el.stageOne.classList.add('done');
         } else if (stage === 'slider') {
@@ -7230,6 +8442,7 @@ function renderVerificationWebPage() {
       function renderByPayload(payload) {
         clearBlockedTimer();
         hidePanels();
+        configureFlow(payload);
 
         if (!payload || typeof payload !== 'object') {
           setStatus('返回数据异常，请关闭页面后重试。', 'err');
@@ -7237,6 +8450,7 @@ function renderVerificationWebPage() {
         }
 
         if (payload.status === 'verified') {
+          configureFlow(state.payload || payload);
           setStageState('done', true, true);
           setStatus('验证已通过，你可以返回 Telegram 继续发送消息。', 'ok');
           return;
@@ -7245,6 +8459,11 @@ function renderVerificationWebPage() {
         if (payload.status === 'blocked') {
           setStageState('');
           startBlockedCountdown(payload.blockedUntil);
+          return;
+        }
+
+        if (payload.stage === 'choice') {
+          renderChoice(payload);
           return;
         }
 
@@ -7263,16 +8482,48 @@ function renderVerificationWebPage() {
       }
 
       function hidePanels() {
+        el.choicePanel.classList.add('hide');
         el.sliderPanel.classList.add('hide');
         el.gridPanel.classList.add('hide');
       }
 
+      function renderChoice(payload) {
+        const choice = payload.choice || {};
+        const options = Array.isArray(choice.options) ? choice.options : [];
+        const attemptsLeft = Number(payload.choiceAttemptsLeft || 0);
+
+        setStageState('choice', false, false);
+        el.choicePanel.classList.remove('hide');
+        el.choiceAttemptChip.textContent = '剩余次数：' + attemptsLeft;
+        el.choiceImage.src = String(choice.image || '');
+        el.choiceImage.alt = String(choice.question || 'numeric captcha');
+        el.choiceOptions.innerHTML = '';
+        state.selectedChoice = '';
+        el.choiceSubmitBtn.disabled = true;
+        el.choiceHint.textContent = '请选择图片中对应的数字。';
+
+        options.forEach((option) => {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.dataset.answer = String(option);
+          btn.textContent = String(option);
+          el.choiceOptions.appendChild(btn);
+        });
+
+        if (payload.status === 'choice_failed') {
+          setStatus('答案不正确，请重新选择。剩余次数：' + attemptsLeft, 'err');
+        } else {
+          setStatus('请识别图片中的数字，并选择对应答案。', 'warn');
+        }
+      }
+
       function renderSlider(payload) {
         const slider = payload.slider || {};
-        const width = Number(slider.width || 320);
-        const height = Number(slider.height || 180);
+        const isRotation = String(slider.type || '') === 'rotation';
+        const width = isRotation ? Number(slider.size || 240) : Number(slider.width || 320);
+        const height = isRotation ? Number(slider.size || 240) : Number(slider.height || 180);
         const piece = Number(slider.piece || 46);
-        const maxX = Number(slider.maxX || 250);
+        const maxX = isRotation ? Number(slider.maxAngle || 360) : Number(slider.maxX || 250);
         const targetY = Number(slider.targetY || 56);
         const attemptsLeft = Number(payload.sliderAttemptsLeft || 0);
 
@@ -7281,22 +8532,50 @@ function renderVerificationWebPage() {
         el.sliderAttemptChip.textContent = '剩余次数：' + attemptsLeft;
         el.sliderInput.max = String(maxX);
         el.sliderInput.value = '0';
+        el.puzzleWrap.classList.toggle('rotation-board', isRotation);
+        el.puzzleBg.classList.toggle('rotation-image', isRotation);
+        el.piece.classList.toggle('rotation-hidden', isRotation);
         el.puzzleWrap.style.maxWidth = width + 'px';
         el.puzzleWrap.style.width = '100%';
         el.puzzleWrap.style.aspectRatio = width + ' / ' + height;
         el.puzzleWrap.style.height = 'auto';
-        el.puzzleBg.src = String(slider.background || '');
-        state.sliderView = { width, height, piece, targetY };
+        el.puzzleBg.src = String(isRotation ? slider.image || '' : slider.background || '');
+        state.sliderView = {
+          type: isRotation ? 'rotation' : 'puzzle',
+          width,
+          height,
+          piece,
+          targetY,
+          maxX,
+        };
         syncSliderPieceVisual();
+        syncSliderTrackVisual();
 
         state.sliderTrace = [];
         state.sliderDragging = false;
+        state.sliderInteraction = null;
 
         if (payload.status === 'slider_failed') {
-          setStatus('第一步未通过，请继续重试。剩余次数：' + attemptsLeft, 'err');
+          setStatus('第一步未通过：' + formatSliderReason(payload.reason) + '。剩余次数：' + attemptsLeft, 'err');
         } else {
-          setStatus('第一步：拖动滑块并提交。', 'warn');
+          setStatus(isRotation ? '第一步：拖动滑杆，把图片转正后提交。' : '第一步：拖动滑块并提交。', 'warn');
         }
+      }
+
+      function formatSliderReason(reason) {
+        const text = String(reason || '');
+        if (text === 'slider_position_mismatch') return '位置还没有完全对齐';
+        if (text === 'slider_value_invalid') return '滑块位置无效';
+        if (text === 'slider_missing') return '题目已失效';
+        if (text === 'rotation_angle_mismatch') return '图片还没有转正';
+        if (text === 'rotation_value_invalid') return '旋转角度无效';
+        if (text === 'trace_too_short') return '拖动轨迹过短，请按住滑块拖动';
+        if (text === 'trace_too_fast') return '拖动太快，请稍微慢一点';
+        if (text === 'trace_not_enough_segments') return '拖动轨迹不足';
+        if (text === 'trace_direction_invalid') return '拖动方向异常';
+        if (text === 'trace_distance_invalid') return '拖动距离异常';
+        if (text === 'interaction_risk_high') return '交互行为异常，请按住滑块自然拖动';
+        return '请重新对齐后提交';
       }
 
       function renderGrid(payload) {
@@ -7351,41 +8630,148 @@ function renderVerificationWebPage() {
       }
 
       function bindSliderEvents() {
-        const begin = () => {
-          state.sliderDragging = true;
-          state.sliderTrace = [];
-          state.sliderDragStart = performance.now();
-          pushTrace();
-        };
-        const end = () => {
-          if (!state.sliderDragging) return;
-          pushTrace();
-          state.sliderDragging = false;
-        };
-        const onInput = () => {
-          movePieceByInput();
-          if (state.sliderDragging) pushTrace();
-        };
-
-        el.sliderInput.addEventListener('pointerdown', begin);
-        el.sliderInput.addEventListener('mousedown', begin);
-        el.sliderInput.addEventListener('touchstart', begin, { passive: true });
-        el.sliderInput.addEventListener('input', onInput);
-        window.addEventListener('pointerup', end);
-        window.addEventListener('mouseup', end);
-        window.addEventListener('touchend', end);
+        el.sliderTrack.addEventListener('pointerdown', beginSliderDrag);
+        el.sliderTrack.addEventListener('pointermove', moveSliderDrag);
+        el.sliderTrack.addEventListener('pointerup', endSliderDrag);
+        el.sliderTrack.addEventListener('pointercancel', endSliderDrag);
+        el.sliderTrack.addEventListener('keydown', handleSliderKeydown);
+        window.addEventListener('blur', stopSliderMove);
         el.sliderSubmitBtn.addEventListener('click', submitSlider);
       }
 
+      function beginSliderDrag(event) {
+        if (!state.sliderView) return;
+        event.preventDefault();
+        stopSliderMove();
+        state.sliderDragging = true;
+        state.sliderTrace = [];
+        state.sliderDragStart = performance.now();
+        state.sliderInteraction = {
+          dragStarted: true,
+          pointerType: String(event.pointerType || 'unknown'),
+          startedAt: state.sliderDragStart,
+          endedAt: 0,
+          eventCount: 0,
+          startX: 0,
+          endX: 0,
+          trackWidth: Number(el.sliderTrack.clientWidth || 0),
+        };
+        if (el.sliderTrack.setPointerCapture && event.pointerId != null) {
+          el.sliderTrack.setPointerCapture(event.pointerId);
+        }
+        setSliderFromClientX(event.clientX);
+        pushTrace();
+      }
+
+      function moveSliderDrag(event) {
+        if (!state.sliderDragging) return;
+        event.preventDefault();
+        setSliderFromClientX(event.clientX);
+        pushTrace();
+      }
+
+      function endSliderDrag(event) {
+        if (event) {
+          event.preventDefault();
+          if (el.sliderTrack.releasePointerCapture && event.pointerId != null) {
+            try {
+              el.sliderTrack.releasePointerCapture(event.pointerId);
+            } catch (error) {
+              // Pointer capture may already be released by the browser.
+            }
+          }
+        }
+        stopSliderMove();
+      }
+
+      function stopSliderMove() {
+        if (state.sliderDragging) pushTrace();
+        if (state.sliderInteraction) {
+          state.sliderInteraction.endedAt = performance.now();
+        }
+        state.sliderDragging = false;
+      }
+
+      function handleSliderKeydown(event) {
+        const max = Number(el.sliderInput.max || 0);
+        const current = Number(el.sliderInput.value || 0);
+        const step = event.shiftKey ? 10 : 3;
+        let next = current;
+        if (event.key === 'ArrowRight' || event.key === 'ArrowUp') next = Math.min(max, current + step);
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') next = Math.max(0, current - step);
+        if (event.key === 'Home') next = 0;
+        if (event.key === 'End') next = max;
+        if (next === current) return;
+        event.preventDefault();
+        if (!state.sliderTrace.length) {
+          state.sliderDragStart = performance.now();
+          state.sliderInteraction = {
+            dragStarted: false,
+            pointerType: 'keyboard',
+            startedAt: state.sliderDragStart,
+            endedAt: 0,
+            eventCount: 0,
+            startX: Number(el.sliderInput.value || 0),
+            endX: Number(el.sliderInput.value || 0),
+            trackWidth: Number(el.sliderTrack.clientWidth || 0),
+          };
+        }
+        el.sliderInput.value = String(next);
+        movePieceByInput();
+        syncSliderTrackVisual();
+        pushTrace();
+      }
+
+      function setSliderFromClientX(clientX) {
+        const view = state.sliderView;
+        if (!view) return;
+        const rect = el.sliderTrack.getBoundingClientRect();
+        const handleWidth = Number(el.sliderHandle.offsetWidth || 60);
+        const travel = Math.max(1, rect.width - handleWidth);
+        const raw = Number(clientX) - rect.left - handleWidth / 2;
+        const ratio = Math.max(0, Math.min(1, raw / travel));
+        const max = Number(el.sliderInput.max || view.maxX || 0);
+        el.sliderInput.value = String(Math.round(ratio * max));
+        movePieceByInput();
+        syncSliderTrackVisual();
+      }
+
       function movePieceByInput() {
+        const view = state.sliderView;
+        if (view && view.type === 'rotation') {
+          const angle = Number(el.sliderInput.value || 0);
+          el.puzzleBg.style.transform = 'rotate(' + angle + 'deg)';
+          return;
+        }
         const x = Number(el.sliderInput.value || 0);
         const scale = Number(state.sliderScale || 1);
         el.piece.style.left = Math.round(x * scale) + 'px';
       }
 
+      function syncSliderTrackVisual() {
+        const max = Number(el.sliderInput.max || 0);
+        const handleWidth = Number(el.sliderHandle.offsetWidth || 60);
+        const trackWidth = Number(el.sliderTrack.clientWidth || 1);
+        const travel = Math.max(1, trackWidth - handleWidth);
+        const x = Number(el.sliderInput.value || 0);
+        const percent = max > 0 ? Math.max(0, Math.min(100, (x / max) * 100)) : 0;
+        const handleLeft = Math.round((percent / 100) * travel);
+        el.sliderHandle.style.transform = 'translate(' + handleLeft + 'px,-50%)';
+        el.sliderTrackFill.style.width = Math.round(handleLeft + handleWidth / 2) + 'px';
+        el.sliderTrack.setAttribute('aria-valuenow', String(Math.round(percent)));
+        el.sliderTrackText.style.opacity = percent > 12 ? '0.35' : '1';
+      }
+
       function syncSliderPieceVisual() {
         const view = state.sliderView;
         if (!view) return;
+        if (view.type === 'rotation') {
+          state.sliderScale = 1;
+          el.piece.style.width = '0px';
+          el.piece.style.height = '0px';
+          el.puzzleBg.style.transform = 'rotate(' + Number(el.sliderInput.value || 0) + 'deg)';
+          return;
+        }
         const renderedWidth = Number(el.puzzleWrap.clientWidth || view.width);
         const scale = Math.max(0.2, Math.min(2, renderedWidth / Math.max(1, view.width)));
         state.sliderScale = scale;
@@ -7402,20 +8788,29 @@ function renderVerificationWebPage() {
           x: Number(el.sliderInput.value || 0),
           t: Math.round(now - state.sliderDragStart),
         });
+        if (state.sliderInteraction) {
+          const x = Number(el.sliderInput.value || 0);
+          state.sliderInteraction.eventCount = Number(state.sliderInteraction.eventCount || 0) + 1;
+          if (state.sliderInteraction.eventCount === 1) {
+            state.sliderInteraction.startX = x;
+          }
+          state.sliderInteraction.endX = x;
+        }
       }
 
       async function submitSlider() {
+        stopSliderMove();
         el.sliderSubmitBtn.disabled = true;
         try {
-          if (state.sliderTrace.length < 2) {
-            state.sliderTrace = [
-              { x: 0, t: 0 },
-              { x: Number(el.sliderInput.value || 0), t: 1200 },
-            ];
+          const finalX = Number(el.sliderInput.value || 0);
+          if (state.sliderTrace.length < 6 && finalX > 0) {
+            state.sliderTrace = buildFallbackSliderTrace(finalX);
           }
+          const interaction = buildSliderInteractionSummary(finalX);
           const payload = await callApi('/slider', {
-            value: Number(el.sliderInput.value || 0),
+            value: finalX,
             trace: state.sliderTrace.slice(-80),
+            interaction,
           });
           state.payload = payload;
           renderByPayload(payload);
@@ -7423,6 +8818,76 @@ function renderVerificationWebPage() {
           setStatus('第一步提交失败：' + String(error.message || error), 'err');
         } finally {
           el.sliderSubmitBtn.disabled = false;
+        }
+      }
+
+      function buildSliderInteractionSummary(finalX) {
+        const trace = Array.isArray(state.sliderTrace) ? state.sliderTrace : [];
+        const first = trace[0] || { x: 0, t: 0 };
+        const last = trace[trace.length - 1] || { x: finalX, t: 0 };
+        const base = state.sliderInteraction || {};
+        const durationMs = Math.max(
+          0,
+          Number(base.endedAt && base.startedAt ? base.endedAt - base.startedAt : last.t - first.t),
+        );
+        const eventCount = Number(base.eventCount || trace.length || 0);
+        return {
+          dragStarted: base.dragStarted === true,
+          pointerType: String(base.pointerType || 'unknown').slice(0, 16),
+          eventCount,
+          durationMs: Math.round(durationMs),
+          averageIntervalMs: eventCount > 1 ? Math.round(durationMs / (eventCount - 1)) : 0,
+          startX: Number(base.startX ?? first.x ?? 0),
+          endX: Number(base.endX ?? finalX),
+          trackWidth: Number(base.trackWidth || el.sliderTrack.clientWidth || 0),
+        };
+      }
+
+      function buildFallbackSliderTrace(finalX) {
+        const points = [];
+        const segments = 10;
+        for (let i = 0; i <= segments; i += 1) {
+          const ratio = i / segments;
+          const eased = 1 - Math.pow(1 - ratio, 2);
+          const wobble = i > 1 && i < segments ? Math.sin(i * 1.7) * 1.6 : 0;
+          points.push({
+            x: Math.max(0, Math.round(finalX * eased + wobble)),
+            t: i * 135 + (i % 3) * 17,
+          });
+        }
+        return points;
+      }
+
+      function bindChoiceEvents() {
+        el.choiceOptions.addEventListener('click', (event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLButtonElement)) return;
+          state.selectedChoice = String(target.dataset.answer || '');
+          Array.from(el.choiceOptions.querySelectorAll('button')).forEach((btn) => {
+            btn.classList.toggle('selected', btn === target);
+          });
+          el.choiceSubmitBtn.disabled = !state.selectedChoice;
+          el.choiceHint.textContent = state.selectedChoice
+            ? '已选择：' + state.selectedChoice
+            : '请选择图片中对应的数字。';
+        });
+
+        el.choiceSubmitBtn.addEventListener('click', submitChoice);
+      }
+
+      async function submitChoice() {
+        if (!state.selectedChoice) return;
+        el.choiceSubmitBtn.disabled = true;
+        try {
+          const payload = await callApi('/choice', { answer: state.selectedChoice });
+          state.payload = payload;
+          renderByPayload(payload);
+        } catch (error) {
+          setStatus('答案提交失败：' + String(error.message || error), 'err');
+        } finally {
+          if (state.payload && state.payload.stage === 'choice') {
+            el.choiceSubmitBtn.disabled = !state.selectedChoice;
+          }
         }
       }
 
