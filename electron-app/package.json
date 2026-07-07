@@ -1,6 +1,6 @@
 {
   "name": "tg-bot-deploy",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "TG Bot Cloudflare 部署工具",
   "main": "main.js",
   "scripts": {
@@ -30,6 +30,10 @@
       {
         "from": "../scripts",
         "to": "scripts"
+      },
+      {
+        "from": "../shared",
+        "to": "shared"
       },
       {
         "from": "../worker.js",

@@ -10,20 +10,32 @@
         <div class="panel-toolbar">
           <div class="toolbar-chip">{{ t('app.limit') }}</div>
           <n-input-number v-model:value="limit" :min="1" :max="100" />
-          <n-button type="primary" :loading="loading" @click="loadList">{{ t('blacklist.refresh') }}</n-button>
+          <n-button type="primary" :loading="loading" @click="loadList(true)">{{ t('blacklist.refresh') }}</n-button>
           <n-tag round>{{ t('blacklist.total', { count: blacklist.length }) }}</n-tag>
         </div>
       </div>
     </n-card>
 
-    <n-grid class="blacklist-summary" :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
-      <n-gi v-for="card in summaryCards" :key="card.key" span="24 s:12 m:6">
-        <n-card class="glass-card blacklist-stat-card" :bordered="false">
-          <div class="blacklist-stat-card__label">{{ card.label }}</div>
-          <div class="blacklist-stat-card__value">{{ card.value }}</div>
-        </n-card>
-      </n-gi>
-    </n-grid>
+    <div class="summary-metric-grid blacklist-summary">
+      <n-card
+        v-for="card in summaryCards"
+        :key="card.key"
+        class="glass-card summary-metric-card"
+        :class="`summary-metric-card--${card.tone}`"
+        :bordered="false"
+      >
+        <div class="summary-metric-card__main">
+          <div class="summary-metric-card__label">
+            <span class="summary-metric-card__dot"></span>
+            <span>{{ card.label }}</span>
+          </div>
+          <div class="summary-metric-card__value">{{ card.value }}</div>
+        </div>
+        <div class="summary-metric-card__icon">
+          <Icon :icon="card.icon" width="24" />
+        </div>
+      </n-card>
+    </div>
 
     <div class="panel-split">
       <n-card class="glass-card blacklist-list-card" :bordered="false">
@@ -190,6 +202,7 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue';
+import { Icon } from '@iconify/vue';
 import { NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NTag, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchBlacklist, resolveProtectedMediaUrl, updateBlacklist } from '../services/api';
@@ -211,10 +224,10 @@ const summaryCards = computed(() => {
   const withReason = list.filter((item) => String(item.reason || '').trim()).length;
   const withAvatar = list.filter((item) => item.hasAvatar).length;
   return [
-    { key: 'total', label: t('blacklist.title'), value: String(list.length) },
-    { key: 'reason', label: t('blacklist.reason'), value: String(withReason) },
-    { key: 'avatar', label: t('profile.avatar'), value: `${withAvatar}/${list.length || 0}` },
-    { key: 'latest', label: t('blacklist.bannedAt'), value: list[0]?.createdAt ? toLocalTime(list[0].createdAt) : '-' },
+    { key: 'total', label: t('blacklist.title'), value: String(list.length), icon: 'solar:shield-cross-bold', tone: 'red' },
+    { key: 'reason', label: t('blacklist.reason'), value: String(withReason), icon: 'solar:document-text-bold', tone: 'amber' },
+    { key: 'avatar', label: t('profile.avatar'), value: `${withAvatar}/${list.length || 0}`, icon: 'solar:user-circle-bold', tone: 'blue' },
+    { key: 'latest', label: t('blacklist.bannedAt'), value: list[0]?.createdAt ? toLocalTime(list[0].createdAt) : '-', icon: 'solar:clock-circle-bold', tone: 'orange' },
   ];
 });
 
@@ -257,10 +270,10 @@ function avatarUrlOf(item) {
   return resolveProtectedMediaUrl(item?.avatarUrl || '');
 }
 
-async function loadList() {
+async function loadList(force = false) {
   loading.value = true;
   try {
-    const data = await fetchBlacklist(limit.value || 50);
+    const data = await fetchBlacklist(limit.value || 50, { force });
     blacklist.value = data.blacklist || [];
   } catch (error) {
     message.error(error.message || t('blacklist.loadFailed'));
@@ -284,7 +297,7 @@ async function addBlacklist() {
     message.success(t('blacklist.addSuccess'));
     form.userId = '';
     form.reason = t('blacklist.defaultReason');
-    await loadList();
+    await loadList(true);
   } catch (error) {
     message.error(error.message || t('blacklist.addFailed'));
   } finally {
@@ -299,46 +312,18 @@ async function removeItem(row) {
       userId: row.userId,
     });
     message.success(t('blacklist.removeSuccess'));
-    await loadList();
+    await loadList(true);
   } catch (error) {
     message.error(error.message || t('blacklist.removeFailed'));
   }
 }
 
-onMounted(loadList);
+onMounted(() => loadList(false));
 </script>
 
 <style scoped>
 .blacklist-summary {
   margin-top: -2px;
-}
-
-.blacklist-stat-card {
-  position: relative;
-  overflow: hidden;
-}
-
-.blacklist-stat-card::before {
-  content: '';
-  position: absolute;
-  inset: 0 auto auto 0;
-  width: 100%;
-  height: 3px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-}
-
-.blacklist-stat-card__label {
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.blacklist-stat-card__value {
-  margin-top: 10px;
-  font-size: clamp(24px, 4vw, 32px);
-  line-height: 1.15;
-  font-weight: 800;
-  color: var(--text-primary);
-  word-break: break-word;
 }
 
 .panel-split {
@@ -363,9 +348,4 @@ onMounted(loadList);
   }
 }
 
-@media (max-width: 640px) {
-  .blacklist-stat-card__value {
-    font-size: clamp(22px, 8vw, 28px);
-  }
-}
 </style>

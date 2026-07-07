@@ -9,7 +9,7 @@
         </div>
         <div class="panel-toolbar">
           <n-button type="primary" :loading="saving" @click="save">{{ t('settings.save') }}</n-button>
-          <n-button secondary :loading="loading" @click="load">{{ t('settings.reload') }}</n-button>
+          <n-button secondary :loading="loading" @click="load(true)">{{ t('settings.reload') }}</n-button>
         </div>
       </div>
     </n-card>
@@ -78,6 +78,13 @@
                 </div>
                 <n-switch v-model:value="form.USER_VERIFICATION_BOOL" />
               </div>
+            </div>
+
+            <div class="behavior-field">
+              <n-form-item :label="t('settings.adminMetaMode')">
+                <n-select v-model:value="form.ADMIN_META_MODE" :options="adminMetaModeOptions" />
+              </n-form-item>
+              <p>{{ t('settings.adminMetaModeDesc') }}</p>
             </div>
 
             <div class="motion-block">
@@ -262,6 +269,7 @@ import {
   NInputNumber,
   NRadioButton,
   NRadioGroup,
+  NSelect,
   NSwitch,
   useMessage,
 } from 'naive-ui';
@@ -291,6 +299,12 @@ const motionOptions = computed(() => [
   { label: t('settings.motionOff'), value: 'off' },
 ]);
 
+const adminMetaModeOptions = computed(() => [
+  { label: t('settings.adminMetaModeNewTopic'), value: 'new-topic' },
+  { label: t('settings.adminMetaModeAlways'), value: 'always' },
+  { label: t('settings.adminMetaModeOff'), value: 'off' },
+]);
+
 const form = reactive({
   BOT_TOKEN: '',
   ADMIN_CHAT_ID: '',
@@ -298,6 +312,7 @@ const form = reactive({
   VERIFY_PUBLIC_BASE_URL: '',
   TOPIC_MODE_BOOL: true,
   USER_VERIFICATION_BOOL: true,
+  ADMIN_META_MODE: 'new-topic',
   VERIFY_CAPTCHA_ENABLED_BOOL: true,
   VERIFY_MATH_ENABLED_BOOL: true,
   VERIFY_EXPIRE_MINUTES: 15,
@@ -324,6 +339,13 @@ function msToSeconds(value, fallbackMs) {
   return Math.max(1, Math.round(toPositiveNumber(value, fallbackMs) / 1000));
 }
 
+function normalizeAdminMetaMode(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (['always', 'all', 'every', 'each'].includes(raw)) return 'always';
+  if (['off', 'none', 'never', 'silent'].includes(raw)) return 'off';
+  return 'new-topic';
+}
+
 function onMotionChange(next) {
   setMotion(next);
   motionLevel.value = uiStore.motion;
@@ -335,6 +357,7 @@ function assignConfig(cfg = {}) {
   form.VERIFY_PUBLIC_BASE_URL = cfg.VERIFY_PUBLIC_BASE_URL || '';
   form.TOPIC_MODE_BOOL = String(cfg.TOPIC_MODE || 'true') !== 'false';
   form.USER_VERIFICATION_BOOL = String(cfg.USER_VERIFICATION || 'true') !== 'false';
+  form.ADMIN_META_MODE = normalizeAdminMetaMode(cfg.ADMIN_META_MODE);
   const captchaEnabled = String(cfg.VERIFY_CAPTCHA_ENABLED ?? 'true') !== 'false';
   const mathEnabled = String(cfg.VERIFY_MATH_ENABLED ?? 'true') !== 'false';
   if (!captchaEnabled && !mathEnabled) {
@@ -362,10 +385,10 @@ function assignConfig(cfg = {}) {
   form.BOT_TOKEN = '';
 }
 
-async function load() {
+async function load(force = false) {
   loading.value = true;
   try {
-    const data = await fetchSystemConfig();
+    const data = await fetchSystemConfig({ force });
     assignConfig(data.config || {});
   } catch (error) {
     message.error(error.message || t('settings.loadFailed'));
@@ -407,6 +430,7 @@ async function save() {
       VERIFY_PUBLIC_BASE_URL: form.VERIFY_PUBLIC_BASE_URL,
       TOPIC_MODE: form.TOPIC_MODE_BOOL ? 'true' : 'false',
       USER_VERIFICATION: form.USER_VERIFICATION_BOOL ? 'true' : 'false',
+      ADMIN_META_MODE: normalizeAdminMetaMode(form.ADMIN_META_MODE),
       VERIFY_CAPTCHA_ENABLED: form.VERIFY_CAPTCHA_ENABLED_BOOL ? 'true' : 'false',
       VERIFY_MATH_ENABLED: form.VERIFY_MATH_ENABLED_BOOL ? 'true' : 'false',
       VERIFY_EXPIRE_MS: String(Math.max(1, Number(form.VERIFY_EXPIRE_MINUTES) || 15) * 60 * 1000),
@@ -429,7 +453,7 @@ async function save() {
 
     await saveSystemConfig(payload);
     message.success(t('settings.saveSuccess'));
-    await load();
+    await load(true);
   } catch (error) {
     message.error(error.message || t('settings.saveFailed'));
   } finally {
@@ -477,7 +501,7 @@ async function runDeletedSweepNow() {
 
 onMounted(() => {
   motionLevel.value = uiStore.motion;
-  load();
+  load(false);
 });
 </script>
 
@@ -501,6 +525,25 @@ onMounted(() => {
 
 .compact-stack {
   margin-top: 16px;
+}
+
+.behavior-field {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 18px;
+  background: var(--panel-strong);
+  border: 1px solid var(--panel-border-strong);
+}
+
+.behavior-field :deep(.n-form-item) {
+  margin-bottom: 0;
+}
+
+.behavior-field p {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .motion-block {

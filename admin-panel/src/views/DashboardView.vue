@@ -12,7 +12,7 @@
           <div class="panel-summary">
             <n-tag type="success" round>{{ t('dashboard.loggedInAs', { name: adminStore.username || t('auth.defaultAdmin') }) }}</n-tag>
             <n-button tertiary round @click="router.push('/history')">{{ t('app.history') }}</n-button>
-            <n-button secondary round @click="refresh">{{ t('dashboard.refresh') }}</n-button>
+            <n-button secondary round @click="refresh(true)">{{ t('dashboard.refresh') }}</n-button>
           </div>
         </div>
 
@@ -25,14 +25,26 @@
       </div>
     </n-card>
 
-    <n-grid class="dashboard-metrics" :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
-      <n-gi v-for="card in statusCards" :key="card.key" span="24 s:12 m:6">
-        <n-card class="glass-card metric-card" :bordered="false">
-          <div class="metric-card__label">{{ card.label }}</div>
-          <div class="metric-card__value">{{ card.value }}</div>
-        </n-card>
-      </n-gi>
-    </n-grid>
+    <div class="summary-metric-grid dashboard-metrics">
+      <n-card
+        v-for="card in statusCards"
+        :key="card.key"
+        class="glass-card summary-metric-card"
+        :class="`summary-metric-card--${card.tone}`"
+        :bordered="false"
+      >
+        <div class="summary-metric-card__main">
+          <div class="summary-metric-card__label">
+            <span class="summary-metric-card__dot"></span>
+            <span>{{ card.label }}</span>
+          </div>
+          <div class="summary-metric-card__value">{{ card.value }}</div>
+        </div>
+        <div class="summary-metric-card__icon">
+          <Icon :icon="card.icon" width="24" />
+        </div>
+      </n-card>
+    </div>
 
     <n-grid :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
       <n-gi span="24 m:10">
@@ -87,6 +99,7 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue';
+import { Icon } from '@iconify/vue';
 import { useRouter } from 'vue-router';
 import { NButton, NCard, NGi, NGrid, NTag, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
@@ -147,32 +160,42 @@ const statusCards = computed(() => [
     key: 'bot-ready',
     label: t('dashboard.botReady'),
     value: statusData.value?.botConfigReady ? t('app.enabled') : t('app.disabled'),
+    icon: 'solar:check-circle-bold',
+    tone: 'green',
   },
   {
     key: 'mode',
     label: t('dashboard.webhookMode'),
     value: statusData.value?.adminMode || '-',
+    icon: 'solar:server-square-bold',
+    tone: 'blue',
   },
   {
     key: 'topic',
     label: t('dashboard.topicMode'),
     value: statusData.value?.topicModeEnabled ? t('dashboard.on') : t('dashboard.off'),
+    icon: 'solar:chat-round-dots-bold',
+    tone: 'amber',
   },
   {
     key: 'verify',
     label: t('dashboard.verification'),
     value: statusData.value?.userVerificationEnabled ? t('dashboard.on') : t('dashboard.off'),
+    icon: 'solar:shield-check-bold',
+    tone: 'green',
   },
   {
     key: 'chat',
     label: t('dashboard.adminChat'),
     value: statusData.value?.adminChatId || '-',
+    icon: 'solar:hashtag-chat-bold',
+    tone: 'orange',
   },
 ]);
 
-async function refresh() {
+async function refresh(force = false) {
   try {
-    const data = await fetchStatus();
+    const data = await fetchStatus({ force });
     setStatusData(data);
     setLoginState(true, adminStore.username || t('auth.defaultAdmin'));
   } catch (error) {
@@ -188,7 +211,7 @@ async function handleSetWebhook() {
     const data = await setWebhook();
     webhookResult.value = JSON.stringify(data, null, 2);
     message.success(t('dashboard.webhookSet'));
-    await refresh();
+    await refresh(true);
   } catch (error) {
     message.error(error.message || t('dashboard.setFailed'));
   } finally {
@@ -214,7 +237,7 @@ async function handleDeleteWebhook() {
     const data = await deleteWebhook();
     webhookResult.value = JSON.stringify(data, null, 2);
     message.success(t('dashboard.webhookDeleted'));
-    await refresh();
+    await refresh(true);
   } catch (error) {
     message.error(error.message || t('dashboard.deleteFailed'));
   } finally {
@@ -236,7 +259,7 @@ async function handleSyncCommands() {
 }
 
 onMounted(() => {
-  refresh();
+  refresh(false);
 });
 </script>
 
@@ -276,35 +299,6 @@ onMounted(() => {
 
 .dashboard-metrics {
   margin-top: -2px;
-}
-
-.metric-card {
-  overflow: hidden;
-}
-
-.metric-card::before {
-  content: '';
-  position: absolute;
-  inset: 0 auto auto 0;
-  width: 100%;
-  height: 3px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-}
-
-.metric-card__label {
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--text-secondary);
-}
-
-.metric-card__value {
-  margin-top: 14px;
-  font-size: clamp(28px, 5vw, 34px);
-  font-weight: 800;
-  line-height: 1.15;
-  color: var(--text-primary);
-  overflow-wrap: anywhere;
-  word-break: break-word;
 }
 
 .action-grid {
@@ -368,8 +362,5 @@ onMounted(() => {
     grid-template-columns: 1fr;
   }
 
-  .metric-card__value {
-    font-size: clamp(24px, 8vw, 30px);
-  }
 }
 </style>

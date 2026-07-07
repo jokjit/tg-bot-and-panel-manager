@@ -1,5 +1,45 @@
 ﻿import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { Preferences } from '@capacitor/preferences';
+// @ts-ignore Shared CommonJS utility module is bundled by Vite.
+import deployUtils from '../../shared/deploy-utils.cjs';
+
+const {
+  buildCfErrorReason,
+  buildAdminPanelEntryUrl,
+  buildPanelTargetUrl,
+  buildPagesManifest,
+  buildPagesUploadBatches,
+  buildWorkerUploadMetadata: buildWorkerUploadMetadataFromParts,
+  getCustomDomainHost,
+  getUrlOrigin,
+  normalizeHttpUrl,
+  normalizeHashListResult,
+  normalizePagesProjectName,
+  normalizeWebhookPath,
+  isPagesUploadAuthError,
+  suggestPagesProjectName,
+} = deployUtils as {
+  buildCfErrorReason: (json: any, status: number, text?: string) => string;
+  buildAdminPanelEntryUrl: (workerUrl: string) => string;
+  buildPanelTargetUrl: (panelUrl: string, workerUrl: string) => string;
+  buildPagesManifest: (files: PanelAssetMeta[]) => Record<string, string>;
+  buildPagesUploadBatches: (files: PanelAssetMeta[]) => PanelAssetMeta[][];
+  buildWorkerUploadMetadata: (options: {
+    compatibilityDate: string;
+    vars: Record<string, string>;
+    kvNamespaceId: string;
+    d1DatabaseId: string;
+    sortVars?: boolean;
+  }) => Record<string, unknown>;
+  getCustomDomainHost: (value: string) => string;
+  getUrlOrigin: (value: string) => string;
+  isPagesUploadAuthError: (error: any) => boolean;
+  normalizeHashListResult: (result: any, fallback: string[]) => string[];
+  normalizeHttpUrl: (value: string) => string;
+  normalizePagesProjectName: (value: string) => string;
+  normalizeWebhookPath: (value: string) => string;
+  suggestPagesProjectName: (workerName: string) => string;
+};
 
 const CF_API_BASE = 'https://api.cloudflare.com/client/v4';
 const CF_GRAPHQL_API = `${CF_API_BASE}/graphql`;
@@ -132,102 +172,6 @@ function normalizeBoolean(value: unknown, fallback = false): boolean {
   const text = String(value ?? '').trim().toLowerCase();
   if (!text) return fallback;
   return ['1', 'true', 'yes', 'on'].includes(text);
-}
-
-function normalizeHttpUrl(value: string): string {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  try {
-    const normalized = /^https?:\/\//i.test(text) ? text : `https://${text}`;
-    const url = new URL(normalized);
-    if (!/^https?:$/i.test(url.protocol)) return '';
-    url.hash = '';
-    url.search = '';
-    return url.toString().replace(/\/$/, '');
-  } catch {
-    return '';
-  }
-}
-
-function normalizeWebhookPath(value: string): string {
-  const text = String(value || '').trim();
-  if (!text) return '/webhook';
-  const path = text.startsWith('/') ? text : `/${text}`;
-  return path.replace(/\/+$/, '') || '/webhook';
-}
-
-function normalizePagesProjectName(value: string): string {
-  return String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 58)
-    .replace(/-+$/g, '');
-}
-
-function suggestPagesProjectName(workerName: string): string {
-  const base = normalizePagesProjectName(workerName || 'tg-bot');
-  const candidate = normalizePagesProjectName(`${base || 'tg-bot'}-panel`);
-  return candidate || 'tg-bot-panel';
-}
-
-function getUrlOrigin(value: string): string {
-  const normalized = normalizeHttpUrl(value);
-  if (!normalized) return '';
-  try {
-    return new URL(normalized).origin;
-  } catch {
-    return '';
-  }
-}
-
-function buildAdminPanelEntryUrl(workerUrl: string): string {
-  const origin = getUrlOrigin(workerUrl);
-  return origin ? `${origin}/admin` : '';
-}
-
-function buildPanelTargetUrl(panelUrl: string, workerUrl: string): string {
-  const normalizedPanelUrl = normalizeHttpUrl(panelUrl);
-  if (!normalizedPanelUrl) return '';
-  const workerOrigin = getUrlOrigin(workerUrl);
-  if (!workerOrigin) return normalizedPanelUrl;
-
-  try {
-    const url = new URL(normalizedPanelUrl);
-    if (!url.searchParams.get('worker_origin')) {
-      url.searchParams.set('worker_origin', workerOrigin);
-    }
-    return url.toString().replace(/\/$/, '');
-  } catch {
-    return normalizedPanelUrl;
-  }
-}
-
-function getCustomDomainHost(value: string): string {
-  const normalized = normalizeHttpUrl(value);
-  if (!normalized) return '';
-  try {
-    const host = new URL(normalized).hostname.toLowerCase();
-    if (!host || host.endsWith('.workers.dev') || host.endsWith('.pages.dev')) return '';
-    return host;
-  } catch {
-    return '';
-  }
-}
-
-function buildCfErrorReason(json: any, status: number, text = ''): string {
-  const errors = Array.isArray(json?.errors) ? json.errors : [];
-  if (errors.length > 0) {
-    return errors
-      .map((item: any) => `${item?.code ?? 'unknown'}:${item?.message ?? 'unknown'}`)
-      .join('; ');
-  }
-  if (text) {
-    return `http_${status}:${text.slice(0, 180)}`;
-  }
-  return `http_${status}`;
 }
 
 function randomHex(bytes: number): string {
@@ -1268,26 +1212,13 @@ function buildWorkerUploadMetadata(options: {
   namespaceId: string;
   databaseId: string;
 }): Record<string, unknown> {
-  const bindings: Array<Record<string, unknown>> = [];
-  const sortedKeys = Object.keys(options.vars).sort((a, b) => a.localeCompare(b));
-
-  for (const key of sortedKeys) {
-    bindings.push({
-      type: 'plain_text',
-      name: key,
-      text: String(options.vars[key] || ''),
-    });
-  }
-
-  bindings.push({ type: 'kv_namespace', name: 'BOT_KV', namespace_id: options.namespaceId });
-  bindings.push({ type: 'd1', name: 'DB', database_id: options.databaseId });
-
-  return {
-    main_module: 'worker.js',
-    compatibility_date: options.compatibilityDate,
-    keep_bindings: ['secret_text'],
-    bindings,
-  };
+  return buildWorkerUploadMetadataFromParts({
+    compatibilityDate: options.compatibilityDate,
+    vars: options.vars,
+    kvNamespaceId: options.namespaceId,
+    d1DatabaseId: options.databaseId,
+    sortVars: true,
+  });
 }
 
 function buildMultipartBody(parts: Array<{
@@ -1709,10 +1640,6 @@ async function getPagesUploadToken(token: string, accountId: string, projectName
   return jwt;
 }
 
-function buildPagesManifest(files: PanelAssetMeta[]): Record<string, string> {
-  return Object.fromEntries(files.map((file) => [`/${file.path}`, file.hash]));
-}
-
 async function pagesAssetsApi(uploadToken: string, resource: string, body: unknown): Promise<any> {
   const response = await request(`${CF_API_BASE}${resource}`, {
     method: 'POST',
@@ -1735,46 +1662,10 @@ async function pagesAssetsApi(uploadToken: string, resource: string, body: unkno
   throw error;
 }
 
-function isPagesUploadAuthError(error: any): boolean {
-  const text = String(error?.message || '');
-  return error?.status === 401 || String(error?.code || '') === '8000013' || text.includes('8000013');
-}
-
-function normalizeHashListResult(result: any, fallback: string[]): string[] {
-  if (Array.isArray(result)) return result.map(String);
-  if (Array.isArray(result?.hashes)) return result.hashes.map(String);
-  return fallback;
-}
-
 async function checkMissingPagesAssets(uploadToken: string, hashes: string[]): Promise<string[]> {
   if (hashes.length === 0) return [];
   const result = await pagesAssetsApi(uploadToken, '/pages/assets/check-missing', { hashes });
   return normalizeHashListResult(result, hashes);
-}
-
-function buildPagesUploadBatches(files: PanelAssetMeta[]): PanelAssetMeta[][] {
-  const maxBatchBytes = 20 * 1024 * 1024;
-  const maxBatchFiles = 500;
-  const batches: PanelAssetMeta[][] = [];
-  let current: PanelAssetMeta[] = [];
-  let currentBytes = 0;
-
-  for (const file of files) {
-    const wouldExceedBytes = current.length > 0 && currentBytes + file.sizeInBytes > maxBatchBytes;
-    const wouldExceedCount = current.length >= maxBatchFiles;
-    if (wouldExceedBytes || wouldExceedCount) {
-      batches.push(current);
-      current = [];
-      currentBytes = 0;
-    }
-    current.push(file);
-    currentBytes += file.sizeInBytes;
-  }
-  if (current.length > 0) {
-    batches.push(current);
-  }
-
-  return batches;
 }
 
 async function loadPanelAssetBase64(asset: PanelAssetMeta): Promise<string> {

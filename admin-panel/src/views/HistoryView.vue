@@ -10,7 +10,7 @@
         <div class="panel-toolbar history-toolbar">
           <n-tag round type="info">{{ t('history.sessionList') }} · {{ groupedSessions.length }}</n-tag>
           <n-tag round type="success">{{ t('history.sessionMessages', { n: items.length }) }}</n-tag>
-          <n-button type="primary" :loading="loading" @click="load">{{ t('history.load') }}</n-button>
+          <n-button type="primary" :loading="loading" @click="load(true, { force: true })">{{ t('history.load') }}</n-button>
         </div>
       </div>
     </n-card>
@@ -21,6 +21,15 @@
           <n-form-item :label="t('history.userId')">
             <n-input v-model:value="filters.userId" :placeholder="t('history.userIdPlaceholder')" />
           </n-form-item>
+          <n-form-item :label="t('history.keyword')">
+            <n-input v-model:value="filters.q" :placeholder="t('history.keywordPlaceholder')" clearable />
+          </n-form-item>
+          <n-form-item :label="t('history.direction')">
+            <n-select v-model:value="filters.direction" :options="directionOptions" />
+          </n-form-item>
+          <n-form-item :label="t('history.messageType')">
+            <n-select v-model:value="filters.messageType" :options="messageTypeOptions" />
+          </n-form-item>
           <n-form-item :label="t('history.limit')">
             <n-input-number v-model:value="filters.limit" :min="1" :max="100" style="width: 100%" />
           </n-form-item>
@@ -29,14 +38,26 @@
       <p class="muted history-hint">{{ t('history.d1Hint') }}</p>
     </n-card>
 
-    <n-grid class="history-overview" :cols="24" x-gap="12 s:16 m:18" y-gap="12 s:16 m:18" responsive="screen" item-responsive>
-      <n-gi v-for="card in overviewCards" :key="card.key" span="24 s:8">
-        <n-card class="glass-card history-overview-card" :bordered="false">
-          <div class="history-overview-card__label">{{ card.label }}</div>
-          <div class="history-overview-card__value">{{ card.value }}</div>
-        </n-card>
-      </n-gi>
-    </n-grid>
+    <div class="summary-metric-grid history-overview">
+      <n-card
+        v-for="card in overviewCards"
+        :key="card.key"
+        class="glass-card summary-metric-card"
+        :class="`summary-metric-card--${card.tone}`"
+        :bordered="false"
+      >
+        <div class="summary-metric-card__main">
+          <div class="summary-metric-card__label">
+            <span class="summary-metric-card__dot"></span>
+            <span>{{ card.label }}</span>
+          </div>
+          <div class="summary-metric-card__value">{{ card.value }}</div>
+        </div>
+        <div class="summary-metric-card__icon">
+          <Icon :icon="card.icon" width="24" />
+        </div>
+      </n-card>
+    </div>
 
     <n-empty v-if="!loading && groupedSessions.length === 0" :description="t('history.empty')" class="glass-card history-empty" />
 
@@ -105,40 +126,75 @@
         </div>
       </n-card>
     </div>
+
+    <div v-if="items.length" class="history-load-more">
+      <n-button secondary :disabled="!hasMore" :loading="loadingMore" @click="load(false)">
+        {{ hasMore ? t('history.loadMore') : t('history.noMore') }}
+      </n-button>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue';
-import { NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NTag, useMessage } from 'naive-ui';
+import { Icon } from '@iconify/vue';
+import { NButton, NCard, NEmpty, NForm, NFormItem, NInput, NInputNumber, NSelect, NTag, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchHistory } from '../services/api';
 
 const message = useMessage();
 const { t } = useI18n();
 const loading = ref(false);
+const loadingMore = ref(false);
 const items = ref([]);
 const activeSessionId = ref('');
+const nextCursor = ref(null);
+const hasMore = ref(false);
 const filters = reactive({
   userId: '',
+  q: '',
+  direction: '',
+  messageType: '',
   limit: 50,
 });
+
+const directionOptions = computed(() => [
+  { label: t('history.directionAll'), value: '' },
+  { label: t('history.userToAdmin'), value: 'user_to_admin' },
+  { label: t('history.adminToUser'), value: 'admin_to_user' },
+]);
+
+const messageTypeOptions = computed(() => [
+  { label: t('history.messageTypeAll'), value: '' },
+  { label: t('history.typeText'), value: 'text' },
+  { label: t('history.typePhoto'), value: 'photo' },
+  { label: t('history.typeVideo'), value: 'video' },
+  { label: t('history.typeDocument'), value: 'document' },
+  { label: t('history.typeVoice'), value: 'voice' },
+  { label: t('history.typeSticker'), value: 'sticker' },
+]);
 
 const overviewCards = computed(() => [
   {
     key: 'sessions',
     label: t('history.sessionList'),
     value: String(groupedSessions.value.length),
+    icon: 'solar:chat-round-line-bold',
+    tone: 'green',
   },
   {
     key: 'messages',
     label: t('history.panelTitle'),
     value: String(items.value.length),
+    icon: 'solar:inbox-line-bold',
+    tone: 'blue',
   },
   {
     key: 'selected',
     label: t('history.sessionUpdated'),
     value: selectedSession.value ? t('history.sessionUser', { id: selectedSession.value.userId }) : '-',
+    icon: 'solar:user-id-bold',
+    tone: 'amber',
   },
 ]);
 
@@ -207,22 +263,43 @@ function getSessionPreview(session) {
   return renderMessageText(lastItem);
 }
 
-async function load() {
-  loading.value = true;
+async function load(reset = true, options = {}) {
+  const isReset = reset !== false;
+  if (!isReset && !nextCursor.value) return;
+
+  if (isReset) {
+    loading.value = true;
+  } else {
+    loadingMore.value = true;
+  }
+
   try {
-    const data = await fetchHistory({
-      userId: filters.userId || undefined,
-      limit: filters.limit || 50,
-    });
-    items.value = Array.isArray(data.items) ? data.items : [];
+    const data = await fetchHistory(
+      {
+        userId: filters.userId || undefined,
+        q: filters.q || undefined,
+        direction: filters.direction || undefined,
+        messageType: filters.messageType || undefined,
+        beforeId: isReset ? undefined : nextCursor.value,
+        limit: filters.limit || 50,
+      },
+      {
+        force: Boolean(options.force),
+      },
+    );
+    const incoming = Array.isArray(data.items) ? data.items : [];
+    items.value = isReset ? incoming : [...items.value, ...incoming];
+    nextCursor.value = data.nextCursor || null;
+    hasMore.value = Boolean(data.hasMore);
   } catch (error) {
     message.error(error.message || t('history.loadFailed'));
   } finally {
     loading.value = false;
+    loadingMore.value = false;
   }
 }
 
-onMounted(load);
+onMounted(() => load(true));
 </script>
 
 <style scoped>
@@ -237,36 +314,9 @@ onMounted(load);
   margin-top: -2px;
 }
 
-.history-overview-card {
-  position: relative;
-}
-
-.history-overview-card::before {
-  content: '';
-  position: absolute;
-  inset: 0 auto auto 0;
-  width: 100%;
-  height: 3px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-}
-
-.history-overview-card__label {
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.history-overview-card__value {
-  margin-top: 10px;
-  font-size: clamp(24px, 4vw, 30px);
-  line-height: 1.15;
-  font-weight: 800;
-  color: var(--text-primary);
-  word-break: break-word;
-}
-
 .history-filters {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(160px, 1fr);
+  grid-template-columns: minmax(180px, 1.4fr) minmax(180px, 1.4fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(120px, 0.8fr);
   gap: 12px 16px;
 }
 
@@ -283,6 +333,12 @@ onMounted(load);
   grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
   gap: 18px;
   align-items: start;
+}
+
+.history-load-more {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 8px;
 }
 
 .history-sidebar,
@@ -467,10 +523,6 @@ onMounted(load);
 @media (max-width: 900px) {
   .history-filters {
     grid-template-columns: 1fr;
-  }
-
-  .history-overview-card__value {
-    font-size: clamp(22px, 7vw, 28px);
   }
 
   .history-bubble {

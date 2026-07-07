@@ -4,9 +4,37 @@ const fs = require('fs')
 const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
+const deployUtilsPath = app.isPackaged
+  ? path.join(process.resourcesPath, 'shared', 'deploy-utils.cjs')
+  : path.join(__dirname, '..', 'shared', 'deploy-utils.cjs')
+const {
+  LEGACY_DEFAULT_PAGES_PANEL_URL,
+  buildCfErrorReason,
+  buildAdminPanelEntryUrl,
+  buildPanelTargetUrl,
+  buildPagesManifest,
+  buildPagesUploadBatches,
+  buildWorkerUploadMetadata: buildWorkerUploadMetadataFromParts,
+  cfApiFetch,
+  getCustomDomainHost: getWorkerCustomDomainHost,
+  getPagesMimeType,
+  getPagesDeployBranch,
+  getPagesProjectName,
+  getUrlOrigin,
+  isPagesUploadAuthError,
+  normalizeD1DatabaseName,
+  normalizeHashListResult,
+  normalizeHttpUrl,
+  normalizeKvNamespaceTitle,
+  normalizePagesBranch,
+  normalizePagesProjectName,
+  normalizePanelUrl,
+  normalizeWebhookPath,
+  normalizeWorkerName,
+  shouldIgnorePagesAsset,
+} = require(deployUtilsPath)
 
 const DEPLOY_TOOL_VERSION = `v${app.getVersion()}`
-const LEGACY_DEFAULT_PAGES_PANEL_URL = 'https://tg-admin-panel.pages.dev'
 
 // paths
 function findRepoRoot() {
@@ -40,44 +68,6 @@ function getLocalWranglerPath(env = {}) {
 
 function getPrivateWranglerPath(env = {}) {
   return env.TG_BOT_PRIVATE_WRANGLER || path.join(getRepoRoot(), '.wrangler.private.toml')
-}
-
-function normalizePagesProjectName(raw) {
-  return String(raw || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 58)
-    .replace(/-+$/g, '')
-}
-
-function normalizePagesBranch(raw) {
-  const text = String(raw || '').trim()
-  return text || 'main'
-}
-
-function normalizeWorkerName(raw) {
-  return String(raw || '').trim()
-}
-
-function normalizeKvNamespaceTitle(raw) {
-  return String(raw || '').trim()
-}
-
-function normalizeD1DatabaseName(raw) {
-  return String(raw || '').trim()
-}
-
-function getPagesProjectName(env = {}, params = {}) {
-  const fromParams = normalizePagesProjectName(params?.pagesProjectName || params?.projectName || '')
-  if (fromParams) return fromParams
-  return normalizePagesProjectName(env.PAGES_PROJECT_NAME || 'tg-admin-panel') || 'tg-admin-panel'
-}
-
-function getPagesDeployBranch(env = {}, params = {}) {
-  return normalizePagesBranch(params?.pagesBranch || params?.branch || env.PAGES_BRANCH || 'main')
 }
 
 // accounts
@@ -216,58 +206,6 @@ function buildEnv(account) {
   return env
 }
 
-function normalizeHttpUrl(raw) {
-  const text = String(raw || '').trim()
-  if (!text) return ''
-  const withProtocol = /^https?:\/\//i.test(text) ? text : `https://${text}`
-  try {
-    const parsed = new URL(withProtocol)
-    if (!/^https?:$/.test(parsed.protocol)) return ''
-    return parsed.toString().replace(/\/$/, '')
-  } catch {
-    return ''
-  }
-}
-
-function normalizePanelUrl(raw) {
-  const normalized = normalizeHttpUrl(raw)
-  if (!normalized || normalized === LEGACY_DEFAULT_PAGES_PANEL_URL) return ''
-  return normalized
-}
-
-function getUrlOrigin(raw) {
-  const normalized = normalizeHttpUrl(raw)
-  if (!normalized) return ''
-  try {
-    return new URL(normalized).origin.replace(/\/$/, '')
-  } catch {
-    return ''
-  }
-}
-
-function buildAdminPanelEntryUrl(workerUrl) {
-  const origin = getUrlOrigin(workerUrl)
-  return origin ? `${origin}/admin` : ''
-}
-
-function buildPanelTargetUrl(panelUrl, workerUrl) {
-  const normalizedPanelUrl = normalizeHttpUrl(panelUrl)
-  if (!normalizedPanelUrl) return ''
-
-  const workerOrigin = getUrlOrigin(workerUrl)
-  if (!workerOrigin) return normalizedPanelUrl
-
-  try {
-    const url = new URL(normalizedPanelUrl)
-    if (!url.searchParams.get('worker_origin')) {
-      url.searchParams.set('worker_origin', workerOrigin)
-    }
-    return url.toString().replace(/\/$/, '')
-  } catch {
-    return normalizedPanelUrl
-  }
-}
-
 function emitPostDeployCheckHints(onProgress, options = {}) {
   const workerUrl = normalizeHttpUrl(options.workerUrl || '')
   const panelEntryUrl = normalizeHttpUrl(options.panelEntryUrl || '')
@@ -283,11 +221,6 @@ function emitPostDeployCheckHints(onProgress, options = {}) {
   onProgress?.('- If any check fails, review token/domain/route settings and redeploy.')
 }
 
-function normalizeWebhookPath(value) {
-  const text = String(value || '/webhook').trim() || '/webhook'
-  return text.startsWith('/') ? text : `/${text}`
-}
-
 function ensureLocalWranglerFile(env = {}) {
   const localPath = getLocalWranglerPath(env)
   if (!fs.existsSync(localPath)) {
@@ -295,18 +228,6 @@ function ensureLocalWranglerFile(env = {}) {
     fs.writeFileSync(localPath, ['# Account private deployment config', '', '[vars]', ''].join('\n'), 'utf8')
   }
   return localPath
-}
-
-function getWorkerCustomDomainHost(workerUrl) {
-  const normalized = normalizeHttpUrl(workerUrl)
-  if (!normalized) return ''
-  try {
-    const host = new URL(normalized).hostname.toLowerCase()
-    if (!host || host.endsWith('.workers.dev') || host.endsWith('.pages.dev')) return ''
-    return host
-  } catch {
-    return ''
-  }
 }
 
 function stripManagedWorkerRouteBlock(content) {
@@ -439,13 +360,6 @@ async function getPagesProject(env, projectName) {
   return { ok: true, project: json.result || null }
 }
 
-function buildCfErrorReason(json, status) {
-  const errors = Array.isArray(json?.errors) ? json.errors : []
-  return errors.length > 0
-    ? errors.map((item) => `${item.code || 'unknown'}:${item.message || 'unknown'}`).join('; ')
-    : `http_${status}`
-}
-
 function getCfTokenAndAccount(env = {}, requireAccount = true) {
   const token = String(env.CLOUDFLARE_API_TOKEN || env.CF_API_TOKEN || '').trim()
   const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || env.CF_ACCOUNT_ID || '').trim()
@@ -460,40 +374,7 @@ function getCfTokenAndAccount(env = {}, requireAccount = true) {
 
 async function cfApiRequest(env, resource, options = {}) {
   const { token } = getCfTokenAndAccount(env, options.requireAccount !== false)
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    ...(options.headers || {}),
-  }
-  let body = options.body
-  if (body !== undefined && body !== null && typeof body !== 'string' && !(body instanceof FormData)) {
-    body = JSON.stringify(body)
-    headers['Content-Type'] = headers['Content-Type'] || 'application/json'
-  }
-
-  const response = await fetch(`https://api.cloudflare.com/client/v4${resource}`, {
-    method: options.method || 'GET',
-    headers,
-    body,
-  })
-  const text = await response.text().catch(() => '')
-  let json = null
-  try { json = text ? JSON.parse(text) : null } catch {}
-
-  if (json?.success || (response.ok && !json?.errors)) {
-    return {
-      ok: true,
-      status: response.status,
-      result: json?.result ?? null,
-      resultInfo: json?.result_info ?? null,
-    }
-  }
-
-  return {
-    ok: false,
-    status: response.status,
-    reason: json ? buildCfErrorReason(json, response.status) : `http_${response.status}${text ? `:${text.slice(0, 180)}` : ''}`,
-    result: json?.result ?? null,
-  }
+  return cfApiFetch(token, resource, options)
 }
 
 async function cfApiTextRequest(env, resource, options = {}) {
@@ -2240,47 +2121,8 @@ function hashPagesFile(filepath) {
   return getBlake3Wasm().hash(base64Contents + extension).toString('hex').slice(0, 32)
 }
 
-function getPagesMimeType(name) {
-  const ext = path.extname(name).toLowerCase()
-  const types = {
-    '.html': 'text/html; charset=utf-8',
-    '.htm': 'text/html; charset=utf-8',
-    '.js': 'application/javascript; charset=utf-8',
-    '.mjs': 'application/javascript; charset=utf-8',
-    '.css': 'text/css; charset=utf-8',
-    '.json': 'application/json; charset=utf-8',
-    '.map': 'application/json; charset=utf-8',
-    '.txt': 'text/plain; charset=utf-8',
-    '.svg': 'image/svg+xml',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.webp': 'image/webp',
-    '.ico': 'image/x-icon',
-    '.woff': 'font/woff',
-    '.woff2': 'font/woff2',
-    '.ttf': 'font/ttf',
-    '.otf': 'font/otf',
-    '.eot': 'application/vnd.ms-fontobject',
-    '.wasm': 'application/wasm',
-    '.xml': 'application/xml; charset=utf-8',
-    '.webmanifest': 'application/manifest+json; charset=utf-8',
-  }
-  return types[ext] || 'application/octet-stream'
-}
-
 function normalizePagesRelativePath(rootDir, filepath) {
   return path.relative(rootDir, filepath).split(path.sep).join('/')
-}
-
-function shouldIgnorePagesAsset(relativePath) {
-  const normalized = String(relativePath || '').split('\\').join('/')
-  const parts = normalized.split('/').filter(Boolean)
-  if (['_worker.js', '_redirects', '_headers', '_routes.json'].includes(normalized)) return true
-  if (normalized === 'functions' || normalized.startsWith('functions/')) return true
-  if (parts.includes('.DS_Store') || parts.includes('node_modules') || parts.includes('.git') || parts.includes('.wrangler')) return true
-  return false
 }
 
 function decodeJwtPayload(token) {
@@ -2349,10 +2191,6 @@ function collectPagesAssets(rootDir, uploadToken) {
   return files
 }
 
-function buildPagesManifest(files) {
-  return Object.fromEntries(files.map((file) => [`/${file.name}`, file.hash]))
-}
-
 async function pagesAssetsApi(uploadToken, resource, body) {
   const response = await fetch(`https://api.cloudflare.com/client/v4${resource}`, {
     method: 'POST',
@@ -2374,43 +2212,10 @@ async function pagesAssetsApi(uploadToken, resource, body) {
   throw error
 }
 
-function isPagesUploadAuthError(error) {
-  const text = String(error?.message || '')
-  return error?.status === 401 || String(error?.code || '') === '8000013' || text.includes('8000013')
-}
-
-function normalizeHashListResult(result, fallback) {
-  if (Array.isArray(result)) return result.map(String)
-  if (Array.isArray(result?.hashes)) return result.hashes.map(String)
-  return fallback
-}
-
 async function checkMissingPagesAssets(uploadToken, hashes) {
   if (hashes.length === 0) return []
   const result = await pagesAssetsApi(uploadToken, '/pages/assets/check-missing', { hashes })
   return normalizeHashListResult(result, hashes)
-}
-
-function buildPagesUploadBatches(files) {
-  const maxBatchBytes = 20 * 1024 * 1024
-  const maxBatchFiles = 500
-  const batches = []
-  let current = []
-  let currentBytes = 0
-
-  for (const file of files) {
-    const wouldExceedBytes = current.length > 0 && currentBytes + file.sizeInBytes > maxBatchBytes
-    const wouldExceedCount = current.length >= maxBatchFiles
-    if (wouldExceedBytes || wouldExceedCount) {
-      batches.push(current)
-      current = []
-      currentBytes = 0
-    }
-    current.push(file)
-    currentBytes += file.sizeInBytes
-  }
-  if (current.length > 0) batches.push(current)
-  return batches
 }
 
 async function uploadPagesAssetBatch(uploadToken, batch) {
@@ -2554,30 +2359,17 @@ function validatePrivateWranglerConfig(configPath) {
 function buildWorkerUploadMetadata(configPath) {
   const content = fs.readFileSync(configPath, 'utf8')
   const compatibilityDate = getTomlString(content, 'compatibility_date') || '2026-04-16'
-  const metadata = {
-    main_module: 'worker.js',
-    compatibility_date: compatibilityDate,
-    bindings: [],
-    keep_bindings: ['secret_text'],
-  }
-
-  for (const [key, value] of Object.entries(parseVarsBlock(content))) {
-    metadata.bindings.push({ type: 'plain_text', name: key, text: String(value) })
-  }
-
   const kvBlock = getBindingBlock(content, 'kv_namespaces', 'BOT_KV')
   const kvId = getTomlString(kvBlock, 'id')
-  if (kvId) {
-    metadata.bindings.push({ type: 'kv_namespace', name: 'BOT_KV', namespace_id: kvId })
-  }
-
   const d1Block = getBindingBlock(content, 'd1_databases', 'DB')
   const databaseId = getTomlString(d1Block, 'database_id')
-  if (databaseId) {
-    metadata.bindings.push({ type: 'd1', name: 'DB', id: databaseId })
-  }
-
-  return metadata
+  return buildWorkerUploadMetadataFromParts({
+    compatibilityDate,
+    vars: parseVarsBlock(content),
+    kvNamespaceId: kvId,
+    d1DatabaseId: databaseId,
+    d1BindingField: 'id',
+  })
 }
 
 async function uploadWorkerViaApi(env, configPath, onProgress) {

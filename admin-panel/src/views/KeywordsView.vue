@@ -9,7 +9,7 @@
         </div>
         <div class="panel-toolbar">
           <n-button type="primary" :loading="saving" @click="save">{{ t('keywords.save') }}</n-button>
-          <n-button secondary :loading="loading" @click="load">{{ t('keywords.reload') }}</n-button>
+          <n-button secondary :loading="loading" @click="load(true)">{{ t('keywords.reload') }}</n-button>
         </div>
       </div>
     </n-card>
@@ -89,10 +89,10 @@ function assignConfig(cfg = {}) {
   form.KEYWORD_FILTERS = cfg.KEYWORD_FILTERS || '';
 }
 
-async function load() {
+async function load(force = false) {
   loading.value = true;
   try {
-    const data = await fetchSystemConfig();
+    const data = await fetchSystemConfig({ force });
     assignConfig(data.config || {});
   } catch (error) {
     message.error(error.message || t('keywords.loadFailed'));
@@ -108,7 +108,7 @@ async function save() {
       KEYWORD_FILTERS: form.KEYWORD_FILTERS,
     });
     message.success(t('keywords.saveSuccess'));
-    await load();
+    await load(true);
   } catch (error) {
     message.error(error.message || t('keywords.saveFailed'));
   } finally {
@@ -116,7 +116,7 @@ async function save() {
   }
 }
 
-onMounted(load);
+onMounted(() => load(false));
 </script>
 
 <style scoped>

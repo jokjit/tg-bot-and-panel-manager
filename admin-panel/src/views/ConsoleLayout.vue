@@ -108,7 +108,7 @@
                 </n-switch>
               </div>
 
-              <n-button secondary round @click="onRefreshStatus">{{ t('app.refresh') }}</n-button>
+              <n-button secondary round @click="onRefreshStatus(true)">{{ t('app.refresh') }}</n-button>
               <n-button quaternary round @click="onLogout">{{ t('app.logout') }}</n-button>
             </div>
           </div>
@@ -219,9 +219,9 @@ function handleMenuSelect(key) {
   router.push(key);
 }
 
-async function onRefreshStatus() {
+async function onRefreshStatus(force = true) {
   try {
-    const data = await fetchStatus();
+    const data = await fetchStatus({ force });
     setStatusData(data);
     setLoginState(true, adminStore.username || t('auth.defaultAdmin'));
     message.success(t('app.refreshDone'));
@@ -247,7 +247,7 @@ onMounted(async () => {
   updateViewport();
   window.addEventListener('resize', updateViewport);
   if (adminStore.loggedIn) {
-    await onRefreshStatus();
+    await onRefreshStatus(false);
   }
 });
 
@@ -278,9 +278,11 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: 292px minmax(0, 1fr);
   gap: 6px;
+  align-items: start;
 }
 
 .main-shell {
+  grid-column: 2;
   min-height: 0;
 }
 
@@ -290,12 +292,18 @@ onBeforeUnmount(() => {
 }
 
 .desktop-sider {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 20;
+  width: 292px;
+  height: 100vh;
+  height: 100dvh;
   padding: 16px 0 16px 16px;
+  overflow: hidden;
 }
 
 .sider-panel {
-  height: calc(100vh - 32px);
-  height: calc(100dvh - 32px);
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   display: flex;
@@ -558,6 +566,10 @@ onBeforeUnmount(() => {
     grid-template-columns: 266px minmax(0, 1fr);
   }
 
+  .desktop-sider {
+    width: 266px;
+  }
+
   .page-intro h1 {
     font-size: 26px;
   }
@@ -566,6 +578,10 @@ onBeforeUnmount(() => {
 @media (max-width: 1079px) {
   .console-shell {
     grid-template-columns: 1fr;
+  }
+
+  .main-shell {
+    grid-column: 1;
   }
 
   .desktop-sider {

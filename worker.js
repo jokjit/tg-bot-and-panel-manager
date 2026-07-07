@@ -45,6 +45,9 @@ const DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE = 120;
 const DELETED_ACCOUNT_SWEEP_MIN_BATCH = 20;
 const DELETED_ACCOUNT_SWEEP_MAX_BATCH = 1000;
 const DELETED_ACCOUNT_SWEEP_CHECK_MIN_INTERVAL_MS = 5 * 60 * 1000;
+const ADMIN_META_MODE_NEW_TOPIC = 'new-topic';
+const ADMIN_META_MODE_ALWAYS = 'always';
+const ADMIN_META_MODE_OFF = 'off';
 const WELCOME_TYPE_TEXT = 'text';
 const WELCOME_TYPE_PHOTO = 'photo';
 const WELCOME_TYPE_VIDEO = 'video';
@@ -61,16 +64,34 @@ const SYSTEM_CONFIG_CACHE_TTL_MS = 5 * 1000;
 const GROUP_ADMIN_MEMBER_CACHE_TTL_MS = 90 * 1000;
 const GROUP_ADMIN_LIST_CACHE_TTL_MS = 60 * 1000;
 const LOCAL_CACHE_MAX_ENTRIES = 2048;
+const HOT_KV_JSON_CACHE_TTL_MS = 30 * 1000;
+const USER_PROFILE_CACHE_TTL_MS = 60 * 1000;
+const VERIFY_STATE_CACHE_TTL_MS = 15 * 1000;
+const TOPIC_MAPPING_CACHE_TTL_MS = 5 * 60 * 1000;
+const AUTHORIZED_ADMIN_CACHE_TTL_MS = 30 * 1000;
+const USER_LIST_SNAPSHOT_CACHE_TTL_MS = 60 * 1000;
+const USER_PROFILE_WRITE_THROTTLE_MS = 5 * 60 * 1000;
+const D1_VERIFICATION_STATUS_CACHE_TTL_MS = 60 * 1000;
+const MESSAGE_HISTORY_DEDUPE_TTL_MS = 10 * 60 * 1000;
+const MESSAGE_HISTORY_CONVERSATION_CACHE_TTL_MS = 10 * 60 * 1000;
 const VERIFICATION_PASS_CACHE_TTL_MS = 10 * 60 * 1000;
 const VERIFICATION_D1_SCHEMA_RETRY_MS = 60 * 1000;
 const VERIFICATION_SESSION_CACHE_TTL_MS = 20 * 60 * 1000;
 const VERIFICATION_SESSION_D1_SCHEMA_RETRY_MS = 60 * 1000;
+const KV_JSON_NULL = Symbol('kv-json-null');
+const USER_LIST_SNAPSHOT_CACHE_KEY = 'all';
+const USER_PROFILE_VOLATILE_FIELDS = new Set(['lastSeenAt', 'lastMessageType', 'lastMessagePreview']);
 
 const groupAdminMembershipCache = new Map();
 const groupAdminListCache = new Map();
 const verificationPassedCache = new Map();
 const verificationClearedCache = new Map();
 const verificationSessionCache = new Map();
+const kvJsonCache = new Map();
+const userListSnapshotCache = new Map();
+const d1VerificationStatusCache = new Map();
+const messageHistoryDedupeCache = new Map();
+const messageHistoryConversationCache = new Map();
 let systemConfigCache = { value: null, expiresAt: 0 };
 let lastAutoCleanupCheckAt = 0;
 let lastDeletedAccountSweepCheckAt = 0;
@@ -100,385 +121,41 @@ export default {
         ctx.waitUntil(runDeletedAccountSweepIfDue(runtimeEnv).catch(() => {}));
       }
 
-      if (request.method === 'GET' && url.pathname === '/') {
-        return json(await getAdminStatus(url, runtimeEnv, webhookPath, publicBaseUrl), 200, {}, request);
-      }
+      const topLevelResponse = await handleTopLevelRequest(request, url, runtimeEnv, webhookPath, publicBaseUrl);
+      if (topLevelResponse) return topLevelResponse;
 
-      if (request.method === 'GET' && url.pathname === '/health') {
-        return json({ ok: true, now: new Date().toISOString() }, 200, {}, request);
-      }
+      const adminAuthResponse = await handleAdminAuthRequest(request, url, runtimeEnv);
+      if (adminAuthResponse) return adminAuthResponse;
 
-      if (request.method === 'GET' && url.pathname === VERIFY_IMAGE_PATH) {
-        return serveVerificationImage(url, request);
-      }
+      const adminSystemResponse = await handleAdminSystemRequest(request, url, runtimeEnv, webhookPath, publicBaseUrl);
+      if (adminSystemResponse) return adminSystemResponse;
 
-      if (request.method === 'GET' && url.pathname === VERIFY_WEB_PATH) {
-        return html(
-          renderVerificationWebPage(),
-          200,
-          request,
-          {
-            'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
-            pragma: 'no-cache',
-            expires: '0',
-          },
-        );
-      }
+      const adminUserResponse = await handleAdminUserRequest(request, url, runtimeEnv);
+      if (adminUserResponse) return adminUserResponse;
 
-      if (request.method === 'POST' && url.pathname.startsWith(VERIFY_API_PREFIX)) {
-        return await handleVerificationApiRequest(request, url, runtimeEnv, publicBaseUrl);
-      }
+      const adminReplyResponse = await handleAdminReplyRequest(request, url, runtimeEnv);
+      if (adminReplyResponse) return adminReplyResponse;
 
-      if (request.method === 'POST' && url.pathname === '/deploy/bootstrap') {
-        return await handleDeployBootstrap(request, runtimeEnv, webhookPath, publicBaseUrl);
-      }
+      const adminBlacklistResponse = await handleAdminBlacklistRequest(request, url, runtimeEnv);
+      if (adminBlacklistResponse) return adminBlacklistResponse;
 
-      if (request.method === 'GET' && url.pathname === ADMIN_PANEL_PATH) {
-        const panelUrl = buildAdminPanelRedirectUrl(runtimeEnv, publicBaseUrl, request);
-        if (isAbsoluteHttpUrl(panelUrl)) {
-          return Response.redirect(panelUrl, 302);
-        }
-        return html(renderAdminPage(url, runtimeEnv, webhookPath, publicBaseUrl), 200, request);
-      }
+      const adminTrustResponse = await handleAdminTrustRequest(request, url, runtimeEnv);
+      if (adminTrustResponse) return adminTrustResponse;
 
-      if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/auth/me`) {
-        return await handleAdminAuthMe(request, runtimeEnv);
-      }
+      const authorizedAdminResponse = await handleAuthorizedAdminRequest(request, url, runtimeEnv);
+      if (authorizedAdminResponse) return authorizedAdminResponse;
 
-      if (request.method === 'POST' && url.pathname === '/admin/login') {
-        return await handleAdminLogin(request, runtimeEnv);
-      }
-
-      if (request.method === 'POST' && url.pathname === '/admin/logout') {
-        await requireHttpAdmin(request, runtimeEnv);
-        return await handleAdminLogout(request, runtimeEnv);
-      }
-
-      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/auth/change-password`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        return await handleAdminChangePassword(request, runtimeEnv);
-      }
-
-      if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/status`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        return json(await getAdminStatus(url, runtimeEnv, webhookPath, publicBaseUrl), 200, {}, request);
-      }
-
-      if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/system-config`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        return json({ ok: true, config: buildSystemConfigView(await getEffectiveSystemConfig(runtimeEnv)) }, 200, {}, request);
-      }
-
-      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/system-config`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        const body = await readJsonBody(request);
-        const updated = await updateSystemConfig(runtimeEnv, body);
-        return json(
-          {
-            ok: true,
-            config: buildSystemConfigView(await getEffectiveSystemConfig(runtimeEnv)),
-            profileMetaSynced: Boolean(updated?.metaSync?.synced),
-            profileMetaSyncError: updated?.metaSync?.error || null,
-          },
-          200,
-          {},
-          request,
-        );
-      }
-
-      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/maintenance/cleanup`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        const body = await readJsonBody(request);
-        const result = await runDataCleanup(runtimeEnv, {
-          retentionDays: body?.retentionDays,
-          batchSize: body?.batchSize,
-          source: 'admin-api',
-          force: true,
-        });
-        return json({ ok: true, result }, 200, {}, request);
-      }
-
-      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/maintenance/deleted-account-sweep`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        const body = await readJsonBody(request);
-        const result = await runDeletedAccountSweep(runtimeEnv, {
-          batchSize: body?.batchSize,
-          source: 'admin-api',
-          force: true,
-        });
-        return json({ ok: true, result }, 200, {}, request);
-      }
-
-      if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/users`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        return json(
-          { ok: true, users: await listUsers(runtimeEnv, parseLimit(url.searchParams.get('limit'), 50)) },
-          200,
-          {},
-          request,
-        );
-      }
-
-      if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/history`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        const userIdRaw = url.searchParams.get('userId');
-        const limit = parseLimit(url.searchParams.get('limit'), 50);
-        const userId = userIdRaw ? toChatId(userIdRaw) : null;
-        return json(
-          {
-            ok: true,
-            items: await listMessageHistory(runtimeEnv, {
-              userId,
-              limit,
-            }),
-          },
-          200,
-          {},
-          request,
-        );
-      }
-
-      if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/avatar`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        return await handleTelegramAvatarProxy(request, runtimeEnv);
-      }
-
-      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/welcome-media/upload`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        ensureEnv(runtimeEnv, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
-        const form = await request.formData();
-        const type = String(form.get('type') || '').trim().toLowerCase();
-        const file = form.get('file');
-        if (!file || typeof file === 'string') {
-          throw new AppError(400, '请先选择要上传的文件');
-        }
-        const result = await uploadWelcomeMediaToTelegram(runtimeEnv, type, file);
-        return json({ ok: true, result }, 200, {}, request);
-      }
-
-      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/users/action`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        const body = await readJsonBody(request);
-        const action = String(body.action || '').trim().toLowerCase();
-        const userId = toChatId(body.userId);
-        const operator = getHttpAdminOperator(request);
-
-        if (action === 'ban') {
-          const entry = await setBlacklistEntry(runtimeEnv, userId, {
-            reason: String(body.reason || '通过用户管理封禁').trim() || '通过用户管理封禁',
-            createdAt: new Date().toISOString(),
-            createdBy: operator,
-          });
-          return json({ ok: true, action, entry }, 200, {}, request);
-        }
-
-        if (action === 'unban') {
-          await deleteBlacklistEntry(runtimeEnv, userId);
-          return json({ ok: true, action, userId }, 200, {}, request);
-        }
-
-        if (action === 'trust') {
-          const entry = await setTrustEntry(runtimeEnv, userId, {
-            note: String(body.note || '通过用户管理设为信任用户').trim() || '通过用户管理设为信任用户',
-            createdAt: new Date().toISOString(),
-            createdBy: operator,
-          });
-          return json({ ok: true, action, entry }, 200, {}, request);
-        }
-
-        if (action === 'untrust') {
-          await deleteTrustEntry(runtimeEnv, userId);
-          return json({ ok: true, action, userId }, 200, {}, request);
-        }
-
-        if (action === 'restart') {
-          const state = await restartUserVerification(runtimeEnv, userId, operator);
-          return json({ ok: true, action, state }, 200, {}, request);
-        }
-
-        if (action === 'verifypass') {
-          const state = await adminApproveUserVerification(runtimeEnv, userId, operator, {
-            notifyUser: true,
-          });
-          return json({ ok: true, action, state }, 200, {}, request);
-        }
-
-        if (action === 'delete') {
-          const result = await purgeDeletedUserData(runtimeEnv, userId);
-          return json({ ok: true, action, userId, result }, 200, {}, request);
-        }
-
-        throw new AppError(400, 'action 必须是 ban / unban / trust / untrust / restart / verifypass / delete');
-      }
-
-      if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/blacklist`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        return json(
-          { ok: true, blacklist: await listBlacklist(runtimeEnv, parseLimit(url.searchParams.get('limit'), 50)) },
-          200,
-          {},
-          request,
-        );
-      }
-
-      if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/trust`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        return json(
-          { ok: true, trust: await listTrust(runtimeEnv, parseLimit(url.searchParams.get('limit'), 50)) },
-          200,
-          {},
-          request,
-        );
-      }
-
-      if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/admins`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        return json(
-          { ok: true, admins: await listAuthorizedAdmins(runtimeEnv, parseLimit(url.searchParams.get('limit'), 50)) },
-          200,
-          {},
-          request,
-        );
-      }
-
-      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/reply`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        ensureEnv(runtimeEnv, ['BOT_TOKEN']);
-        const body = await readJsonBody(request);
-        const userId = toChatId(body.userId);
-        const text = String(body.text || '').trim();
-        if (!text) {
-          throw new AppError(400, 'text 不能为空');
-        }
-
-        const result = await telegram(runtimeEnv, 'sendMessage', {
-          chat_id: userId,
-          text,
-        });
-
-        return json({ ok: true, result }, 200, {}, request);
-      }
-
-      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/blacklist`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        const body = await readJsonBody(request);
-        const action = String(body.action || '').trim().toLowerCase();
-        const userId = toChatId(body.userId);
-        const operator = getHttpAdminOperator(request);
-
-        if (action === 'add') {
-          const entry = await setBlacklistEntry(runtimeEnv, userId, {
-            reason: String(body.reason || '通过管理面板封禁').trim() || '通过管理面板封禁',
-            createdAt: new Date().toISOString(),
-            createdBy: operator,
-          });
-          return json({ ok: true, action, entry }, 200, {}, request);
-        }
-
-        if (action === 'remove') {
-          await deleteBlacklistEntry(runtimeEnv, userId);
-          return json({ ok: true, action, userId }, 200, {}, request);
-        }
-
-        throw new AppError(400, 'action 必须是 add 或 remove');
-      }
-
-      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/trust`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        const body = await readJsonBody(request);
-        const action = String(body.action || '').trim().toLowerCase();
-        const userId = toChatId(body.userId);
-        const operator = getHttpAdminOperator(request);
-
-        if (action === 'add') {
-          const entry = await setTrustEntry(runtimeEnv, userId, {
-            note: String(body.note || '通过白名单面板设为信任用户').trim() || '通过白名单面板设为信任用户',
-            createdAt: new Date().toISOString(),
-            createdBy: operator,
-          });
-          return json({ ok: true, action, entry }, 200, {}, request);
-        }
-
-        if (action === 'remove') {
-          await deleteTrustEntry(runtimeEnv, userId);
-          return json({ ok: true, action, userId }, 200, {}, request);
-        }
-
-        throw new AppError(400, 'action 必须是 add 或 remove');
-      }
-
-      if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/admins`) {
-        await requireHttpAdmin(request, runtimeEnv);
-        const body = await readJsonBody(request);
-        const action = String(body.action || '').trim().toLowerCase();
-        const userId = toChatId(body.userId);
-        const operator = getHttpAdminOperator(request);
-
-        if (action === 'add') {
-          const entry = await setAuthorizedAdmin(runtimeEnv, userId, {
-            note: String(body.note || '').trim() || null,
-            createdAt: new Date().toISOString(),
-            createdBy: operator,
-          });
-          return json({ ok: true, action, entry }, 200, {}, request);
-        }
-
-        if (action === 'remove') {
-          await deleteAuthorizedAdmin(runtimeEnv, userId);
-          return json({ ok: true, action, userId }, 200, {}, request);
-        }
-
-        throw new AppError(400, 'action 必须是 add 或 remove');
-      }
-
-      if (request.method === 'GET' && url.pathname === '/setWebhook') {
-        await requireHttpAdmin(request, runtimeEnv);
-        ensureEnv(runtimeEnv, ['BOT_TOKEN']);
-        const webhookUrl = `${publicBaseUrl}${webhookPath}`;
-        const payload = { url: webhookUrl };
-        if (runtimeEnv.WEBHOOK_SECRET) payload.secret_token = runtimeEnv.WEBHOOK_SECRET;
-        const result = await telegram(runtimeEnv, 'setWebhook', payload);
-        return json({ ok: true, webhookUrl, telegram: result }, 200, {}, request);
-      }
-
-      if (request.method === 'GET' && url.pathname === '/deleteWebhook') {
-        await requireHttpAdmin(request, runtimeEnv);
-        ensureEnv(runtimeEnv, ['BOT_TOKEN']);
-        const result = await telegram(runtimeEnv, 'deleteWebhook', { drop_pending_updates: false });
-        return json({ ok: true, telegram: result }, 200, {}, request);
-      }
-
-      if (request.method === 'GET' && url.pathname === '/getWebhookInfo') {
-        await requireHttpAdmin(request, runtimeEnv);
-        ensureEnv(runtimeEnv, ['BOT_TOKEN']);
-        const result = await telegram(runtimeEnv, 'getWebhookInfo', {});
-        return json({ ok: true, telegram: result }, 200, {}, request);
-      }
-
-      if (request.method === 'GET' && url.pathname === '/setCommands') {
-        await requireHttpAdmin(request, runtimeEnv);
-        ensureEnv(runtimeEnv, ['BOT_TOKEN']);
-        const result = await syncTelegramCommands(runtimeEnv);
-        return json({ ok: true, ...result }, 200, {}, request);
-      }
+      const webhookManagementResponse = await handleWebhookManagementRequest(
+        request,
+        url,
+        runtimeEnv,
+        webhookPath,
+        publicBaseUrl,
+      );
+      if (webhookManagementResponse) return webhookManagementResponse;
 
       if (request.method === 'POST' && url.pathname === webhookPath) {
-        ensureEnv(runtimeEnv, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
-        if (runtimeEnv.WEBHOOK_SECRET) {
-          const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
-          if (secret !== runtimeEnv.WEBHOOK_SECRET) {
-            return new Response('Forbidden', { status: 403 });
-          }
-        }
-
-        const update = await request.json();
-        try {
-          await handleUpdate(update, runtimeEnv, publicBaseUrl);
-        } catch (error) {
-          await recordWebhookError(runtimeEnv, error, update);
-          await notifyWebhookError(runtimeEnv, error, update);
-        }
-        return new Response('ok', { headers: corsHeaders(request) });
+        return await handleWebhookRequest(request, runtimeEnv, publicBaseUrl, ctx);
       }
 
       return new Response('Not Found', { status: 404, headers: corsHeaders(request) });
@@ -512,6 +189,464 @@ class AppError extends Error {
     super(message);
     this.status = status;
   }
+}
+
+async function handleTopLevelRequest(request, url, env, webhookPath, publicBaseUrl) {
+  if (request.method === 'GET' && url.pathname === '/') {
+    return json(await getAdminStatus(url, env, webhookPath, publicBaseUrl), 200, {}, request);
+  }
+
+  if (request.method === 'GET' && url.pathname === '/health') {
+    return json({ ok: true, now: new Date().toISOString() }, 200, {}, request);
+  }
+
+  if (request.method === 'GET' && url.pathname === VERIFY_IMAGE_PATH) {
+    return serveVerificationImage(url, request);
+  }
+
+  if (request.method === 'GET' && url.pathname === VERIFY_WEB_PATH) {
+    return html(
+      renderVerificationWebPage(),
+      200,
+      request,
+      {
+        'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+        pragma: 'no-cache',
+        expires: '0',
+      },
+    );
+  }
+
+  if (request.method === 'POST' && url.pathname.startsWith(VERIFY_API_PREFIX)) {
+    return await handleVerificationApiRequest(request, url, env, publicBaseUrl);
+  }
+
+  if (request.method === 'POST' && url.pathname === '/deploy/bootstrap') {
+    return await handleDeployBootstrap(request, env, webhookPath, publicBaseUrl);
+  }
+
+  if (request.method === 'GET' && url.pathname === ADMIN_PANEL_PATH) {
+    const panelUrl = buildAdminPanelRedirectUrl(env, publicBaseUrl, request);
+    if (isAbsoluteHttpUrl(panelUrl)) {
+      return Response.redirect(panelUrl, 302);
+    }
+    return html(renderAdminPage(url, env, webhookPath, publicBaseUrl), 200, request);
+  }
+
+  return null;
+}
+
+async function handleWebhookRequest(request, env, publicBaseUrl = '', ctx = null) {
+  ensureEnv(env, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
+  if (env.WEBHOOK_SECRET) {
+    const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
+    if (secret !== env.WEBHOOK_SECRET) {
+      return new Response('Forbidden', { status: 403 });
+    }
+  }
+
+  const update = await request.json();
+  try {
+    await handleUpdate(update, env, publicBaseUrl, ctx);
+  } catch (error) {
+    await runNonCriticalTask(ctx, async () => {
+      await recordWebhookError(env, error, update);
+      await notifyWebhookError(env, error, update);
+    });
+  }
+  return new Response('ok', { headers: corsHeaders(request) });
+}
+
+async function handleAdminAuthRequest(request, url, env) {
+  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/auth/me`) {
+    return await handleAdminAuthMe(request, env);
+  }
+
+  if (request.method === 'POST' && url.pathname === '/admin/login') {
+    return await handleAdminLogin(request, env);
+  }
+
+  if (request.method === 'POST' && url.pathname === '/admin/logout') {
+    await requireHttpAdmin(request, env);
+    return await handleAdminLogout(request, env);
+  }
+
+  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/auth/change-password`) {
+    await requireHttpAdmin(request, env);
+    return await handleAdminChangePassword(request, env);
+  }
+
+  return null;
+}
+
+async function handleAdminSystemRequest(request, url, env, webhookPath, publicBaseUrl) {
+  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/status`) {
+    await requireHttpAdmin(request, env);
+    return json(await getAdminStatus(url, env, webhookPath, publicBaseUrl), 200, {}, request);
+  }
+
+  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/system-config`) {
+    await requireHttpAdmin(request, env);
+    return json({ ok: true, config: buildSystemConfigView(await getEffectiveSystemConfig(env)) }, 200, {}, request);
+  }
+
+  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/system-config`) {
+    await requireHttpAdmin(request, env);
+    const body = await readJsonBody(request);
+    const updated = await updateSystemConfig(env, body);
+    return json(
+      {
+        ok: true,
+        config: buildSystemConfigView(await getEffectiveSystemConfig(env)),
+        profileMetaSynced: Boolean(updated?.metaSync?.synced),
+        profileMetaSyncError: updated?.metaSync?.error || null,
+      },
+      200,
+      {},
+      request,
+    );
+  }
+
+  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/maintenance/cleanup`) {
+    await requireHttpAdmin(request, env);
+    const body = await readJsonBody(request);
+    const result = await runDataCleanup(env, {
+      retentionDays: body?.retentionDays,
+      batchSize: body?.batchSize,
+      source: 'admin-api',
+      force: true,
+    });
+    return json({ ok: true, result }, 200, {}, request);
+  }
+
+  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/maintenance/deleted-account-sweep`) {
+    await requireHttpAdmin(request, env);
+    const body = await readJsonBody(request);
+    const result = await runDeletedAccountSweep(env, {
+      batchSize: body?.batchSize,
+      source: 'admin-api',
+      force: true,
+    });
+    return json({ ok: true, result }, 200, {}, request);
+  }
+
+  return null;
+}
+
+async function handleAdminUserRequest(request, url, env) {
+  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/users`) {
+    await requireHttpAdmin(request, env);
+    const limit = parseLimit(url.searchParams.get('limit'), 50);
+    const offset = parseOffset(url.searchParams.get('offset'), 0);
+    const page = await listUsersPage(env, { limit, offset });
+    return json(
+      {
+        ok: true,
+        users: page.items,
+        summary: page.summary,
+        total: page.total,
+        limit: page.limit,
+        offset: page.offset,
+        nextOffset: page.nextOffset,
+        prevOffset: page.prevOffset,
+        hasMore: page.hasMore,
+      },
+      200,
+      {},
+      request,
+    );
+  }
+
+  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/history`) {
+    await requireHttpAdmin(request, env);
+    const userIdRaw = url.searchParams.get('userId');
+    const limit = parseLimit(url.searchParams.get('limit'), 50);
+    const userId = userIdRaw ? toChatId(userIdRaw) : null;
+    const beforeId = parsePositiveInt(url.searchParams.get('beforeId'), 0);
+    const query = String(url.searchParams.get('q') || '').trim();
+    const direction = String(url.searchParams.get('direction') || '').trim().toLowerCase();
+    const messageType = String(url.searchParams.get('messageType') || '').trim().toLowerCase();
+    const history = await listMessageHistory(env, {
+      userId,
+      limit,
+      beforeId,
+      query,
+      direction,
+      messageType,
+    });
+    return json(
+      {
+        ok: true,
+        ...history,
+      },
+      200,
+      {},
+      request,
+    );
+  }
+
+  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/avatar`) {
+    await requireHttpAdmin(request, env);
+    return await handleTelegramAvatarProxy(request, env);
+  }
+
+  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/welcome-media/upload`) {
+    await requireHttpAdmin(request, env);
+    ensureEnv(env, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
+    const form = await request.formData();
+    const type = String(form.get('type') || '').trim().toLowerCase();
+    const file = form.get('file');
+    if (!file || typeof file === 'string') {
+      throw new AppError(400, '请先选择要上传的文件');
+    }
+    const result = await uploadWelcomeMediaToTelegram(env, type, file);
+    return json({ ok: true, result }, 200, {}, request);
+  }
+
+  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/users/action`) {
+    await requireHttpAdmin(request, env);
+    const body = await readJsonBody(request);
+    const action = String(body.action || '').trim().toLowerCase();
+    const userId = toChatId(body.userId);
+    const operator = getHttpAdminOperator(request);
+
+    if (action === 'ban') {
+      const entry = await setBlacklistEntry(env, userId, {
+        reason: String(body.reason || '通过用户管理封禁').trim() || '通过用户管理封禁',
+        createdAt: new Date().toISOString(),
+        createdBy: operator,
+      });
+      return json({ ok: true, action, entry }, 200, {}, request);
+    }
+
+    if (action === 'unban') {
+      await deleteBlacklistEntry(env, userId);
+      return json({ ok: true, action, userId }, 200, {}, request);
+    }
+
+    if (action === 'trust') {
+      const entry = await setTrustEntry(env, userId, {
+        note: String(body.note || '通过用户管理设为信任用户').trim() || '通过用户管理设为信任用户',
+        createdAt: new Date().toISOString(),
+        createdBy: operator,
+      });
+      return json({ ok: true, action, entry }, 200, {}, request);
+    }
+
+    if (action === 'untrust') {
+      await deleteTrustEntry(env, userId);
+      return json({ ok: true, action, userId }, 200, {}, request);
+    }
+
+    if (action === 'restart') {
+      const state = await restartUserVerification(env, userId, operator);
+      return json({ ok: true, action, state }, 200, {}, request);
+    }
+
+    if (action === 'verifypass') {
+      const state = await adminApproveUserVerification(env, userId, operator, {
+        notifyUser: true,
+      });
+      return json({ ok: true, action, state }, 200, {}, request);
+    }
+
+    if (action === 'delete') {
+      const result = await purgeDeletedUserData(env, userId);
+      return json({ ok: true, action, userId, result }, 200, {}, request);
+    }
+
+    throw new AppError(400, 'action 必须是 ban / unban / trust / untrust / restart / verifypass / delete');
+  }
+
+  return null;
+}
+
+async function handleAdminReplyRequest(request, url, env) {
+  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/reply`) {
+    await requireHttpAdmin(request, env);
+    ensureEnv(env, ['BOT_TOKEN']);
+    const body = await readJsonBody(request);
+    const userId = toChatId(body.userId);
+    const text = String(body.text || '').trim();
+    if (!text) {
+      throw new AppError(400, 'text 不能为空');
+    }
+
+    const result = await telegram(env, 'sendMessage', {
+      chat_id: userId,
+      text,
+    });
+
+    await saveMessageHistory(env, {
+      userId: Number(userId),
+      chatType: 'private',
+      topicId: null,
+      telegramMessageId: Number(result?.message_id) || null,
+      direction: 'admin_to_user',
+      senderRole: 'admin',
+      messageType: 'text',
+      textContent: text,
+      mediaFileId: null,
+      rawPayload: {
+        source: 'admin-api',
+        operator: getHttpAdminOperator(request),
+        telegram: result,
+      },
+    });
+
+    return json({ ok: true, result }, 200, {}, request);
+  }
+
+  return null;
+}
+
+async function handleAdminBlacklistRequest(request, url, env) {
+  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/blacklist`) {
+    await requireHttpAdmin(request, env);
+    return json(
+      { ok: true, blacklist: await listBlacklist(env, parseLimit(url.searchParams.get('limit'), 50)) },
+      200,
+      {},
+      request,
+    );
+  }
+
+  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/blacklist`) {
+    await requireHttpAdmin(request, env);
+    const body = await readJsonBody(request);
+    const action = String(body.action || '').trim().toLowerCase();
+    const userId = toChatId(body.userId);
+    const operator = getHttpAdminOperator(request);
+
+    if (action === 'add') {
+      const entry = await setBlacklistEntry(env, userId, {
+        reason: String(body.reason || '通过管理面板封禁').trim() || '通过管理面板封禁',
+        createdAt: new Date().toISOString(),
+        createdBy: operator,
+      });
+      return json({ ok: true, action, entry }, 200, {}, request);
+    }
+
+    if (action === 'remove') {
+      await deleteBlacklistEntry(env, userId);
+      return json({ ok: true, action, userId }, 200, {}, request);
+    }
+
+    throw new AppError(400, 'action 必须是 add 或 remove');
+  }
+
+  return null;
+}
+
+async function handleAdminTrustRequest(request, url, env) {
+  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/trust`) {
+    await requireHttpAdmin(request, env);
+    return json(
+      { ok: true, trust: await listTrust(env, parseLimit(url.searchParams.get('limit'), 50)) },
+      200,
+      {},
+      request,
+    );
+  }
+
+  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/trust`) {
+    await requireHttpAdmin(request, env);
+    const body = await readJsonBody(request);
+    const action = String(body.action || '').trim().toLowerCase();
+    const userId = toChatId(body.userId);
+    const operator = getHttpAdminOperator(request);
+
+    if (action === 'add') {
+      const entry = await setTrustEntry(env, userId, {
+        note: String(body.note || '通过白名单面板设为信任用户').trim() || '通过白名单面板设为信任用户',
+        createdAt: new Date().toISOString(),
+        createdBy: operator,
+      });
+      return json({ ok: true, action, entry }, 200, {}, request);
+    }
+
+    if (action === 'remove') {
+      await deleteTrustEntry(env, userId);
+      return json({ ok: true, action, userId }, 200, {}, request);
+    }
+
+    throw new AppError(400, 'action 必须是 add 或 remove');
+  }
+
+  return null;
+}
+
+async function handleAuthorizedAdminRequest(request, url, env) {
+  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/admins`) {
+    await requireHttpAdmin(request, env);
+    return json(
+      { ok: true, admins: await listAuthorizedAdmins(env, parseLimit(url.searchParams.get('limit'), 50)) },
+      200,
+      {},
+      request,
+    );
+  }
+
+  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/admins`) {
+    await requireHttpAdmin(request, env);
+    const body = await readJsonBody(request);
+    const action = String(body.action || '').trim().toLowerCase();
+    const userId = toChatId(body.userId);
+    const operator = getHttpAdminOperator(request);
+
+    if (action === 'add') {
+      const entry = await setAuthorizedAdmin(env, userId, {
+        note: String(body.note || '').trim() || null,
+        createdAt: new Date().toISOString(),
+        createdBy: operator,
+      });
+      return json({ ok: true, action, entry }, 200, {}, request);
+    }
+
+    if (action === 'remove') {
+      await deleteAuthorizedAdmin(env, userId);
+      return json({ ok: true, action, userId }, 200, {}, request);
+    }
+
+    throw new AppError(400, 'action 必须是 add 或 remove');
+  }
+
+  return null;
+}
+
+async function handleWebhookManagementRequest(request, url, env, webhookPath, publicBaseUrl) {
+  if (request.method === 'GET' && url.pathname === '/setWebhook') {
+    await requireHttpAdmin(request, env);
+    ensureEnv(env, ['BOT_TOKEN']);
+    const webhookUrl = `${publicBaseUrl}${webhookPath}`;
+    const payload = { url: webhookUrl };
+    if (env.WEBHOOK_SECRET) payload.secret_token = env.WEBHOOK_SECRET;
+    const result = await telegram(env, 'setWebhook', payload);
+    return json({ ok: true, webhookUrl, telegram: result }, 200, {}, request);
+  }
+
+  if (request.method === 'GET' && url.pathname === '/deleteWebhook') {
+    await requireHttpAdmin(request, env);
+    ensureEnv(env, ['BOT_TOKEN']);
+    const result = await telegram(env, 'deleteWebhook', { drop_pending_updates: false });
+    return json({ ok: true, telegram: result }, 200, {}, request);
+  }
+
+  if (request.method === 'GET' && url.pathname === '/getWebhookInfo') {
+    await requireHttpAdmin(request, env);
+    ensureEnv(env, ['BOT_TOKEN']);
+    const result = await telegram(env, 'getWebhookInfo', {});
+    return json({ ok: true, telegram: result }, 200, {}, request);
+  }
+
+  if (request.method === 'GET' && url.pathname === '/setCommands') {
+    await requireHttpAdmin(request, env);
+    ensureEnv(env, ['BOT_TOKEN']);
+    const result = await syncTelegramCommands(env);
+    return json({ ok: true, ...result }, 200, {}, request);
+  }
+
+  return null;
 }
 
 function shouldScheduleAutoCleanupCheck(nowMs = Date.now()) {
@@ -567,6 +702,219 @@ function pruneTimedCache(cache, maxEntries, nowMs = Date.now()) {
   }
 }
 
+function readKvJsonCacheEntry(key, nowMs = Date.now()) {
+  const cacheKey = String(key);
+  const hit = kvJsonCache.get(cacheKey);
+  if (!hit) {
+    return { hit: false, value: null };
+  }
+  if (!Number.isFinite(hit.expiresAt) || hit.expiresAt <= nowMs) {
+    kvJsonCache.delete(cacheKey);
+    return { hit: false, value: null };
+  }
+  return {
+    hit: true,
+    value: hit.value === KV_JSON_NULL ? null : hit.value,
+  };
+}
+
+function writeKvJsonCache(key, value, ttlMs = HOT_KV_JSON_CACHE_TTL_MS) {
+  writeTimedCacheValue(kvJsonCache, String(key), value === null ? KV_JSON_NULL : value, ttlMs);
+}
+
+function invalidateKvJsonCache(key) {
+  kvJsonCache.delete(String(key));
+}
+
+function isUserListSnapshotKey(key) {
+  const cacheKey = String(key || '');
+  return (
+    cacheKey.startsWith('user:') ||
+    cacheKey.startsWith('blacklist:') ||
+    cacheKey.startsWith('trust:') ||
+    cacheKey.startsWith('verify:')
+  );
+}
+
+function invalidateUserListSnapshotCache(key = '') {
+  if (!key || isUserListSnapshotKey(key)) {
+    userListSnapshotCache.clear();
+  }
+}
+
+function noteKvJsonWrite(key, value, ttlMs = HOT_KV_JSON_CACHE_TTL_MS) {
+  writeKvJsonCache(key, value, ttlMs);
+  invalidateUserListSnapshotCache(key);
+}
+
+function noteKvJsonDelete(key) {
+  invalidateKvJsonCache(key);
+  invalidateUserListSnapshotCache(key);
+}
+
+function serializeJsonForStorage(value) {
+  return JSON.stringify(typeof value === 'undefined' ? null : value);
+}
+
+function areJsonStorageValuesEqual(left, right) {
+  return serializeJsonForStorage(left) === serializeJsonForStorage(right);
+}
+
+async function getCachedJson(env, key, ttlMs = HOT_KV_JSON_CACHE_TTL_MS) {
+  if (!env?.BOT_KV) return null;
+  const cacheKey = String(key);
+  const cached = readKvJsonCacheEntry(cacheKey);
+  if (cached.hit) {
+    return cached.value;
+  }
+  const value = await getJson(env.BOT_KV, cacheKey);
+  writeKvJsonCache(cacheKey, value, ttlMs);
+  return value;
+}
+
+async function putJsonIfChanged(env, key, value, options = {}) {
+  if (!env?.BOT_KV) return false;
+  const cacheKey = String(key);
+  const ttlMs = options.ttlMs || HOT_KV_JSON_CACHE_TTL_MS;
+  const hasExplicitExisting = Object.prototype.hasOwnProperty.call(options, 'existing');
+  const cached = hasExplicitExisting ? { hit: false, value: null } : readKvJsonCacheEntry(cacheKey);
+  const hasComparableExisting = hasExplicitExisting || cached.hit;
+  const existing = hasExplicitExisting ? options.existing : cached.value;
+
+  if (hasComparableExisting && areJsonStorageValuesEqual(existing, value)) {
+    writeKvJsonCache(cacheKey, value, ttlMs);
+    return false;
+  }
+
+  await env.BOT_KV.put(cacheKey, serializeJsonForStorage(value));
+  noteKvJsonWrite(cacheKey, value, ttlMs);
+  return true;
+}
+
+function getJsonChangedKeys(left, right) {
+  const keys = new Set([...Object.keys(left || {}), ...Object.keys(right || {})]);
+  return Array.from(keys).filter((key) => !areJsonStorageValuesEqual(left?.[key], right?.[key]));
+}
+
+function shouldThrottleUserProfileWrite(existing, next, nowMs = Date.now()) {
+  if (!existing || typeof existing !== 'object') return false;
+  const changedKeys = getJsonChangedKeys(existing, next);
+  if (changedKeys.length === 0) return false;
+  if (!changedKeys.every((key) => USER_PROFILE_VOLATILE_FIELDS.has(key))) return false;
+  const previousSeenMs = parseIsoTimeMs(existing.lastSeenAt) || parseIsoTimeMs(existing.firstSeenAt);
+  if (!previousSeenMs) return false;
+  return nowMs - previousSeenMs < USER_PROFILE_WRITE_THROTTLE_MS;
+}
+
+async function putUserProfileIfChanged(env, userId, record, options = {}) {
+  if (!env?.BOT_KV) return false;
+  const key = userKey(userId);
+  const hasExplicitExisting = Object.prototype.hasOwnProperty.call(options, 'existing');
+  const cached = hasExplicitExisting ? { hit: false, value: null } : readKvJsonCacheEntry(key);
+  const hasComparableExisting = hasExplicitExisting || cached.hit;
+  const existing = hasExplicitExisting ? options.existing : cached.value;
+
+  if (hasComparableExisting && shouldThrottleUserProfileWrite(existing, record)) {
+    return false;
+  }
+
+  const putOptions = { ttlMs: USER_PROFILE_CACHE_TTL_MS };
+  if (hasComparableExisting) {
+    putOptions.existing = existing;
+  }
+  return putJsonIfChanged(env, key, record, putOptions);
+}
+
+async function putVerificationState(env, userId, state, options = {}) {
+  const putOptions = { ttlMs: VERIFY_STATE_CACHE_TTL_MS };
+  if (Object.prototype.hasOwnProperty.call(options, 'existing')) {
+    putOptions.existing = options.existing;
+  }
+  return putJsonIfChanged(env, verifyKey(userId), state, putOptions);
+}
+
+function readD1VerificationStatusCache(userId) {
+  const cached = readTimedCacheValue(d1VerificationStatusCache, verificationCacheKey(userId));
+  if (cached === null) {
+    return { hit: false, value: null };
+  }
+  return {
+    hit: true,
+    value: cached === KV_JSON_NULL ? null : cached,
+  };
+}
+
+function writeD1VerificationStatusCache(userId, value) {
+  writeTimedCacheValue(
+    d1VerificationStatusCache,
+    verificationCacheKey(userId),
+    value === null ? KV_JSON_NULL : value,
+    D1_VERIFICATION_STATUS_CACHE_TTL_MS,
+  );
+}
+
+function invalidateD1VerificationStatusCache(userId) {
+  d1VerificationStatusCache.delete(verificationCacheKey(userId));
+}
+
+function normalizeD1VerificationStatusRecord(record) {
+  if (!record) return null;
+  return {
+    userId: Number(record.userId),
+    status: String(record.status || '').toLowerCase(),
+    passedAt: normalizeIsoTime(record.passedAt),
+    clearedAt: normalizeIsoTime(record.clearedAt),
+    updatedAt: normalizeIsoTime(record.updatedAt),
+  };
+}
+
+function isSameD1VerificationMeaning(left, right) {
+  const normalizedLeft = normalizeD1VerificationStatusRecord(left);
+  const normalizedRight = normalizeD1VerificationStatusRecord(right);
+  return (
+    normalizedLeft?.status === normalizedRight?.status &&
+    normalizedLeft?.passedAt === normalizedRight?.passedAt &&
+    normalizedLeft?.clearedAt === normalizedRight?.clearedAt
+  );
+}
+
+function buildMessageHistoryDedupeKey(entry, userId) {
+  const messageId = Number(entry?.telegramMessageId || 0);
+  const direction = String(entry?.direction || '').trim();
+  if (!(Number.isFinite(messageId) && messageId > 0 && direction)) return '';
+  return `${Number(userId)}:${direction}:${messageId}`;
+}
+
+function shouldSkipDuplicateMessageHistory(entry, userId) {
+  const key = buildMessageHistoryDedupeKey(entry, userId);
+  if (!key) return false;
+  if (readTimedCacheValue(messageHistoryDedupeCache, key)) {
+    return true;
+  }
+  writeTimedCacheValue(messageHistoryDedupeCache, key, true, MESSAGE_HISTORY_DEDUPE_TTL_MS);
+  return false;
+}
+
+function readMessageHistoryConversationId(userId) {
+  const id = Number(readTimedCacheValue(messageHistoryConversationCache, String(Number(userId))));
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+function writeMessageHistoryConversationId(userId, conversationId) {
+  const id = Number(conversationId);
+  if (!(Number.isFinite(id) && id > 0)) return;
+  writeTimedCacheValue(
+    messageHistoryConversationCache,
+    String(Number(userId)),
+    id,
+    MESSAGE_HISTORY_CONVERSATION_CACHE_TTL_MS,
+  );
+}
+
+function clearMessageHistoryConversationId(userId) {
+  messageHistoryConversationCache.delete(String(Number(userId)));
+}
+
 function readSystemConfigCache(nowMs = Date.now()) {
   if (!systemConfigCache?.value) {
     return null;
@@ -609,6 +957,21 @@ async function runScheduledMaintenance(env) {
     ok: true,
     results,
   };
+}
+
+async function runNonCriticalTask(ctx, task) {
+  const promise = Promise.resolve()
+    .then(task)
+    .catch((error) => {
+      console.error('Non-critical background task failed', formatErrorMessage(error));
+    });
+
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(promise);
+    return;
+  }
+
+  await promise;
 }
 
 function buildGroupAdminMemberCacheKey(chatId, userId) {
@@ -658,9 +1021,9 @@ async function getAdminChatMembers(env, chatId) {
   return normalized;
 }
 
-async function handleUpdate(update, env, publicBaseUrl = '') {
+async function handleUpdate(update, env, publicBaseUrl = '', ctx = null) {
   if (update.callback_query) {
-    await handleCallbackQuery(update.callback_query, env, publicBaseUrl);
+    await handleCallbackQuery(update.callback_query, env, publicBaseUrl, ctx);
     return;
   }
 
@@ -675,7 +1038,7 @@ async function handleUpdate(update, env, publicBaseUrl = '') {
   const isPrivateRelayAdminChat = !isTopicModeEnabled(env) && privateRelayAdminIds.includes(Number(message.chat.id));
 
   if (authorizedAdmin || isAdminChat || isPrivateRelayAdminChat) {
-    await handleAdminMessage(message, env, adminChatId, authorizedAdmin, publicBaseUrl);
+    await handleAdminMessage(message, env, adminChatId, authorizedAdmin, publicBaseUrl, ctx);
     return;
   }
 
@@ -721,10 +1084,10 @@ async function handleUpdate(update, env, publicBaseUrl = '') {
     return;
   }
 
-  await handleUserMessage(message, env, adminChatId);
+  await handleUserMessage(message, env, adminChatId, ctx);
 }
 
-async function handleCallbackQuery(callbackQuery, env, publicBaseUrl = '') {
+async function handleCallbackQuery(callbackQuery, env, publicBaseUrl = '', ctx = null) {
   const data = String(callbackQuery.data || '');
   if (!data) {
     await answerCallback(env, callbackQuery.id, '未识别的操作');
@@ -737,14 +1100,14 @@ async function handleCallbackQuery(callbackQuery, env, publicBaseUrl = '') {
   }
 
   if (data.startsWith('adm:')) {
-    await handleAdminActionCallback(callbackQuery, env);
+    await handleAdminActionCallback(callbackQuery, env, ctx);
     return;
   }
 
   await answerCallback(env, callbackQuery.id, '未识别的操作');
 }
 
-async function handleUserMessage(message, env, adminChatId) {
+async function handleUserMessage(message, env, adminChatId, ctx = null) {
   const sender = message.from || {};
   const topicModeEnabled = isTopicModeEnabled(env);
   const relayChatIds = topicModeEnabled ? [adminChatId] : await getPrivateRelayAdminUserIds(env);
@@ -774,7 +1137,7 @@ async function handleUserMessage(message, env, adminChatId) {
     `#UID:${message.chat.id}`,
     profileLine,
     topicModeActive
-      ? '当前为话题模式。请在该用户专属话题内直接回复，或使用下方操作按钮。'
+      ? '当前为话题模式。请在该用户专属话题内直接回复，后续用户消息将只转发原消息。也可使用下方操作按钮。'
       : topicModeEnabled && topicError
         ? `创建话题失败，已回退到私聊转发模式。\n错误：${topicError}`
         : relayChatIds.length > 1
@@ -787,6 +1150,7 @@ async function handleUserMessage(message, env, adminChatId) {
 
   let delivered = false;
   let lastError = null;
+  const shouldSendMeta = shouldSendUserMetaMessage(env, topicModeEnabled, topicRecord, topicModeActive);
 
   for (const relayChatId of relayChatIds) {
     let forwarded;
@@ -812,21 +1176,31 @@ async function handleUserMessage(message, env, adminChatId) {
       }
     }
 
+    if (!shouldSendMeta) {
+      continue;
+    }
+
     try {
-      await telegramWithThreadFallback(env, 'sendMessage', {
+      const sentMeta = await telegramWithThreadFallback(env, 'sendMessage', {
         chat_id: relayChatId,
         text: metaText,
         message_thread_id: messageThreadId || undefined,
         reply_to_message_id: forwarded.message_id,
         reply_markup: buildAdminActionKeyboard(message.chat.id),
       });
+      if (topicModeActive) {
+        await markUserTopicMetaSent(env, topicRecord, sentMeta).catch(() => {});
+      }
     } catch (error) {
       try {
-        await telegram(env, 'sendMessage', {
+        const sentMeta = await telegram(env, 'sendMessage', {
           chat_id: relayChatId,
           text: `${metaText}\n\n提示：元信息补发失败：${trimText(formatErrorMessage(error), 300)}`,
           reply_markup: buildAdminActionKeyboard(message.chat.id),
         });
+        if (topicModeActive) {
+          await markUserTopicMetaSent(env, topicRecord, sentMeta).catch(() => {});
+        }
       } catch (fallbackError) {
         lastError = fallbackError;
       }
@@ -835,7 +1209,7 @@ async function handleUserMessage(message, env, adminChatId) {
 
   if (!delivered) {
     await notifyUserAdminDeliveryFailed(env, message, lastError || new Error('消息转发失败'));
-    await saveMessageHistory(env, {
+    await runNonCriticalTask(ctx, () => saveMessageHistory(env, {
       userId: Number(message.chat.id),
       chatType: message.chat?.type || 'private',
       topicId: messageThreadId || null,
@@ -846,7 +1220,7 @@ async function handleUserMessage(message, env, adminChatId) {
       textContent: extractMessageText(message),
       mediaFileId: extractPrimaryMediaFileId(message),
       rawPayload: message,
-    });
+    }));
     return;
   }
 
@@ -854,7 +1228,7 @@ async function handleUserMessage(message, env, adminChatId) {
     await sendWelcomeMessage(env, Number(message.chat.id));
   }
 
-  await saveMessageHistory(env, {
+  await runNonCriticalTask(ctx, () => saveMessageHistory(env, {
     userId: Number(message.chat.id),
     chatType: message.chat?.type || 'private',
     topicId: messageThreadId || null,
@@ -865,7 +1239,7 @@ async function handleUserMessage(message, env, adminChatId) {
     textContent: extractMessageText(message),
     mediaFileId: extractPrimaryMediaFileId(message),
     rawPayload: message,
-  });
+  }));
 }
 
 async function getPrivateRelayAdminUserIds(env) {
@@ -896,7 +1270,7 @@ async function getPrivateRelayAdminUserIds(env) {
 }
 
 
-async function handleAdminMessage(message, env, adminChatId, preAuthorized = null, publicBaseUrl = '') {
+async function handleAdminMessage(message, env, adminChatId, preAuthorized = null, publicBaseUrl = '', ctx = null) {
   const senderId = message.from?.id ? Number(message.from.id) : null;
   const chatId = Number(message.chat.id);
   const hasPreAuthorized = preAuthorized === true || preAuthorized === false;
@@ -926,10 +1300,10 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = nul
   }
 
   if (senderId) {
-    await syncTelegramProfile(env, senderId, {
+    await runNonCriticalTask(ctx, () => syncTelegramProfile(env, senderId, {
       user: message.from || {},
       adminChatId,
-    });
+    }));
   }
 
   const privateRelayAdminIds = isTopicModeEnabled(env) ? [] : await getPrivateRelayAdminUserIds(env);
@@ -986,7 +1360,7 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = nul
       return;
     }
 
-    await saveMessageHistory(env, {
+    await runNonCriticalTask(ctx, () => saveMessageHistory(env, {
       userId: Number(targetUserId),
       chatType: 'private',
       topicId: message.message_thread_id || null,
@@ -997,7 +1371,7 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = nul
       textContent: text,
       mediaFileId: null,
       rawPayload: message,
-    });
+    }));
     return;
   }
 
@@ -1025,7 +1399,7 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = nul
     return;
   }
 
-  await saveMessageHistory(env, {
+  await runNonCriticalTask(ctx, () => saveMessageHistory(env, {
     userId: Number(defaultTargetUserId),
     chatType: 'private',
     topicId: message.message_thread_id || null,
@@ -1036,13 +1410,19 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = nul
     textContent: extractMessageText(message),
     mediaFileId: extractPrimaryMediaFileId(message),
     rawPayload: message,
-  });
+  }));
+}
+
+function normalizeBotCommandText(text) {
+  return String(text || '')
+    .trim()
+    .replace(/^\/([a-z0-9_]{1,32})@[a-z0-9_]{3,64}(?=\s|$)/i, '/$1');
 }
 
 async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseUrl = '') {
   if (typeof message.text !== 'string') return false;
 
-  const trimmed = message.text.trim();
+  const trimmed = normalizeBotCommandText(message.text);
   const senderId = message.from?.id ? Number(message.from.id) : null;
   const rootAdmin = senderId ? isRootAdmin(env, senderId) : false;
   const pendingScope = getWelcomeSetupScopeKey(message);
@@ -1073,7 +1453,27 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
         '16. 彻底删除用户（含历史消息）：/deleteuser 用户ID',
         '17. 设置欢迎内容：/setwelcome（下一条消息自动识别并回填）',
         '18. 取消欢迎设置：/cancelwelcome',
+        '19. 召回用户快捷操作按钮：/actions 用户ID（话题内可直接 /actions）',
+        '20. 同步 Telegram 斜杠菜单：/setcommands',
       ].join('\n'),
+    );
+    return true;
+  }
+
+  if (/^\/(?:setcommands|synccommands|commands)\s*$/i.test(trimmed)) {
+    const result = await syncTelegramCommands(env);
+    const adminChats = Array.isArray(result.adminCommandChats) ? result.adminCommandChats : [];
+    const adminTargets = Array.isArray(result.adminCommandTargets) ? result.adminCommandTargets : [];
+    const failedScopes = Array.isArray(result.failedScopes) ? result.failedScopes : [];
+    await sendAdminNotice(
+      env,
+      message,
+      [
+        'Telegram 斜杠菜单已同步。',
+        `管理聊天：${adminChats.length ? adminChats.join(', ') : '未配置'}`,
+        `管理员私聊：${adminTargets.length} 个`,
+        failedScopes.length ? `失败 scope：${failedScopes.length} 个，可在面板或 /setCommands 返回中查看详情。` : '',
+      ].filter(Boolean).join('\n'),
     );
     return true;
   }
@@ -1368,6 +1768,18 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
     return true;
   }
 
+  const actionsMatch = trimmed.match(/^\/(?:actions|action|buttons|controls)\s*(\-?\d+)?\s*$/i);
+  if (actionsMatch) {
+    const userId = actionsMatch[1] ? Number(actionsMatch[1]) : defaultTargetUserId;
+    if (!userId) {
+      await sendAdminNotice(env, message, '请使用 /actions 用户ID，或在用户话题/回复上下文中直接发送 /actions');
+      return true;
+    }
+
+    await sendUserActionCard(env, message, userId);
+    return true;
+  }
+
   const deleteUserMatch = trimmed.match(/^\/(?:deleteuser|deluser|removeuser|purgeuser)\s*(\-?\d+)?\s*$/i);
   if (deleteUserMatch) {
     const userId = deleteUserMatch[1] ? Number(deleteUserMatch[1]) : defaultTargetUserId;
@@ -1414,7 +1826,7 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
   return false;
 }
 
-async function handleAdminActionCallback(callbackQuery, env) {
+async function handleAdminActionCallback(callbackQuery, env, ctx = null) {
   const senderId = callbackQuery.from?.id ? Number(callbackQuery.from.id) : null;
   const sourceChatId = callbackQuery.message?.chat?.id ? Number(callbackQuery.message.chat.id) : null;
   const adminChatId = toChatId(env.ADMIN_CHAT_ID);
@@ -1429,10 +1841,10 @@ async function handleAdminActionCallback(callbackQuery, env) {
     return;
   }
 
-  await syncTelegramProfile(env, senderId, {
+  await runNonCriticalTask(ctx, () => syncTelegramProfile(env, senderId, {
     user: callbackQuery.from || {},
     adminChatId,
-  });
+  }));
 
   const parts = String(callbackQuery.data || '').split(':');
   const action = parts[1];
@@ -1968,6 +2380,7 @@ async function syncTelegramCommands(env) {
     { command: 'restart', description: '要求用户重新验证：/restart 用户ID' },
     { command: 'verifypass', description: '手动放行验证：/verifypass 用户ID' },
     { command: 'user', description: '查看用户详情：/user 用户ID' },
+    { command: 'actions', description: '发送用户快捷操作按钮：/actions 用户ID' },
     { command: 'users', description: '查看最近用户：/users 20' },
     { command: 'deleteuser', description: '彻底删除用户：/deleteuser 用户ID' },
     { command: 'setwelcome', description: '设置欢迎内容：/setwelcome' },
@@ -1979,11 +2392,14 @@ async function syncTelegramCommands(env) {
     { command: 'panelpass', description: '重发当前面板临时密码' },
     { command: 'panelreset', description: '生成新的面板临时密码' },
     { command: 'sweepdeleted', description: '巡检已注销账户并清理' },
+    { command: 'setcommands', description: '同步 Telegram 斜杠菜单' },
   ];
 
   const applied = [];
   const failedScopes = [];
+  const adminChatIds = getCommandAdminChatIds(env);
   const adminUserIds = await getCommandAdminUserIds(env);
+  const scopedAdminUserIds = adminUserIds.filter((userId) => !adminChatIds.includes(Number(userId)));
 
   applied.push(
     await telegram(env, 'setMyCommands', {
@@ -2000,7 +2416,27 @@ async function syncTelegramCommands(env) {
     }),
   );
 
-  for (const userId of adminUserIds) {
+  for (const chatId of adminChatIds) {
+    try {
+      applied.push(
+        await telegram(env, 'setMyCommands', {
+          scope: {
+            type: 'chat',
+            chat_id: chatId,
+          },
+          commands: adminCommands,
+        }),
+      );
+    } catch (error) {
+      failedScopes.push({
+        scope: 'admin_chat',
+        chatId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  for (const userId of scopedAdminUserIds) {
     try {
       applied.push(
         await telegram(env, 'setMyCommands', {
@@ -2013,6 +2449,7 @@ async function syncTelegramCommands(env) {
       );
     } catch (error) {
       failedScopes.push({
+        scope: 'admin_private',
         userId,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -2025,13 +2462,14 @@ async function syncTelegramCommands(env) {
       admin: adminCommands,
     },
     menuButton: 'commands',
-    adminCommandTargets: adminUserIds,
+    adminCommandChats: adminChatIds,
+    adminCommandTargets: scopedAdminUserIds,
     failedScopes,
     appliedCount: applied.length,
     note:
-      adminUserIds.length > 0
-        ? '默认命令已同步；管理员命令已按 ADMIN_IDS、已授权管理员，以及管理员群中的 Telegram 管理员私聊用户 ID 下发。'
-        : '默认命令已同步；未找到可用的管理员私聊用户 ID，因此管理员专属命令未单独下发。',
+      adminChatIds.length > 0 || scopedAdminUserIds.length > 0
+        ? '默认命令已同步；管理员命令已下发到 ADMIN_CHAT_ID 对应聊天，并按管理员私聊用户 ID 单独下发。'
+        : '默认命令已同步；未找到可用的 ADMIN_CHAT_ID 或管理员私聊用户 ID，因此管理员专属命令未单独下发。',
   };
 }
 
@@ -3102,13 +3540,13 @@ async function upsertUserProfile(env, message) {
   });
   await applyResolvedVerificationStatusToProfile(env, userId, record);
 
-  await env.BOT_KV.put(userKey(userId), JSON.stringify(record));
+  await putUserProfileIfChanged(env, userId, record, { existing });
   return record;
 }
 
 async function getUserProfile(env, userId) {
   if (!env.BOT_KV) return null;
-  return getJson(env.BOT_KV, userKey(userId));
+  return getCachedJson(env, userKey(userId), USER_PROFILE_CACHE_TTL_MS);
 }
 
 function parseIsoTimeMs(value) {
@@ -3250,7 +3688,10 @@ async function markUserProfileVerificationPassed(env, userId, verifiedAt = null)
     verificationClearedAt: null,
     verificationUpdatedAt: nowIso,
   };
-  await env.BOT_KV.put(userKey(userId), JSON.stringify(next));
+  await putJsonIfChanged(env, userKey(userId), next, {
+    existing,
+    ttlMs: USER_PROFILE_CACHE_TTL_MS,
+  });
   return next;
 }
 
@@ -3271,7 +3712,10 @@ async function clearUserProfileVerificationPassed(env, userId) {
     verificationClearedAt: nowIso,
     verificationUpdatedAt: nowIso,
   };
-  await env.BOT_KV.put(userKey(userId), JSON.stringify(next));
+  await putJsonIfChanged(env, userKey(userId), next, {
+    existing,
+    ttlMs: USER_PROFILE_CACHE_TTL_MS,
+  });
   return next;
 }
 
@@ -3307,6 +3751,17 @@ async function ensureVerificationStatusD1Schema(env) {
 
 async function writeD1VerificationStatusPassed(env, userId, passedAt, updatedAt = null) {
   if (!(await ensureVerificationStatusD1Schema(env))) return false;
+  const normalizedRecord = {
+    userId: Number(userId),
+    status: 'verified',
+    passedAt: normalizeIsoTime(passedAt) || new Date().toISOString(),
+    clearedAt: null,
+    updatedAt: normalizeIsoTime(updatedAt) || new Date().toISOString(),
+  };
+  const cached = readD1VerificationStatusCache(userId);
+  if (cached.hit && isSameD1VerificationMeaning(cached.value, normalizedRecord)) {
+    return true;
+  }
   try {
     await env.DB.prepare(
       `INSERT INTO user_verification_status (user_id, status, passed_at, cleared_at, updated_at)
@@ -3317,8 +3772,9 @@ async function writeD1VerificationStatusPassed(env, userId, passedAt, updatedAt 
          cleared_at = NULL,
          updated_at = excluded.updated_at`,
     )
-      .bind(Number(userId), normalizeIsoTime(passedAt) || new Date().toISOString(), updatedAt || new Date().toISOString())
+      .bind(Number(userId), normalizedRecord.passedAt, normalizedRecord.updatedAt)
       .run();
+    writeD1VerificationStatusCache(userId, normalizedRecord);
     return true;
   } catch (error) {
     console.warn('Failed to write D1 verification pass status', formatErrorMessage(error));
@@ -3329,6 +3785,17 @@ async function writeD1VerificationStatusPassed(env, userId, passedAt, updatedAt 
 async function writeD1VerificationStatusCleared(env, userId, clearedAt = null) {
   if (!(await ensureVerificationStatusD1Schema(env))) return false;
   const nowIso = normalizeIsoTime(clearedAt) || new Date().toISOString();
+  const normalizedRecord = {
+    userId: Number(userId),
+    status: 'pending',
+    passedAt: null,
+    clearedAt: nowIso,
+    updatedAt: nowIso,
+  };
+  const cached = readD1VerificationStatusCache(userId);
+  if (cached.hit && isSameD1VerificationMeaning(cached.value, normalizedRecord)) {
+    return true;
+  }
   try {
     await env.DB.prepare(
       `INSERT INTO user_verification_status (user_id, status, passed_at, cleared_at, updated_at)
@@ -3341,6 +3808,7 @@ async function writeD1VerificationStatusCleared(env, userId, clearedAt = null) {
     )
       .bind(Number(userId), nowIso)
       .run();
+    writeD1VerificationStatusCache(userId, normalizedRecord);
     return true;
   } catch (error) {
     console.warn('Failed to write D1 verification clear status', formatErrorMessage(error));
@@ -3349,9 +3817,12 @@ async function writeD1VerificationStatusCleared(env, userId, clearedAt = null) {
 }
 
 async function getD1VerificationStatus(env, userId) {
+  if (!env?.DB) return null;
+  const cached = readD1VerificationStatusCache(userId);
+  if (cached.hit) return cached.value;
   if (!(await ensureVerificationStatusD1Schema(env))) return null;
   try {
-    return await env.DB.prepare(
+    const record = await env.DB.prepare(
       `SELECT
         user_id AS userId,
         status,
@@ -3364,6 +3835,9 @@ async function getD1VerificationStatus(env, userId) {
     )
       .bind(Number(userId))
       .first();
+    const normalizedRecord = normalizeD1VerificationStatusRecord(record);
+    writeD1VerificationStatusCache(userId, normalizedRecord);
+    return normalizedRecord;
   } catch (error) {
     console.warn('Failed to read D1 verification status', formatErrorMessage(error));
     return null;
@@ -3592,7 +4066,7 @@ async function repairVerificationStateFromProfile(env, userId, state = null, pro
     updatedAt: nowIso,
   };
 
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await putVerificationState(env, userId, nextState, { existing });
   await clearLatestVerificationSession(env, userId);
   await markUserProfileVerificationPassed(env, userId, passedAt);
   if (promptMessageId) {
@@ -3628,15 +4102,24 @@ async function resetVerificationStateAfterProfileRevocation(env, userId, state =
     resetFromProfileAt: nowIso,
     updatedAt: nowIso,
   };
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await putVerificationState(env, userId, nextState, { existing: state });
   await clearLatestVerificationSession(env, userId);
   return nextState;
 }
 
 async function listUsers(env, requestedLimit = 50) {
-  if (!env.BOT_KV) return [];
+  const page = await listUsersPage(env, { limit: requestedLimit, offset: 0 });
+  return page.items;
+}
+
+async function getUserListSnapshot(env) {
+  const cached = readTimedCacheValue(userListSnapshotCache, USER_LIST_SNAPSHOT_CACHE_KEY);
+  if (cached) {
+    return cached;
+  }
+
   const names = await collectKvKeys(env.BOT_KV, 'user:', MAX_SCAN_KEYS);
-  const users = await Promise.all(names.map((name) => getJson(env.BOT_KV, name)));
+  const users = await Promise.all(names.map((name) => getCachedJson(env, name, USER_PROFILE_CACHE_TTL_MS)));
   const enriched = await Promise.all(
     users.filter(Boolean).map(async (item) => {
       const [blacklist, trust, verifyState] = await Promise.all([
@@ -3667,14 +4150,67 @@ async function listUsers(env, requestedLimit = 50) {
     }),
   );
 
-  return enriched
-    .sort((a, b) => String(b.lastSeenAt || '').localeCompare(String(a.lastSeenAt || '')))
-    .slice(0, clamp(requestedLimit, 1, MAX_LIST_LIMIT));
+  const sorted = enriched.sort((a, b) => String(b.lastSeenAt || '').localeCompare(String(a.lastSeenAt || '')));
+  const snapshot = {
+    sorted,
+    summary: {
+      total: sorted.length,
+      blacklisted: sorted.filter((item) => item.blacklisted).length,
+      trusted: sorted.filter((item) => item.trusted).length,
+      verified: sorted.filter((item) => item.verified).length,
+    },
+  };
+  writeTimedCacheValue(
+    userListSnapshotCache,
+    USER_LIST_SNAPSHOT_CACHE_KEY,
+    snapshot,
+    USER_LIST_SNAPSHOT_CACHE_TTL_MS,
+  );
+  return snapshot;
+}
+
+async function listUsersPage(env, options = {}) {
+  const limit = clamp(Math.floor(Number(options.limit) || 50), 1, MAX_LIST_LIMIT);
+  const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+  if (!env.BOT_KV) {
+    return {
+      items: [],
+      summary: {
+        total: 0,
+        blacklisted: 0,
+        trusted: 0,
+        verified: 0,
+      },
+      total: 0,
+      limit,
+      offset,
+      nextOffset: null,
+      prevOffset: offset > 0 ? Math.max(0, offset - limit) : null,
+      hasMore: false,
+    };
+  }
+
+  const { sorted, summary } = await getUserListSnapshot(env);
+  const total = sorted.length;
+  const items = sorted.slice(offset, offset + limit);
+  const nextOffset = offset + limit < total ? offset + limit : null;
+  const prevOffset = offset > 0 ? Math.max(0, offset - limit) : null;
+
+  return {
+    items,
+    summary,
+    total,
+    limit,
+    offset,
+    nextOffset,
+    prevOffset,
+    hasMore: nextOffset !== null,
+  };
 }
 
 async function getBlacklistEntry(env, userId) {
   if (!env.BOT_KV) return null;
-  return getJson(env.BOT_KV, blacklistKey(userId));
+  return getCachedJson(env, blacklistKey(userId), HOT_KV_JSON_CACHE_TTL_MS);
 }
 
 async function setBlacklistEntry(env, userId, payload) {
@@ -3688,19 +4224,23 @@ async function setBlacklistEntry(env, userId, payload) {
     displayName: profile?.displayName || null,
     username: profile?.username || null,
   };
-  await env.BOT_KV.put(blacklistKey(userId), JSON.stringify(entry));
+  await putJsonIfChanged(env, blacklistKey(userId), entry, {
+    ttlMs: HOT_KV_JSON_CACHE_TTL_MS,
+  });
   return entry;
 }
 
 async function deleteBlacklistEntry(env, userId) {
   ensureKv(env);
-  await env.BOT_KV.delete(blacklistKey(userId));
+  const key = blacklistKey(userId);
+  await env.BOT_KV.delete(key);
+  noteKvJsonDelete(key);
 }
 
 async function listBlacklist(env, requestedLimit = 50) {
   if (!env.BOT_KV) return [];
   const names = await collectKvKeys(env.BOT_KV, 'blacklist:', MAX_SCAN_KEYS);
-  const items = await Promise.all(names.map((name) => getJson(env.BOT_KV, name)));
+  const items = await Promise.all(names.map((name) => getCachedJson(env, name, HOT_KV_JSON_CACHE_TTL_MS)));
   const enriched = await Promise.all(
     items.filter(Boolean).map(async (item) => {
       const profile = await getUserProfile(env, item.userId);
@@ -3725,7 +4265,7 @@ async function listBlacklist(env, requestedLimit = 50) {
 async function listTrust(env, requestedLimit = 50) {
   if (!env.BOT_KV) return [];
   const names = await collectKvKeys(env.BOT_KV, 'trust:', MAX_SCAN_KEYS);
-  const items = await Promise.all(names.map((name) => getJson(env.BOT_KV, name)));
+  const items = await Promise.all(names.map((name) => getCachedJson(env, name, HOT_KV_JSON_CACHE_TTL_MS)));
   const enriched = await Promise.all(
     items.filter(Boolean).map(async (item) => {
       const profile = await getUserProfile(env, item.userId);
@@ -3749,7 +4289,7 @@ async function listTrust(env, requestedLimit = 50) {
 
 async function getTrustEntry(env, userId) {
   if (!env.BOT_KV) return null;
-  return getJson(env.BOT_KV, trustKey(userId));
+  return getCachedJson(env, trustKey(userId), HOT_KV_JSON_CACHE_TTL_MS);
 }
 
 async function setTrustEntry(env, userId, payload) {
@@ -3763,13 +4303,17 @@ async function setTrustEntry(env, userId, payload) {
     displayName: profile?.displayName || null,
     username: profile?.username || null,
   };
-  await env.BOT_KV.put(trustKey(userId), JSON.stringify(entry));
+  await putJsonIfChanged(env, trustKey(userId), entry, {
+    ttlMs: HOT_KV_JSON_CACHE_TTL_MS,
+  });
   return entry;
 }
 
 async function deleteTrustEntry(env, userId) {
   ensureKv(env);
-  await env.BOT_KV.delete(trustKey(userId));
+  const key = trustKey(userId);
+  await env.BOT_KV.delete(key);
+  noteKvJsonDelete(key);
 }
 
 async function setAuthorizedAdmin(env, userId, payload) {
@@ -3792,18 +4336,22 @@ async function setAuthorizedAdmin(env, userId, payload) {
     hasAvatar: Boolean(profile?.hasAvatar),
     profileStatus: profile?.profileStatus || 'message-only',
   };
-  await env.BOT_KV.put(adminKey(userId), JSON.stringify(entry));
+  await putJsonIfChanged(env, adminKey(userId), entry, {
+    ttlMs: AUTHORIZED_ADMIN_CACHE_TTL_MS,
+  });
   return entry;
 }
 
 async function deleteAuthorizedAdmin(env, userId) {
   if (!env.BOT_KV) return;
-  await env.BOT_KV.delete(adminKey(userId));
+  const key = adminKey(userId);
+  await env.BOT_KV.delete(key);
+  noteKvJsonDelete(key);
 }
 
 async function getAuthorizedAdminEntry(env, userId) {
   if (!env.BOT_KV) return null;
-  return getJson(env.BOT_KV, adminKey(userId));
+  return getCachedJson(env, adminKey(userId), AUTHORIZED_ADMIN_CACHE_TTL_MS);
 }
 
 async function isAuthorizedAdmin(env, userId) {
@@ -3838,7 +4386,7 @@ async function listAuthorizedAdmins(env, requestedLimit = 50) {
   }
 
   const names = await collectKvKeys(env.BOT_KV, 'admin:', MAX_SCAN_KEYS);
-  const kvEntries = (await Promise.all(names.map((name) => getJson(env.BOT_KV, name))))
+  const kvEntries = (await Promise.all(names.map((name) => getCachedJson(env, name, AUTHORIZED_ADMIN_CACHE_TTL_MS))))
     .filter((item) => item && Number.isFinite(Number(item.userId)))
     .map((item) => ({
       ...item,
@@ -3920,6 +4468,12 @@ function getRootAdminIds(env) {
   return Array.from(new Set(ids));
 }
 
+function getCommandAdminChatIds(env) {
+  const chatId = env.ADMIN_CHAT_ID ? Number(env.ADMIN_CHAT_ID) : 0;
+  if (!Number.isFinite(chatId) || chatId === 0) return [];
+  return [chatId];
+}
+
 async function getCommandAdminUserIds(env) {
   const admins = await listAuthorizedAdmins(env, MAX_LIST_LIMIT);
   const configuredIds = admins
@@ -3946,6 +4500,67 @@ async function getCommandAdminUserIds(env) {
 
 function isRootAdmin(env, userId) {
   return getRootAdminIds(env).includes(Number(userId));
+}
+
+function getAdminMetaMode(env = {}) {
+  const raw = String(env.ADMIN_META_MODE || ADMIN_META_MODE_NEW_TOPIC).trim().toLowerCase();
+  if (['always', 'all', 'every', 'each'].includes(raw)) return ADMIN_META_MODE_ALWAYS;
+  if (['off', 'none', 'never', 'silent'].includes(raw)) return ADMIN_META_MODE_OFF;
+  return ADMIN_META_MODE_NEW_TOPIC;
+}
+
+function shouldSendUserMetaMessage(env, topicModeEnabled, topicRecord, topicModeActive) {
+  if (!topicModeEnabled || !topicModeActive) return true;
+  const mode = getAdminMetaMode(env);
+  if (mode === ADMIN_META_MODE_ALWAYS) return true;
+  if (mode === ADMIN_META_MODE_OFF) return false;
+  if (topicRecord?.adminMetaSentAt) return false;
+  return Boolean(topicRecord?._createdNow);
+}
+
+function formatUserActionCardText(userId, profile = null) {
+  const name = profile?.displayName || [profile?.firstName, profile?.lastName].filter(Boolean).join(' ').trim() || '';
+  const username = profile?.username ? `@${profile.username}` : '';
+  const lines = [
+    '用户快捷操作',
+    `#UID:${userId}`,
+    [name ? `用户：${name}` : '', username, `ID:${userId}`].filter(Boolean).join(' | '),
+    '可使用下方按钮查看资料、封禁/解封、信任或重新验证。',
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
+async function sendUserActionCard(env, message, userId) {
+  const profile = await getUserProfile(env, userId);
+  const payload = {
+    chat_id: message.chat.id,
+    text: formatUserActionCardText(userId, profile),
+    reply_markup: buildAdminActionKeyboard(userId),
+  };
+  if (message.message_thread_id) {
+    payload.message_thread_id = message.message_thread_id;
+  }
+  return telegramWithThreadFallback(env, 'sendMessage', payload);
+}
+
+async function markUserTopicMetaSent(env, topicRecord, sentMessage = null) {
+  if (!env?.BOT_KV || !topicRecord?.userId || !topicRecord?.threadId) return;
+  if (topicRecord.adminMetaSentAt) return;
+
+  const { _createdNow, ...persistedTopicRecord } = topicRecord;
+  const now = new Date().toISOString();
+  const next = {
+    ...persistedTopicRecord,
+    adminMetaSentAt: now,
+    adminMetaMessageId: Number(sentMessage?.message_id || 0) || null,
+    updatedAt: now,
+  };
+
+  Object.assign(topicRecord, next);
+  await putJsonIfChanged(env, topicUserKey(topicRecord.userId), next, {
+    existing: persistedTopicRecord,
+    ttlMs: TOPIC_MAPPING_CACHE_TTL_MS,
+  });
 }
 
 async function ensureUserTopic(env, message, adminChatId) {
@@ -3979,27 +4594,33 @@ async function ensureUserTopic(env, message, adminChatId) {
     createdAt: new Date().toISOString(),
   };
 
-  await env.BOT_KV.put(topicUserKey(userId), JSON.stringify(record));
-  await env.BOT_KV.put(
+  await putJsonIfChanged(env, topicUserKey(userId), record, {
+    ttlMs: TOPIC_MAPPING_CACHE_TTL_MS,
+  });
+  await putJsonIfChanged(
+    env,
     topicThreadKey(record.threadId),
-    JSON.stringify({
+    {
       threadId: record.threadId,
       userId,
       createdAt: record.createdAt,
-    }),
+    },
+    {
+      ttlMs: TOPIC_MAPPING_CACHE_TTL_MS,
+    },
   );
 
-  return record;
+  return { ...record, _createdNow: true };
 }
 
 async function getTopicByUser(env, userId) {
   if (!env.BOT_KV) return null;
-  return getJson(env.BOT_KV, topicUserKey(userId));
+  return getCachedJson(env, topicUserKey(userId), TOPIC_MAPPING_CACHE_TTL_MS);
 }
 
 async function getUserIdByThread(env, threadId) {
   if (!env.BOT_KV) return null;
-  const record = await getJson(env.BOT_KV, topicThreadKey(threadId));
+  const record = await getCachedJson(env, topicThreadKey(threadId), TOPIC_MAPPING_CACHE_TTL_MS);
   return record?.userId ? Number(record.userId) : null;
 }
 
@@ -4013,7 +4634,7 @@ function buildTopicName(sender, chat) {
 
 async function getUserVerificationState(env, userId) {
   if (!env.BOT_KV) return null;
-  return getJson(env.BOT_KV, verifyKey(userId));
+  return getCachedJson(env, verifyKey(userId), VERIFY_STATE_CACHE_TTL_MS);
 }
 
 async function createOrRefreshVerificationWebSession(env, userId, options = {}) {
@@ -4087,7 +4708,7 @@ async function createOrRefreshVerificationWebSession(env, userId, options = {}) 
     updatedAt: new Date(now).toISOString(),
   };
 
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await putVerificationState(env, userId, nextState, { existing });
   await persistLatestVerificationSession(env, userId, nextState);
   return nextState;
 }
@@ -4106,7 +4727,7 @@ async function ensureVerificationSliderProofState(env, userId, state) {
     },
     updatedAt: new Date().toISOString(),
   };
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await putVerificationState(env, userId, nextState, { existing: current });
   await persistLatestVerificationSession(env, userId, nextState);
   return nextState;
 }
@@ -4674,7 +5295,7 @@ async function handleVerificationSessionApi(env, body, publicBaseUrl = '') {
   let state = await getUserVerificationState(env, userId);
   const latestState = await getLatestVerificationSessionState(env, userId, token);
   if (latestState && (!state?.sessionToken || !timingSafeEqualText(token, state.sessionToken))) {
-    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(latestState));
+    await putVerificationState(env, userId, latestState, { existing: state || null });
     state = latestState;
   }
   if (!state) {
@@ -4708,7 +5329,7 @@ async function handleVerificationSliderApi(env, body, publicBaseUrl = '') {
   let current = await getUserVerificationState(env, userId);
   const latestState = await getLatestVerificationSessionState(env, userId, token);
   if (latestState && (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken))) {
-    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(latestState));
+    await putVerificationState(env, userId, latestState, { existing: current || null });
     current = latestState;
   }
   if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
@@ -4750,7 +5371,7 @@ async function handleVerificationSliderApi(env, body, publicBaseUrl = '') {
       sessionExpiresAt: new Date(Date.now() + getVerifyWebSessionExpireMs(env)).toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+    await putVerificationState(env, userId, nextState, { existing: current });
     await persistLatestVerificationSession(env, userId, nextState);
     return await buildVerificationSessionPayload(nextState, env, publicBaseUrl);
   }
@@ -4778,7 +5399,7 @@ async function handleVerificationSliderApi(env, body, publicBaseUrl = '') {
     return await buildVerificationSessionPayload(locked, env, publicBaseUrl);
   }
 
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await putVerificationState(env, userId, nextState, { existing: current });
   await persistLatestVerificationSession(env, userId, nextState);
   return {
     ...(await buildVerificationSessionPayload(nextState, env, publicBaseUrl)),
@@ -4792,7 +5413,7 @@ async function handleVerificationGridApi(env, body, publicBaseUrl = '') {
   let current = await getUserVerificationState(env, userId);
   const latestState = await getLatestVerificationSessionState(env, userId, token);
   if (latestState && (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken))) {
-    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(latestState));
+    await putVerificationState(env, userId, latestState, { existing: current || null });
     current = latestState;
   }
   if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
@@ -4848,7 +5469,7 @@ async function handleVerificationGridApi(env, body, publicBaseUrl = '') {
     return await buildVerificationSessionPayload(locked, env, publicBaseUrl);
   }
 
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await putVerificationState(env, userId, nextState, { existing: current });
   await persistLatestVerificationSession(env, userId, nextState);
   return {
     ...(await buildVerificationSessionPayload(nextState, env, publicBaseUrl)),
@@ -4862,7 +5483,7 @@ async function handleVerificationChoiceApi(env, body, publicBaseUrl = '') {
   let current = await getUserVerificationState(env, userId);
   const latestState = await getLatestVerificationSessionState(env, userId, token);
   if (latestState && (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken))) {
-    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(latestState));
+    await putVerificationState(env, userId, latestState, { existing: current || null });
     current = latestState;
   }
   if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
@@ -4914,7 +5535,7 @@ async function handleVerificationChoiceApi(env, body, publicBaseUrl = '') {
     return await buildVerificationSessionPayload(locked, env, publicBaseUrl);
   }
 
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await putVerificationState(env, userId, nextState, { existing: current });
   await persistLatestVerificationSession(env, userId, nextState);
   return {
     ...(await buildVerificationSessionPayload(nextState, env, publicBaseUrl)),
@@ -5213,7 +5834,7 @@ async function lockVerificationAndReport(env, userId, state, detail = {}) {
     updatedAt: new Date().toISOString(),
   };
 
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await putVerificationState(env, userId, nextState, { existing: state || null });
   await clearLatestVerificationSession(env, userId);
 
   try {
@@ -5342,7 +5963,7 @@ async function adminApproveUserVerification(env, userId, operator = 'unknown', o
     updatedAt: nowIso,
   };
 
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await putVerificationState(env, userId, nextState, { existing });
   await clearLatestVerificationSession(env, userId);
 
   const promptMessageId = Number(nextState?.promptMessageId || 0);
@@ -5400,7 +6021,7 @@ async function createOrRefreshUserVerification(env, userId, forceNew = false) {
     updatedAt: new Date().toISOString(),
   };
 
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
+  await putVerificationState(env, userId, state, { existing });
   await clearLatestVerificationSession(env, userId);
   return state;
 }
@@ -5430,9 +6051,13 @@ async function setVerificationPromptMessageId(env, userId, messageId) {
     return;
   }
 
-  state.promptMessageId = Number(messageId);
-  state.updatedAt = new Date().toISOString();
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
+  const previousState = state;
+  state = {
+    ...state,
+    promptMessageId: Number(messageId),
+    updatedAt: new Date().toISOString(),
+  };
+  await putVerificationState(env, userId, state, { existing: previousState });
 }
 
 async function markUserVerified(env, userId) {
@@ -5462,7 +6087,7 @@ async function markUserVerified(env, userId) {
     postVerifyRemaining: getVerifyObserveMessageCount(env),
     updatedAt: nowIso,
   };
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
+  await putVerificationState(env, userId, state, { existing });
   await clearLatestVerificationSession(env, userId);
   return state;
 }
@@ -5489,7 +6114,7 @@ async function markUserVerificationFailed(env, userId, payload) {
     lastFailureAt: new Date(now).toISOString(),
     updatedAt: new Date(now).toISOString(),
   };
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
+  await putVerificationState(env, userId, state, { existing });
   await clearLatestVerificationSession(env, userId);
   return state;
 }
@@ -5558,7 +6183,7 @@ async function restartUserVerification(env, userId, operator = 'unknown') {
     restartedBy: operator,
   };
 
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(state));
+  await putVerificationState(env, userId, state, { existing });
   return state;
 }
 
@@ -5684,23 +6309,31 @@ async function runDataCleanup(env, options = {}) {
       const userId = Number(item.userId);
       const topicRecord = await getTopicByUser(env, userId);
       try {
-        await env.BOT_KV.delete(userKey(userId));
+        const key = userKey(userId);
+        await env.BOT_KV.delete(key);
+        noteKvJsonDelete(key);
         metrics.kv.deletedUsers += 1;
       } catch (error) {
         metrics.kv.errors += 1;
       }
 
       try {
-        await env.BOT_KV.delete(verifyKey(userId));
+        const key = verifyKey(userId);
+        await env.BOT_KV.delete(key);
+        noteKvJsonDelete(key);
         metrics.kv.deletedVerifyStates += 1;
       } catch (error) {
         metrics.kv.errors += 1;
       }
 
       try {
-        await env.BOT_KV.delete(topicUserKey(userId));
+        const key = topicUserKey(userId);
+        await env.BOT_KV.delete(key);
+        noteKvJsonDelete(key);
         if (Number.isFinite(Number(topicRecord?.threadId))) {
-          await env.BOT_KV.delete(topicThreadKey(Number(topicRecord.threadId)));
+          const threadKey = topicThreadKey(Number(topicRecord.threadId));
+          await env.BOT_KV.delete(threadKey);
+          noteKvJsonDelete(threadKey);
           metrics.kv.deletedTopicMappings += 1;
         }
       } catch (error) {
@@ -5744,6 +6377,9 @@ async function runDataCleanup(env, options = {}) {
         .bind(cutoffIso, batchSize * 2)
         .run();
       metrics.d1.deletedConversations = Number(deletedConversations?.meta?.changes || 0);
+      if (metrics.d1.deletedConversations > 0) {
+        messageHistoryConversationCache.clear();
+      }
     } catch (error) {
       metrics.d1.errors += 1;
     }
@@ -5982,6 +6618,7 @@ async function purgeDeletedUserData(env, userId, options = {}) {
   for (const [kind, key] of deletions) {
     try {
       await env.BOT_KV.delete(key);
+      noteKvJsonDelete(key);
       if (kind === 'user') kv.deletedUsers += 1;
       if (kind === 'verify') kv.deletedVerifyStates += 1;
       if (kind === 'topicUser') kv.deletedTopicMappings += 1;
@@ -5995,7 +6632,9 @@ async function purgeDeletedUserData(env, userId, options = {}) {
 
   try {
     if (Number.isFinite(Number(topicRecord?.threadId))) {
-      await env.BOT_KV.delete(topicThreadKey(Number(topicRecord.threadId)));
+      const key = topicThreadKey(Number(topicRecord.threadId));
+      await env.BOT_KV.delete(key);
+      noteKvJsonDelete(key);
       kv.deletedTopicMappings += 1;
     }
   } catch (error) {
@@ -6009,6 +6648,7 @@ async function purgeDeletedUserData(env, userId, options = {}) {
           .bind(userId)
           .run();
         d1.deletedVerificationStatuses = Number(deletedVerificationStatus?.meta?.changes || 0);
+        invalidateD1VerificationStatusCache(userId);
       }
     } catch (error) {
       d1.errors += 1;
@@ -6037,6 +6677,7 @@ async function purgeDeletedUserData(env, userId, options = {}) {
         .bind(userId)
         .run();
       d1.deletedConversations = Number(deletedConversations?.meta?.changes || 0);
+      clearMessageHistoryConversationId(userId);
     } catch (error) {
       d1.errors += 1;
     }
@@ -6294,7 +6935,7 @@ async function applyPostVerifyObservationLayer(message, env, adminChatId, preloa
       postVerifyRemaining: 0,
       updatedAt: new Date().toISOString(),
     };
-    await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+    await putVerificationState(env, userId, nextState, { existing: state });
     return false;
   }
 
@@ -6303,7 +6944,7 @@ async function applyPostVerifyObservationLayer(message, env, adminChatId, preloa
     postVerifyRemaining: Math.max(0, remaining - 1),
     updatedAt: new Date().toISOString(),
   };
-  await env.BOT_KV.put(verifyKey(userId), JSON.stringify(nextState));
+  await putVerificationState(env, userId, nextState, { existing: state });
   return true;
 }
 
@@ -6387,6 +7028,7 @@ async function getRuntimeEnv(env) {
     'WEBHOOK_PATH',
     'TOPIC_MODE',
     'USER_VERIFICATION',
+    'ADMIN_META_MODE',
     'WELCOME_TYPE',
     'WELCOME_MEDIA',
     'WELCOME_TEXT',
@@ -6443,6 +7085,7 @@ async function saveMessageHistory(env, entry) {
   try {
     const userId = Number(entry.userId);
     if (!Number.isFinite(userId)) return;
+    if (shouldSkipDuplicateMessageHistory(entry, userId)) return;
 
     const nowIso = new Date().toISOString();
     await env.DB.prepare(
@@ -6457,10 +7100,15 @@ async function saveMessageHistory(env, entry) {
       .bind(userId, entry.chatType || null, entry.topicId || null, nowIso)
       .run();
 
-    const conversation = await env.DB.prepare('SELECT id FROM conversations WHERE user_id = ?1 LIMIT 1')
-      .bind(userId)
-      .first();
-    if (!conversation?.id) return;
+    let conversationId = readMessageHistoryConversationId(userId);
+    if (!conversationId) {
+      const conversation = await env.DB.prepare('SELECT id FROM conversations WHERE user_id = ?1 LIMIT 1')
+        .bind(userId)
+        .first();
+      conversationId = Number(conversation?.id || 0);
+      if (!conversationId) return;
+      writeMessageHistoryConversationId(userId, conversationId);
+    }
 
     await env.DB.prepare(
       `INSERT INTO messages (
@@ -6469,7 +7117,7 @@ async function saveMessageHistory(env, entry) {
       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
     )
       .bind(
-        Number(conversation.id),
+        conversationId,
         userId,
         entry.telegramMessageId || null,
         entry.direction,
@@ -6487,10 +7135,23 @@ async function saveMessageHistory(env, entry) {
 }
 
 async function listMessageHistory(env, options = {}) {
-  if (!env.DB) return [];
+  if (!env.DB) {
+    return {
+      items: [],
+      nextCursor: null,
+      hasMore: false,
+    };
+  }
 
   const limit = clamp(Number(options.limit) || 50, 1, MAX_LIST_LIMIT);
+  const fetchLimit = limit + 1;
   const userId = options.userId ? Number(options.userId) : null;
+  const beforeId = Number(options.beforeId || 0);
+  const query = String(options.query || '').trim();
+  const direction = ['user_to_admin', 'admin_to_user'].includes(String(options.direction || ''))
+    ? String(options.direction)
+    : '';
+  const messageType = String(options.messageType || '').trim().toLowerCase();
   const baseSql = `SELECT
       m.id,
       m.user_id,
@@ -6505,13 +7166,50 @@ async function listMessageHistory(env, options = {}) {
       c.chat_type
     FROM messages m
     INNER JOIN conversations c ON c.id = m.conversation_id`;
+  const where = [];
+  const params = [];
 
-  const statement = userId
-    ? env.DB.prepare(`${baseSql} WHERE m.user_id = ?1 ORDER BY m.created_at DESC LIMIT ?2`).bind(userId, limit)
-    : env.DB.prepare(`${baseSql} ORDER BY m.created_at DESC LIMIT ?1`).bind(limit);
+  if (userId) {
+    params.push(userId);
+    where.push(`m.user_id = ?${params.length}`);
+  }
+
+  if (Number.isFinite(beforeId) && beforeId > 0) {
+    params.push(beforeId);
+    where.push(`m.id < ?${params.length}`);
+  }
+
+  if (direction) {
+    params.push(direction);
+    where.push(`m.direction = ?${params.length}`);
+  }
+
+  if (messageType && /^[a-z0-9_-]{1,32}$/.test(messageType)) {
+    params.push(messageType);
+    where.push(`m.message_type = ?${params.length}`);
+  }
+
+  if (query) {
+    const escaped = query.replace(/[\\%_]/g, (hit) => `\\${hit}`);
+    params.push(`%${escaped}%`);
+    where.push(`m.text_content LIKE ?${params.length} ESCAPE '\\'`);
+  }
+
+  params.push(fetchLimit);
+  const limitPlaceholder = `?${params.length}`;
+  const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+  const statement = env.DB.prepare(`${baseSql}${whereSql} ORDER BY m.id DESC LIMIT ${limitPlaceholder}`).bind(...params);
 
   const result = await statement.all();
-  return Array.isArray(result?.results) ? result.results : [];
+  const rows = Array.isArray(result?.results) ? result.results : [];
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+  const last = items[items.length - 1] || null;
+  return {
+    items,
+    nextCursor: hasMore && last?.id ? String(last.id) : null,
+    hasMore,
+  };
 }
 
 
@@ -6763,6 +7461,7 @@ async function getEffectiveSystemConfig(env) {
     'WEBHOOK_PATH',
     'TOPIC_MODE',
     'USER_VERIFICATION',
+    'ADMIN_META_MODE',
     'WELCOME_TYPE',
     'WELCOME_MEDIA',
     'BOT_DESCRIPTION',
@@ -7039,6 +7738,7 @@ async function updateSystemConfig(env, payload) {
     'WEBHOOK_PATH',
     'TOPIC_MODE',
     'USER_VERIFICATION',
+    'ADMIN_META_MODE',
     'WELCOME_TYPE',
     'WELCOME_MEDIA',
     'WELCOME_TEXT',
@@ -7180,6 +7880,7 @@ function buildSystemConfigView(config) {
     WEBHOOK_PATH: config.WEBHOOK_PATH || '',
     TOPIC_MODE: config.TOPIC_MODE || '',
     USER_VERIFICATION: config.USER_VERIFICATION || '',
+    ADMIN_META_MODE: getAdminMetaMode(config),
     VERIFY_EXPIRE_MS: config.VERIFY_EXPIRE_MS || '',
     VERIFY_FAIL_BLOCK_MS: config.VERIFY_FAIL_BLOCK_MS || '',
     VERIFY_TIMEOUT_BLOCK_MS: config.VERIFY_TIMEOUT_BLOCK_MS || '',
@@ -7681,7 +8382,10 @@ async function syncTelegramProfile(env, userId, options = {}) {
     record.lastProfileSyncAt = nowIso;
     record.profileSyncError = null;
     if (env.BOT_KV && persistProfile) {
-      await env.BOT_KV.put(userKey(numericUserId), JSON.stringify(record));
+      await putJsonIfChanged(env, userKey(numericUserId), record, {
+        existing,
+        ttlMs: USER_PROFILE_CACHE_TTL_MS,
+      });
     }
     return record;
   } catch (error) {
@@ -7689,7 +8393,10 @@ async function syncTelegramProfile(env, userId, options = {}) {
     record.profileStatus = record.firstName || record.lastName || record.username ? 'partial' : 'error';
     record.profileSyncError = error instanceof Error ? error.message : String(error);
     if (env.BOT_KV && persistProfile) {
-      await env.BOT_KV.put(userKey(numericUserId), JSON.stringify(record));
+      await putJsonIfChanged(env, userKey(numericUserId), record, {
+        existing,
+        ttlMs: USER_PROFILE_CACHE_TTL_MS,
+      });
     }
     return record;
   }
@@ -7916,6 +8623,12 @@ function parseLimit(value, fallback) {
   const limit = Number(value);
   if (!Number.isFinite(limit)) return fallback;
   return clamp(limit, 1, MAX_LIST_LIMIT);
+}
+
+function parseOffset(value, fallback = 0) {
+  const offset = Number(value);
+  if (!Number.isFinite(offset) || offset < 0) return fallback;
+  return Math.floor(offset);
 }
 
 function clamp(value, min, max) {

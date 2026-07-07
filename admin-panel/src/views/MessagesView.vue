@@ -9,7 +9,7 @@
         </div>
         <div class="panel-toolbar">
           <n-button type="primary" :loading="saving" @click="save">{{ t('messages.save') }}</n-button>
-          <n-button secondary :loading="loading" @click="load">{{ t('messages.reload') }}</n-button>
+          <n-button secondary :loading="loading" @click="load(true)">{{ t('messages.reload') }}</n-button>
         </div>
       </div>
     </n-card>
@@ -170,10 +170,10 @@ function assignConfig(cfg = {}) {
   form.BLOCKED_TEXT = cfg.BLOCKED_TEXT || '';
 }
 
-async function load() {
+async function load(force = false) {
   loading.value = true;
   try {
-    const data = await fetchSystemConfig();
+    const data = await fetchSystemConfig({ force });
     assignConfig(data.config || {});
   } catch (error) {
     message.error(error.message || t('messages.loadFailed'));
@@ -194,7 +194,7 @@ async function save() {
       BLOCKED_TEXT: form.BLOCKED_TEXT,
     });
     message.success(t('messages.saveSuccess'));
-    await load();
+    await load(true);
   } catch (error) {
     message.error(error.message || t('messages.saveFailed'));
   } finally {
@@ -238,7 +238,7 @@ async function uploadSelectedWelcomeMedia() {
   }
 }
 
-onMounted(load);
+onMounted(() => load(false));
 </script>
 
 <style scoped>
