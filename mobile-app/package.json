@@ -9,6 +9,7 @@
     "prebuild": "npm run sync-assets",
     "dev": "vite",
     "build": "vite build",
+    "build:android:release": "node ../scripts/build-mobile-release.mjs",
     "preview": "vite preview",
     "cap:add": "npx cap add android",
     "cap:sync": "npx cap sync android",
