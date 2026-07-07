@@ -6,7 +6,6 @@
     "build:panel": "npm --prefix admin-panel run build",
     "build:mobile:release": "node scripts/build-mobile-release.mjs",
     "build:stable": "node scripts/build-stable-release.mjs",
-    "check:windows-signing": "node scripts/check-windows-signing.mjs",
     "verify:release-signatures": "node scripts/verify-release-signatures.mjs"
   },
   "devDependencies": {}

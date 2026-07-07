@@ -65,7 +65,7 @@
     "win": {
       "target": "nsis",
       "icon": null,
-      "signAndEditExecutable": true
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,

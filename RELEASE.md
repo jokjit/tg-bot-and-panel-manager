@@ -1,6 +1,6 @@
 # Release Process
 
-Stable releases must use a new version number and only publish signed artifacts.
+Stable releases must use a new version number. Android artifacts must be signed before publishing.
 
 ## Versioning
 
@@ -13,24 +13,9 @@ Update every app package before publishing a stable release:
 
 Use patch versions for compatible fixes and optimizations, minor versions for new user-facing features, and major versions for breaking changes.
 
-## Windows Signing
+## Windows Desktop
 
-Windows stable installers must pass Authenticode verification.
-
-Configure one of the following before building:
-
-```powershell
-$env:CSC_LINK = "C:\path\to\code-signing-cert.pfx"
-$env:CSC_KEY_PASSWORD = "pfx-password"
-```
-
-or install a Code Signing certificate into the Windows certificate store.
-
-Check readiness:
-
-```powershell
-npm run check:windows-signing
-```
+Windows desktop installers do not require code signing for stable releases. Publish the installer produced by the stable build.
 
 ## Android Signing
 
@@ -60,7 +45,7 @@ Build only the signed Android APK:
 npm run build:mobile:release
 ```
 
-Build all stable artifacts and enforce signatures:
+Build all stable artifacts and enforce the Android signature:
 
 ```powershell
 npm run build:stable
@@ -72,4 +57,4 @@ Verify release artifacts after building:
 npm run verify:release-signatures
 ```
 
-`build:stable` and `verify:release-signatures` fail if the Windows installer is unsigned or the Android APK signature is invalid.
+`build:stable` and `verify:release-signatures` fail if the Android APK signature is invalid or any expected artifact is missing.

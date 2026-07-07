@@ -1,7 +1,6 @@
 import { copyFileSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  assertWindowsCodeSigningReady,
   commandName,
   readJson,
   releaseDirForVersion,
@@ -19,7 +18,6 @@ if (version !== mobileVersion) {
 const releaseDir = releaseDirForVersion(version);
 mkdirSync(releaseDir, { recursive: true });
 
-assertWindowsCodeSigningReady();
 run(commandName('npm'), ['--prefix', 'electron-app', 'run', 'build']);
 
 const installerSource = join(repoRoot, 'electron-app', 'dist', 'tg-bot-deploy-setup.exe');
