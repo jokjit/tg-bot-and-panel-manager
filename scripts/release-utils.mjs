@@ -110,3 +110,55 @@ export function verifyWindowsSignature(exePath) {
     stdio: 'inherit',
   });
 }
+
+function getWindowsCodeSigningCertStoreCount() {
+  if (process.platform !== 'win32') return 0;
+  const script = [
+    '$current = @(Get-ChildItem Cert:\\CurrentUser\\My -CodeSigningCert -ErrorAction SilentlyContinue).Count',
+    '$local = @(Get-ChildItem Cert:\\LocalMachine\\My -CodeSigningCert -ErrorAction SilentlyContinue).Count',
+    'Write-Output ($current + $local)',
+  ].join('; ');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    cwd: repoRoot,
+    stdio: 'pipe',
+    shell: false,
+    windowsHide: true,
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) return 0;
+  const count = Number(String(result.stdout || '').trim());
+  return Number.isFinite(count) ? count : 0;
+}
+
+export function getWindowsCodeSigningStatus() {
+  const cscLink = String(process.env.CSC_LINK || '').trim();
+  const cscPassword = String(process.env.CSC_KEY_PASSWORD || '').trim();
+  if (cscLink && cscPassword) {
+    return { ready: true, source: 'CSC_LINK' };
+  }
+  if (cscLink && !cscPassword) {
+    return { ready: false, source: 'CSC_LINK', reason: 'CSC_KEY_PASSWORD is missing' };
+  }
+
+  const certStoreCount = getWindowsCodeSigningCertStoreCount();
+  if (certStoreCount > 0) {
+    return { ready: true, source: 'Windows certificate store' };
+  }
+
+  return {
+    ready: false,
+    source: 'none',
+    reason: 'No CSC_LINK/CSC_KEY_PASSWORD pair and no Windows Code Signing certificate found',
+  };
+}
+
+export function assertWindowsCodeSigningReady() {
+  const status = getWindowsCodeSigningStatus();
+  if (!status.ready) {
+    throw new Error(
+      `Windows code signing is not configured: ${status.reason}. Configure CSC_LINK + CSC_KEY_PASSWORD or install a Code Signing certificate.`,
+    );
+  }
+  console.log(`Windows code signing: ${status.source}`);
+  return status;
+}
