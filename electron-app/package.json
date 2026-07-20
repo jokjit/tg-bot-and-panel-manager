@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node start.js",
     "build:panel": "npm --prefix ../admin-panel run build",
+    "prebuild": "npm --prefix .. run build:worker",
     "build": "npm run build:panel && electron-builder --win --x64"
   },
   "dependencies": {
@@ -36,8 +37,8 @@
         "to": "shared"
       },
       {
-        "from": "../worker.js",
-        "to": "worker.js"
+        "from": "../worker.bundle.js",
+        "to": "worker.bundle.js"
       },
       {
         "from": "../wrangler.toml",

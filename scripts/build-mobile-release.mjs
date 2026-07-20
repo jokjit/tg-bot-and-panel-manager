@@ -2,15 +2,15 @@ import { copyFileSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   commandName,
-  readJson,
   releaseDirForVersion,
   repoRoot,
   run,
   sha256,
   verifyAndroidApkSignature,
 } from './release-utils.mjs';
+import { assertVersionConsistency } from './check-version-consistency.mjs';
 
-const version = readJson('mobile-app/package.json').version;
+const { version } = assertVersionConsistency();
 const releaseDir = releaseDirForVersion(version);
 const androidDir = join(repoRoot, 'mobile-app', 'android');
 const gradleCommand = process.platform === 'win32' ? 'gradlew.bat' : './gradlew';

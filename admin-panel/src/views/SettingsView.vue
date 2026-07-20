@@ -175,6 +175,9 @@
                   <n-button secondary :loading="cleanupRunning" @click="runCleanupNow">
                     {{ t('settings.runCleanupNow') }}
                   </n-button>
+                  <n-button secondary :loading="directoryBackfillRunning" @click="runDirectoryBackfillNow">
+                    {{ t('settings.runDirectoryBackfillNow') }}
+                  </n-button>
                 </div>
               </div>
 
@@ -274,7 +277,13 @@ import {
   useMessage,
 } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
-import { fetchSystemConfig, runDeletedAccountSweep, runMaintenanceCleanup, saveSystemConfig } from '../services/api';
+import {
+  fetchSystemConfig,
+  runDeletedAccountSweep,
+  runDirectoryIndexBackfill,
+  runMaintenanceCleanup,
+  saveSystemConfig,
+} from '../services/api';
 import { setMotion, uiStore } from '../stores/ui';
 
 const DEFAULT_VERIFY_EXPIRE_MS = 15 * 60 * 1000;
@@ -291,6 +300,7 @@ const loading = ref(false);
 const saving = ref(false);
 const cleanupRunning = ref(false);
 const deletedSweepRunning = ref(false);
+const directoryBackfillRunning = ref(false);
 const motionLevel = ref(uiStore.motion);
 
 const motionOptions = computed(() => [
@@ -496,6 +506,24 @@ async function runDeletedSweepNow() {
     message.error(error.message || t('settings.deletedSweepFailed'));
   } finally {
     deletedSweepRunning.value = false;
+  }
+}
+
+async function runDirectoryBackfillNow() {
+  directoryBackfillRunning.value = true;
+  try {
+    const response = await runDirectoryIndexBackfill({ batchSize: 200 });
+    const result = response?.result || {};
+    const state = result?.state || {};
+    message.success(t('settings.directoryBackfillDone', {
+      processed: Number(result.processedThisRun || 0),
+      written: Number(result.writtenThisRun || 0),
+      status: state.status || result.skipped || 'unknown',
+    }));
+  } catch (error) {
+    message.error(error.message || t('settings.directoryBackfillFailed'));
+  } finally {
+    directoryBackfillRunning.value = false;
   }
 }
 

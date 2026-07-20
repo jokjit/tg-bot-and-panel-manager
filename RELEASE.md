@@ -39,6 +39,12 @@ The keystore directory is ignored by Git.
 
 ## Build Commands
 
+Validate package, lockfile, and Android versions:
+
+```powershell
+npm run check:versions
+```
+
 Build only the signed Android APK:
 
 ```powershell

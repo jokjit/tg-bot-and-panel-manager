@@ -9,9 +9,15 @@
         </div>
         <div class="panel-toolbar">
           <div class="toolbar-chip">{{ t('app.limit') }}</div>
-          <n-input-number v-model:value="limit" :min="1" :max="100" />
+          <n-input-number :value="limit" :min="1" :max="100" @update:value="onLimitChange" />
           <n-button type="primary" :loading="loading" @click="loadList(true)">{{ t('trust.refresh') }}</n-button>
-          <n-tag round>{{ t('trust.total', { count: trustList.length }) }}</n-tag>
+          <n-button secondary :disabled="!canGoPrev || loading" @click="loadPreviousPage">
+            {{ t('users.prevPage') }}
+          </n-button>
+          <n-button secondary :disabled="!hasMore || loading" @click="loadNextPage">
+            {{ t('users.nextPage') }}
+          </n-button>
+          <n-tag round>{{ pageStatusText }}</n-tag>
         </div>
       </div>
     </n-card>
@@ -211,6 +217,11 @@ const loading = ref(false);
 const saving = ref(false);
 const limit = ref(50);
 const trustList = ref([]);
+const offset = ref(0);
+const hasMore = ref(false);
+const nextOffset = ref(null);
+const prevOffset = ref(null);
+const totalItems = ref(0);
 
 const form = reactive({
   userId: '',
@@ -222,12 +233,23 @@ const summaryCards = computed(() => {
   const withNote = list.filter((item) => String(item.note || '').trim()).length;
   const withAvatar = list.filter((item) => item.hasAvatar).length;
   return [
-    { key: 'total', label: t('trust.title'), value: String(list.length), icon: 'solar:verified-check-bold', tone: 'green' },
+    { key: 'total', label: t('trust.title'), value: String(totalItems.value), icon: 'solar:verified-check-bold', tone: 'green' },
     { key: 'notes', label: t('trust.note'), value: String(withNote), icon: 'solar:notes-bold', tone: 'amber' },
     { key: 'avatar', label: t('profile.avatar'), value: `${withAvatar}/${list.length || 0}`, icon: 'solar:user-circle-bold', tone: 'blue' },
     { key: 'latest', label: t('trust.addedAt'), value: list[0]?.createdAt ? toLocalTime(list[0].createdAt) : '-', icon: 'solar:clock-circle-bold', tone: 'orange' },
   ];
 });
+
+const canGoPrev = computed(() => offset.value > 0);
+const currentPage = computed(() => Math.floor(offset.value / Math.max(1, Number(limit.value) || 50)) + 1);
+const pageStart = computed(() => (trustList.value.length ? offset.value + 1 : 0));
+const pageEnd = computed(() => offset.value + trustList.value.length);
+const pageStatusText = computed(() => t('users.pageStatus', {
+  page: currentPage.value,
+  start: pageStart.value,
+  end: pageEnd.value,
+  total: totalItems.value,
+}));
 
 function toLocalTime(value) {
   if (!value) return '-';
@@ -268,16 +290,43 @@ function avatarUrlOf(item) {
   return resolveProtectedMediaUrl(item?.avatarUrl || '');
 }
 
-async function loadList(force = false) {
+async function loadList(force = false, requestedOffset = offset.value) {
   loading.value = true;
   try {
-    const data = await fetchTrust(limit.value || 50, { force });
+    const data = await fetchTrust({
+      limit: limit.value || 50,
+      offset: Math.max(0, Number(requestedOffset) || 0),
+      force,
+    });
     trustList.value = data.trust || [];
+    offset.value = Number(data.offset ?? requestedOffset) || 0;
+    hasMore.value = Boolean(data.hasMore);
+    nextOffset.value = data.nextOffset ?? null;
+    prevOffset.value = data.prevOffset ?? null;
+    totalItems.value = Number(data.total ?? trustList.value.length) || 0;
   } catch (error) {
     message.error(error.message || t('trust.loadFailed'));
   } finally {
     loading.value = false;
   }
+}
+
+function onLimitChange(value) {
+  limit.value = Math.max(1, Math.min(100, Number(value) || 50));
+  offset.value = 0;
+  nextOffset.value = null;
+  prevOffset.value = null;
+  hasMore.value = false;
+}
+
+function loadPreviousPage() {
+  const fallbackOffset = Math.max(0, offset.value - (Number(limit.value) || 50));
+  return loadList(false, prevOffset.value ?? fallbackOffset);
+}
+
+function loadNextPage() {
+  if (nextOffset.value === null) return null;
+  return loadList(false, nextOffset.value);
 }
 
 async function addTrust() {
@@ -311,6 +360,7 @@ async function removeItem(row) {
     });
     message.success(t('trust.removeSuccess'));
     await loadList(true);
+    if (!trustList.value.length && offset.value > 0) await loadPreviousPage();
   } catch (error) {
     message.error(error.message || t('trust.removeFailed'));
   }

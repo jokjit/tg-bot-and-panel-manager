@@ -32,9 +32,9 @@ scripts/           # 配置合并和资源初始化辅助脚本
 该项目已发布便携式客户端
 
 ```bash
-cd electron-app
-npm install
-npm run build
+npm ci
+npm --prefix electron-app ci
+npm --prefix electron-app run build
 ```
 
 安装包输出到 `electron-app/dist/tg-bot-deploy-setup.exe`。
@@ -74,6 +74,12 @@ pages域名一样建议不填使用默认分配好的即可，直接在你的wor
 | 部署面板 | 更新 `admin-panel/` 后重新构建并上传 Pages |
 | 初始化 KV/D1 | 自动创建或复用当前 Cloudflare 账号下的资源 |
 | 切换账号 | 客户端按 Cloudflare Account ID 隔离本地配置和资源绑定 |
+
+### 数据索引与分页
+
+用户资料、黑名单和信任名单以 KV 保存运行时状态，并同步写入 D1 查询索引。升级已有部署后，定时维护会使用 KV cursor 分批回填历史数据；回填完成前后台继续读取完整 KV 列表，完成后自动切换到 D1 分页查询，D1 查询异常时仍会回退 KV。
+
+管理员可通过 `POST /admin/api/maintenance/directory-index-backfill` 手动推进回填，JSON 参数支持 `batchSize` 和 `reset`。`GET /admin/api/status` 的 `directoryIndexBackfill` 字段包含当前阶段、cursor、处理数量和完成状态。
 
 ## 配置说明
 

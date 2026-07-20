@@ -128,7 +128,7 @@ async function copyPanelAssets(panelDistDir) {
 }
 
 async function main() {
-  const workerSrc = path.join(repoRoot, 'worker.js');
+  const workerSrc = path.join(repoRoot, 'worker.bundle.js');
   const wranglerSrc = path.join(repoRoot, 'wrangler.toml');
   const migrationsSrcDir = path.join(repoRoot, 'migrations');
   const panelDistDir = path.join(repoRoot, 'admin-panel', 'dist');

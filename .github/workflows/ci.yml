@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  repository-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install root dependencies
+        run: npm ci
+      - name: Lint JavaScript sources
+        run: npm run lint
+      - name: Type-check mobile sources
+        run: npm run typecheck
+      - name: Run repository tests
+        run: npm test
+      - name: Run Worker integration tests
+        run: npm run test:integration
+      - name: Check release versions
+        run: npm run check:versions
+      - name: Validate Worker source and bundle syntax
+        run: |
+          node --check worker.js
+          node --check worker.bundle.js
+
+  frontend-builds:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: admin-panel
+            path: admin-panel
+            command: npm run build
+          - name: mobile-app
+            path: mobile-app
+            command: npm run build
+          - name: electron-renderer
+            path: electron-app
+            command: npm run build:panel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ matrix.path }}/package-lock.json
+      - name: Install root dependencies
+        run: npm ci
+      - name: Build Worker bundle
+        run: npm run build:worker
+      - name: Install dependencies
+        run: npm ci
+        working-directory: ${{ matrix.path }}
+      - name: Build ${{ matrix.name }}
+        run: ${{ matrix.command }}
+        working-directory: ${{ matrix.path }}
+
+  android-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mobile-app/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install root dependencies
+        run: npm ci
+      - name: Install mobile dependencies
+        run: npm ci
+        working-directory: mobile-app
+      - name: Build and sync mobile assets
+        run: npm run build && npm run cap:sync
+        working-directory: mobile-app
+      - name: Validate Android debug build
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest assembleDebug
+        working-directory: mobile-app/android

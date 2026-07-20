@@ -4,11 +4,12 @@
   "version": "2.3.4",
   "type": "module",
   "scripts": {
-    "sync-assets": "node ./scripts/sync-assets.mjs",
+    "sync-assets": "npm --prefix .. run build:worker && node ./scripts/sync-assets.mjs",
     "predev": "npm run sync-assets",
     "prebuild": "npm run sync-assets",
     "dev": "vite",
     "build": "vite build",
+    "typecheck": "tsc --noEmit",
     "build:android:release": "node ../scripts/build-mobile-release.mjs",
     "preview": "vite preview",
     "cap:add": "npx cap add android",

@@ -18,14 +18,40 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: electron-app/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            electron-app/package-lock.json
+            admin-panel/package-lock.json
+            mobile-app/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install mobile dependencies
+        run: npm ci
+        working-directory: mobile-app
+
+      - name: Lint JavaScript sources
+        run: npm run lint
+
+      - name: Type-check mobile sources
+        run: npm run typecheck
+
+      - name: Run repository tests
+        run: npm test
+
+      - name: Run Worker integration tests
+        run: npm run test:integration
+
+      - name: Check release versions
+        run: npm run check:versions
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
         working-directory: electron-app
 
       - name: Install admin-panel dependencies
-        run: npm install
+        run: npm ci
         working-directory: admin-panel
 
       - name: Build exe

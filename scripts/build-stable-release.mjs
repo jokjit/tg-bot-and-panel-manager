@@ -2,18 +2,14 @@ import { copyFileSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   commandName,
-  readJson,
   releaseDirForVersion,
   repoRoot,
   run,
   sha256,
 } from './release-utils.mjs';
+import { assertVersionConsistency } from './check-version-consistency.mjs';
 
-const version = readJson('electron-app/package.json').version;
-const mobileVersion = readJson('mobile-app/package.json').version;
-if (version !== mobileVersion) {
-  throw new Error(`Release versions differ: electron=${version}, mobile=${mobileVersion}`);
-}
+const { version } = assertVersionConsistency();
 
 const releaseDir = releaseDirForVersion(version);
 mkdirSync(releaseDir, { recursive: true });

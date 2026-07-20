@@ -8,7 +8,13 @@ import {
   runDeploy,
   type DashboardSnapshot,
   type DeployFormState,
+  type DeploymentResumeState,
 } from './deploy';
+import {
+  loadAccountCredentials,
+  removeAccountCredentials,
+  saveAccountCredentials,
+} from './secure-credentials';
 
 type Locale = 'zh' | 'en';
 type Theme = 'light' | 'dark';
@@ -249,6 +255,7 @@ const i18n: Record<Locale, LocaleDict> = {
     account_manager_add: '添加一个账号',
     account_manager_close: '关闭',
     account_manager_active: '激活账号',
+    account_manager_clear_credentials: '清除凭据',
     account_manager_delete: '删除',
     account_meta_email_label: '邮箱',
     account_meta_id_label: 'Account ID',
@@ -320,8 +327,10 @@ const i18n: Record<Locale, LocaleDict> = {
     log_account_created: '已创建新账号：{name}',
     log_account_deleted: '已删除账号：{name}',
     log_account_switched: '已切换到账号：{name}',
+    log_credentials_cleared: '已清除账号凭据：{name}',
     log_deploy_start: '已开始执行部署。',
     log_cors_tip: '浏览器模式可能受 CORS 限制，建议优先使用原生 App。',
+    log_deploy_resume: '检测到上次失败部署，将从已完成步骤后继续。',
     log_summary_title: '部署完成摘要：',
     log_worker: 'Worker',
     log_worker_url: 'Worker URL',
@@ -338,6 +347,8 @@ const i18n: Record<Locale, LocaleDict> = {
     alert_add_required: '请填写账号名称、API Token 和 Account ID。',
     alert_keep_one: '至少保留一个账号。',
     alert_delete_confirm: '确认删除当前账号？',
+    alert_clear_credentials_confirm: '清除此账号保存的 Cloudflare Token、Bot Token 和管理员 ID？',
+    alert_clear_credentials_failed: '无法清除安全凭据，请重试。',
   },
   en: {
     badge: 'MIUIX Style',
@@ -418,6 +429,7 @@ const i18n: Record<Locale, LocaleDict> = {
     account_manager_add: 'Add an account',
     account_manager_close: 'Close',
     account_manager_active: 'Active',
+    account_manager_clear_credentials: 'Clear credentials',
     account_manager_delete: 'Delete',
     account_meta_email_label: 'Email',
     account_meta_id_label: 'Account ID',
@@ -489,8 +501,10 @@ const i18n: Record<Locale, LocaleDict> = {
     log_account_created: 'Account created: {name}',
     log_account_deleted: 'Account deleted: {name}',
     log_account_switched: 'Switched to account: {name}',
+    log_credentials_cleared: 'Credentials cleared: {name}',
     log_deploy_start: 'Deploy started.',
     log_cors_tip: 'Browser mode may be limited by CORS. Native app mode is recommended.',
+    log_deploy_resume: 'The previous deployment failed; resuming after completed steps.',
     log_summary_title: 'Deploy summary:',
     log_worker: 'Worker',
     log_worker_url: 'Worker URL',
@@ -507,6 +521,8 @@ const i18n: Record<Locale, LocaleDict> = {
     alert_add_required: 'Name, API Token, and Account ID are required.',
     alert_keep_one: 'At least one account must remain.',
     alert_delete_confirm: 'Delete current account?',
+    alert_clear_credentials_confirm: 'Clear the saved Cloudflare token, bot token, and admin ID for this account?',
+    alert_clear_credentials_failed: 'Unable to clear secure credentials. Please retry.',
   },
 };
 
@@ -904,6 +920,7 @@ let accountSwitchQueue: Promise<void> = Promise.resolve();
 let dashboardRequestSeq = 0;
 let dashboardLoading = false;
 const dashboardCacheByAccountId = new Map<string, DashboardSnapshot>();
+const deploymentResumeByAccountId = new Map<string, { fingerprint: string; state: DeploymentResumeState }>();
 
 function mustQuery<T extends Element>(selector: string): T {
   const node = document.querySelector<T>(selector);
@@ -1046,6 +1063,19 @@ function cloneFormState(state: DeployFormState): DeployFormState {
   };
 }
 
+function buildDeploymentFingerprint(state: DeployFormState): string {
+  return JSON.stringify(state);
+}
+
+function stripPersistedCredentials(state: DeployFormState): DeployFormState {
+  return {
+    ...state,
+    cfApiToken: '',
+    botToken: '',
+    adminChatId: '',
+  };
+}
+
 function createAccount(name: string, form: DeployFormState, email = ''): AccountState {
   const now = Date.now();
   return {
@@ -1088,7 +1118,7 @@ async function loadUiState(defaults: DeployFormState): Promise<UiCache> {
             email: normalizeAccountEmail(item?.email),
             createdAt: Number(item?.createdAt || Date.now()),
             updatedAt: Number(item?.updatedAt || Date.now()),
-            form: cloneFormState(normalizeFormState(item?.form || {}, defaults)),
+            form: stripPersistedCredentials(normalizeFormState(item?.form || {}, defaults)),
           } as AccountState;
         })
       : [];
@@ -1130,9 +1160,37 @@ async function persistUiState(): Promise<void> {
     locale: currentLocale,
     theme: currentTheme,
     activeAccountId,
-    accounts,
+    accounts: accounts.map((account) => ({
+      ...account,
+      form: stripPersistedCredentials(account.form),
+    })),
   };
   await writeStorage(APP_STATE_KEY, JSON.stringify(payload));
+
+  const secureWrites = accounts.map((account) => saveAccountCredentials(account.id, {
+    cfApiToken: account.form.cfApiToken,
+    botToken: account.form.botToken,
+    adminChatId: account.form.adminChatId,
+  }));
+  try {
+    await Promise.all(secureWrites);
+  } catch (error) {
+    console.error('Unable to persist Android secure credentials', error);
+  }
+}
+
+async function restoreSecureAccountCredentials(items: AccountState[]): Promise<void> {
+  await Promise.all(items.map(async (account) => {
+    try {
+      const credentials = await loadAccountCredentials(account.id);
+      account.form = {
+        ...account.form,
+        ...credentials,
+      };
+    } catch (error) {
+      console.error(`Unable to restore Android secure credentials for account ${account.id}`, error);
+    }
+  }));
 }
 
 function queueAutoSave(): void {
@@ -1270,6 +1328,18 @@ function renderAccountManagerList(): void {
 
     switchBtn.append(avatar, body);
 
+    const actions = document.createElement('span');
+    actions.className = 'mi-account-manager-item__actions';
+
+    const clearCredentialsBtn = document.createElement('button');
+    clearCredentialsBtn.type = 'button';
+    clearCredentialsBtn.className = 'mi-account-manager-item__delete mi-account-manager-item__clear';
+    clearCredentialsBtn.dataset.accountClearCredentials = account.id;
+    clearCredentialsBtn.textContent = '⌫';
+    clearCredentialsBtn.title = t('account_manager_clear_credentials');
+    clearCredentialsBtn.disabled = busy;
+    clearCredentialsBtn.setAttribute('aria-label', t('account_manager_clear_credentials'));
+
     const deleteBtn = document.createElement('button');
     deleteBtn.type = 'button';
     deleteBtn.className = 'mi-account-manager-item__delete';
@@ -1279,7 +1349,8 @@ function renderAccountManagerList(): void {
     deleteBtn.disabled = busy || accounts.length <= 1;
     deleteBtn.setAttribute('aria-label', t('account_manager_delete'));
 
-    item.append(switchBtn, deleteBtn);
+    actions.append(clearCredentialsBtn, deleteBtn);
+    item.append(switchBtn, actions);
     fragment.append(item);
   }
 
@@ -2342,6 +2413,7 @@ async function deleteAccountById(accountId: string): Promise<void> {
   if (!target) return;
   const wasActive = target.id === activeAccountId;
 
+  deploymentResumeByAccountId.delete(target.id);
   accounts = accounts.filter((item) => item.id !== target.id);
   if (accounts.length === 0) return;
 
@@ -2356,11 +2428,45 @@ async function deleteAccountById(accountId: string): Promise<void> {
 
   renderAccountOptions();
 
+  try {
+    await removeAccountCredentials(target.id);
+  } catch (error) {
+    console.error(`Unable to remove Android secure credentials for account ${target.id}`, error);
+  }
   await persistUiState();
   appendLog(tf('log_account_deleted', { name: target.name }));
   if (activeViewId === 'home') {
     void refreshDashboard(true);
   }
+}
+
+async function clearCredentialsById(accountId: string): Promise<void> {
+  const target = accounts.find((item) => item.id === accountId);
+  if (!target || !confirm(t('alert_clear_credentials_confirm'))) return;
+
+  cancelAutoSave();
+  try {
+    await removeAccountCredentials(target.id);
+  } catch (error) {
+    console.error(`Unable to clear Android secure credentials for account ${target.id}`, error);
+    alert(t('alert_clear_credentials_failed'));
+    return;
+  }
+
+  target.form = {
+    ...target.form,
+    cfApiToken: '',
+    botToken: '',
+    adminChatId: '',
+  };
+  target.updatedAt = Date.now();
+  if (target.id === activeAccountId) {
+    setFormState(target.form);
+  }
+
+  await persistUiState();
+  renderAccountOptions();
+  appendLog(tf('log_credentials_cleared', { name: target.name }));
 }
 
 function bindAutoProjectName(): void {
@@ -2406,7 +2512,17 @@ async function onDeploy(): Promise<void> {
     appendLog(t('log_deploy_start'));
     appendLog(t('log_cors_tip'));
 
-    const result = await runDeploy(getFormState(), appendLog);
+    const form = getFormState();
+    const fingerprint = buildDeploymentFingerprint(form);
+    const activeBeforeDeploy = getActiveAccount();
+    const pending = activeBeforeDeploy ? deploymentResumeByAccountId.get(activeBeforeDeploy.id) : null;
+    const resumeState = pending?.fingerprint === fingerprint ? pending.state : null;
+    if (activeBeforeDeploy && pending && !resumeState) {
+      deploymentResumeByAccountId.delete(activeBeforeDeploy.id);
+    }
+    if (resumeState) appendLog(t('log_deploy_resume'));
+    const result = await runDeploy(form, appendLog, { resumeState });
+    if (activeBeforeDeploy) deploymentResumeByAccountId.delete(activeBeforeDeploy.id);
 
     if (result.bootstrapOk) {
       setStatus(t('status_done'), 'ok');
@@ -2444,6 +2560,14 @@ async function onDeploy(): Promise<void> {
       await persistUiState();
     }
   } catch (error) {
+    const active = getActiveAccount();
+    const deploymentState = (error as { deploymentState?: DeploymentResumeState })?.deploymentState;
+    if (active && deploymentState?.completedSteps?.length) {
+      deploymentResumeByAccountId.set(active.id, {
+        fingerprint: buildDeploymentFingerprint(getFormState()),
+        state: deploymentState,
+      });
+    }
     const message = error instanceof Error ? error.message : String(error);
     setStatus(`${t('status_deploy_fail')}: ${message}`, 'error');
     appendLog(`${t('status_deploy_fail')}: ${message}`);
@@ -2458,6 +2582,7 @@ async function bootstrap(): Promise<void> {
   defaultFormState = await createDefaultFormState();
 
   const loaded = await loadUiState(defaultFormState);
+  await restoreSecureAccountCredentials(loaded.accounts);
   currentLocale = sanitizeLocale(loaded.locale);
   currentTheme = sanitizeTheme(loaded.theme);
   accounts = loaded.accounts;
@@ -2573,6 +2698,7 @@ accountManagerList.addEventListener('click', (event) => {
   const target = event.target as HTMLElement | null;
   if (!target) return;
   const switchBtn = target.closest<HTMLButtonElement>('button[data-account-switch]');
+  const clearCredentialsBtn = target.closest<HTMLButtonElement>('button[data-account-clear-credentials]');
   const deleteBtn = target.closest<HTMLButtonElement>('button[data-account-delete]');
 
   if (switchBtn?.dataset.accountSwitch) {
@@ -2581,6 +2707,12 @@ accountManagerList.addEventListener('click', (event) => {
     void queueSwitchAccount(id).then(() => {
       renderAccountManagerList();
     });
+    return;
+  }
+
+  if (clearCredentialsBtn?.dataset.accountClearCredentials) {
+    if (busy) return;
+    void clearCredentialsById(clearCredentialsBtn.dataset.accountClearCredentials);
     return;
   }
 

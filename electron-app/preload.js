@@ -13,5 +13,6 @@ contextBridge.exposeInMainWorld('api', {
     setActive: (id) => ipcRenderer.invoke('accounts:setActive', id),
     getActive: () => ipcRenderer.invoke('accounts:getActive'),
     saveDeployPrefs: (prefs) => ipcRenderer.invoke('accounts:saveDeployPrefs', prefs),
+    clearCredentials: (id) => ipcRenderer.invoke('accounts:clearCredentials', id),
   }
 })

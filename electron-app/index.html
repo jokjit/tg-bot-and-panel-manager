@@ -127,6 +127,20 @@ body[data-theme="dark"] {
   border-radius: 6px;
   cursor: pointer;
 }
+.account-clear,
+.account-token-hint {
+  font-size: 10px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.account-clear {
+  opacity: 0;
+  padding: 2px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.account-item:hover .account-clear { opacity: 1; }
+.account-clear:hover { color: #b45309; background: #fef3c7; }
 .account-item:hover .account-del { opacity: 1; }
 .account-del:hover {
   color: #ef4444;
@@ -1310,6 +1324,9 @@ const i18n = {
     theme_toggle_dark: "深色",
     theme_toggle_light: "浅色",
     delete_title: "删除",
+    clear_credentials: "清除凭据",
+    clear_credentials_confirm: "确认清除该账号的 API Token、Bot Token 和管理员 ID？",
+    token_saved_hint: "Token",
     account_separator: " | ",
   },
   en: {
@@ -1423,6 +1440,9 @@ const i18n = {
     theme_toggle_dark: "Dark",
     theme_toggle_light: "Light",
     delete_title: "Delete",
+    clear_credentials: "Clear credentials",
+    clear_credentials_confirm: "Clear this account's API Token, Bot Token, and Admin ID?",
+    token_saved_hint: "Token",
     account_separator: " | ",
   },
 }
@@ -1998,7 +2018,7 @@ async function refreshDashboard(force = false) {
     return
   }
 
-  if (!currentActiveAccount.apiToken || !currentActiveAccount.accountId) {
+  if (!currentActiveAccount.hasApiToken || !currentActiveAccount.accountId) {
     dashboardCacheByAccountId.delete(currentActiveAccount.id)
     renderDashboard(null, "", true)
     return
@@ -2344,6 +2364,8 @@ async function renderAccounts() {
         <div class="account-name">${a.name || t("unnamed_account")}</div>
         <div class="account-id">${a.email || shortId}</div>
       </div>
+      <span class="account-token-hint">${a.hasApiToken ? `${t("token_saved_hint")}: ${a.apiTokenHint}` : ""}</span>
+      <span class="account-clear" data-clear="${a.id}" title="${t("clear_credentials")}">⌫</span>
       <span class="account-del" data-del="${a.id}" title="${t("delete_title")}">x</span>
     </div>`
     })
@@ -2362,6 +2384,15 @@ async function renderAccounts() {
       e.stopPropagation()
       if (!confirm(t("delete_account_confirm"))) return
       await window.api.accounts.delete(el.dataset.del)
+      await renderAccounts()
+    })
+  })
+
+  list.querySelectorAll("[data-clear]").forEach((el) => {
+    el.addEventListener("click", async (e) => {
+      e.stopPropagation()
+      if (!confirm(t("clear_credentials_confirm"))) return
+      await window.api.accounts.clearCredentials(el.dataset.clear)
       await renderAccounts()
     })
   })

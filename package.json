@@ -3,10 +3,23 @@
   "private": true,
   "scripts": {
     "dev": "node -e \"console.log('Use TG Bot Deploy Tool for API-based deployment.')\"",
+    "test": "npm run build:worker && node --test tests/*.test.mjs",
+    "pretest:integration": "npm run build:worker",
+    "test:integration": "node --test tests/*.integration.mjs",
+    "lint": "eslint worker.js worker-src scripts shared tests electron-app admin-panel/src --ext .js,.mjs,.cjs",
+    "typecheck": "npm --prefix mobile-app run typecheck",
+    "check": "npm run lint && npm run typecheck && npm test && npm run test:integration",
+    "build:worker": "esbuild worker.js --bundle --format=esm --platform=browser --target=es2022 --outfile=worker.bundle.js",
+    "check:versions": "node scripts/check-version-consistency.mjs",
     "build:panel": "npm --prefix admin-panel run build",
     "build:mobile:release": "node scripts/build-mobile-release.mjs",
     "build:stable": "node scripts/build-stable-release.mjs",
     "verify:release-signatures": "node scripts/verify-release-signatures.mjs"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "esbuild": "^0.25.12",
+    "eslint": "^9.39.5",
+    "globals": "^16.5.0",
+    "miniflare": "^3.20250718.2"
+  }
 }

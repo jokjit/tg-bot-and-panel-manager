@@ -280,11 +280,15 @@ export function updateUserAction(payload) {
   });
 }
 
-export function fetchBlacklist(limit = 50, options = {}) {
+export function fetchBlacklist(options = 50, requestOptions = {}) {
+  const params =
+    typeof options === 'object' && options !== null
+      ? { limit: options.limit, offset: options.offset }
+      : { limit: options };
   return cachedGet('/admin/api/blacklist', {
-    params: { limit },
+    params,
     ttlMs: READ_CACHE_TTL.list,
-    force: Boolean(options.force),
+    force: Boolean(options?.force ?? requestOptions.force),
   });
 }
 
@@ -295,11 +299,15 @@ export function updateBlacklist(payload) {
   });
 }
 
-export function fetchTrust(limit = 50, options = {}) {
+export function fetchTrust(options = 50, requestOptions = {}) {
+  const params =
+    typeof options === 'object' && options !== null
+      ? { limit: options.limit, offset: options.offset }
+      : { limit: options };
   return cachedGet('/admin/api/trust', {
-    params: { limit },
+    params,
     ttlMs: READ_CACHE_TTL.list,
-    force: Boolean(options.force),
+    force: Boolean(options?.force ?? requestOptions.force),
   });
 }
 
@@ -349,6 +357,13 @@ export function runMaintenanceCleanup(payload = {}) {
 export function runDeletedAccountSweep(payload = {}) {
   return api.post('/admin/api/maintenance/deleted-account-sweep', payload).then((r) => {
     clearCachedGets(['/admin/api/users', '/admin/api/history']);
+    return r.data;
+  });
+}
+
+export function runDirectoryIndexBackfill(payload = {}) {
+  return api.post('/admin/api/maintenance/directory-index-backfill', payload).then((r) => {
+    clearCachedGets(['/admin/api/status', '/admin/api/users', '/admin/api/blacklist', '/admin/api/trust']);
     return r.data;
   });
 }

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, dialog } = require('electron')
+const { app, BrowserWindow, ipcMain, safeStorage } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
@@ -7,8 +7,10 @@ const crypto = require('crypto')
 const deployUtilsPath = app.isPackaged
   ? path.join(process.resourcesPath, 'shared', 'deploy-utils.cjs')
   : path.join(__dirname, '..', 'shared', 'deploy-utils.cjs')
+const deploymentCorePath = app.isPackaged
+  ? path.join(process.resourcesPath, 'shared', 'deployment-core.cjs')
+  : path.join(__dirname, '..', 'shared', 'deployment-core.cjs')
 const {
-  LEGACY_DEFAULT_PAGES_PANEL_URL,
   buildCfErrorReason,
   buildAdminPanelEntryUrl,
   buildPanelTargetUrl,
@@ -33,6 +35,12 @@ const {
   normalizeWorkerName,
   shouldIgnorePagesAsset,
 } = require(deployUtilsPath)
+const {
+  createDeploymentRun,
+  ensurePagesProject: ensurePagesProjectCore,
+  normalizeDeploymentResumeState,
+  runDeploymentSteps,
+} = require(deploymentCorePath)
 
 const DEPLOY_TOOL_VERSION = `v${app.getVersion()}`
 
@@ -74,24 +82,72 @@ function getPrivateWranglerPath(env = {}) {
 const accountsFile = () => path.join(app.getPath('userData'), 'accounts.json')
 const activeFile = () => path.join(app.getPath('userData'), 'active-account.txt')
 let activeAccountId = null
+let volatileAccounts = null
+const deploymentResumeByAccountId = new Map()
+
+function buildDeploymentFingerprint(params = {}) {
+  const source = params && typeof params === 'object' ? params : {}
+  const filtered = {}
+  for (const key of Object.keys(source).sort()) {
+    if (key === 'deploymentState') continue
+    const value = source[key]
+    if (typeof value === 'function' || value === undefined) continue
+    filtered[key] = value
+  }
+  return JSON.stringify(filtered)
+}
+
+function redactAccountSecrets(account) {
+  const deployPrefs = { ...(account?.deployPrefs || {}) }
+  delete deployPrefs.botToken
+  delete deployPrefs.adminChatId
+  const apiToken = String(account?.apiToken || '')
+  const withoutToken = { ...(account || {}) }
+  delete withoutToken.apiToken
+  return {
+    ...withoutToken,
+    deployPrefs,
+    hasApiToken: Boolean(apiToken),
+    apiTokenHint: apiToken ? `****${apiToken.slice(-4)}` : '',
+  }
+}
+
+function stripAccountSecretsForDisk(account) {
+  const redacted = redactAccountSecrets(account)
+  delete redacted.hasApiToken
+  delete redacted.apiTokenHint
+  return redacted
+}
+
+function publicAccounts(accounts) {
+  return accounts.map(redactAccountSecrets)
+}
 
 function loadAccounts() {
+  if (!safeStorage.isEncryptionAvailable() && volatileAccounts) return volatileAccounts
   try {
     const raw = fs.readFileSync(accountsFile())
     if (safeStorage.isEncryptionAvailable()) {
       return JSON.parse(safeStorage.decryptString(Buffer.from(raw)))
     }
-    return JSON.parse(raw.toString())
+    const parsed = JSON.parse(raw.toString())
+    return Array.isArray(parsed) ? parsed.map(stripAccountSecretsForDisk) : []
   } catch { return [] }
 }
 
 function saveAccounts(accounts) {
   const json = JSON.stringify(accounts)
   if (safeStorage.isEncryptionAvailable()) {
-    fs.writeFileSync(accountsFile(), safeStorage.encryptString(json))
-  } else {
-    fs.writeFileSync(accountsFile(), json)
+    try {
+      fs.writeFileSync(accountsFile(), safeStorage.encryptString(json))
+      volatileAccounts = null
+      return
+    } catch {
+      // Keep credentials usable for this process, but never fall back to plaintext persistence.
+    }
   }
+  volatileAccounts = accounts
+  fs.writeFileSync(accountsFile(), JSON.stringify(accounts.map(stripAccountSecretsForDisk)))
 }
 
 function getActiveAccount() {
@@ -204,21 +260,6 @@ function buildEnv(account) {
   const dirs = [fakeBin, binDir].filter(Boolean)
   env.PATH = dirs.join(path.delimiter) + path.delimiter + (env.PATH || '')
   return env
-}
-
-function emitPostDeployCheckHints(onProgress, options = {}) {
-  const workerUrl = normalizeHttpUrl(options.workerUrl || '')
-  const panelEntryUrl = normalizeHttpUrl(options.panelEntryUrl || '')
-
-  onProgress?.('Post-deploy check: verify availability before production use.')
-  if (workerUrl) {
-    onProgress?.(`- Worker health: ${workerUrl}/health`)
-  }
-  onProgress?.('- Telegram bot: send /start and confirm admin relay works.')
-  if (panelEntryUrl) {
-    onProgress?.(`- Admin panel: open and login test: ${panelEntryUrl}`)
-  }
-  onProgress?.('- If any check fails, review token/domain/route settings and redeploy.')
 }
 
 function ensureLocalWranglerFile(env = {}) {
@@ -2388,7 +2429,7 @@ async function uploadWorkerViaApi(env, configPath, onProgress) {
     ? `Worker 已存在，正在覆盖上传：${workerName}`
     : `Worker 不存在，正在创建并上传：${workerName}`)
 
-  const workerPath = path.join(getRepoRoot(), 'worker.js')
+  const workerPath = path.join(getRepoRoot(), 'worker.bundle.js')
   if (!fs.existsSync(workerPath)) {
     throw new Error(`缺少 Worker 代码文件：${workerPath}`)
   }
@@ -2651,6 +2692,11 @@ async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress, opt
         return { ok: true, data }
       }
 
+      if (response.status === 410 && data?.error === 'deploy_bootstrap_consumed') {
+        onProgress?.('Worker bootstrap token was already consumed by a completed request.')
+        return { ok: true, consumed: true, data }
+      }
+
       lastReason = data?.error ||
         data?.webhookError ||
         data?.bootstrapNotifyError ||
@@ -2901,27 +2947,21 @@ async function runAction(action, params, env) {
       }
       send(`使用预构建 admin-panel 资源：${panelDistDir}\n`)
       send('正在上传到 Cloudflare Pages...\n')
-      const projectBeforeDeploy = await getPagesProject(env, projectName)
-      if (!projectBeforeDeploy?.ok) {
-        if (String(projectBeforeDeploy.reason || '').includes('8000007')) {
-          send(`Pages 项目不存在，正在自动创建：${projectName}`)
-          const created = await createPagesProject(env, projectName)
-          if (!created?.ok) {
-            throw new Error(`创建 Pages 项目失败 ${projectName}: ${created?.reason || 'unknown'}`)
-          }
-          send(`Pages 项目已创建：${projectName}`)
-        } else {
-          throw new Error(`Pages 项目前置检查失败：${projectBeforeDeploy.reason || 'unknown'}`)
-        }
-      } else {
-        send(`Pages 项目已存在，正在覆盖上传：${projectName}`)
-      }
-
-      const check = await getPagesProject(env, projectName)
-      if (!check?.ok || !check.project) {
-        throw new Error(`Pages 项目验证失败：${check?.reason || 'unknown'}`)
-      }
-      const project = check.project
+      const ensuredProject = await ensurePagesProjectCore({
+        projectName,
+        getProject: (name) => getPagesProject(env, name),
+        createProject: (name) => createPagesProject(env, name),
+        onProgress: send,
+        messages: {
+          existing: ({ projectName: name }) => `Pages 项目已存在，正在覆盖上传：${name}`,
+          creating: ({ projectName: name }) => `Pages 项目不存在，正在自动创建：${name}`,
+          created: ({ projectName: name }) => `Pages 项目已创建：${name}`,
+          createFailed: ({ projectName: name, reason }) => `创建 Pages 项目失败 ${name}: ${reason}`,
+          verifyFailed: ({ reason }) => `Pages 项目验证失败：${reason}`,
+          preflightFailed: ({ reason }) => `Pages 项目前置检查失败：${reason}`,
+        },
+      })
+      const project = ensuredProject.project
       const subdomain = String(project.subdomain || '').trim()
       if (subdomain) {
         send(`Pages 项目已验证：${projectName} -> https://${subdomain}`)
@@ -2993,12 +3033,24 @@ async function runAction(action, params, env) {
       return { projectName, branch, panelUrl: resolvedPanelUrl, panelEntryUrl, subdomain }
     }
     case 'deploy-all': {
-      const workerResult = await runAction('deploy-worker', params, env)
-      const panelResult = await runAction('deploy-panel', {
-        ...(params || {}),
-        workerUrl: workerResult?.workerUrl || params?.workerUrl || '',
-      }, env)
-      return { worker: workerResult || null, panel: panelResult || null }
+      const pipeline = await runDeploymentSteps([
+        {
+          id: 'worker',
+          run: async () => runAction('deploy-worker', params, env),
+        },
+        {
+          id: 'panel',
+          run: async ({ results }) => runAction('deploy-panel', {
+            ...(params || {}),
+            workerUrl: results.worker?.workerUrl || params?.workerUrl || '',
+          }, env),
+        },
+      ])
+      return {
+        worker: pipeline.results.worker || null,
+        panel: pipeline.results.panel || null,
+        completedSteps: pipeline.completedSteps,
+      }
     }
     case 'first-deploy': {
       const { botToken, adminChatId, workerUrl, verifyPublicBaseUrl, panelUrl } = params || {}
@@ -3007,39 +3059,50 @@ async function runAction(action, params, env) {
       const runtimeVarUpdates = effectiveVerifyPublicBaseUrl
         ? { VERIFY_PUBLIC_BASE_URL: effectiveVerifyPublicBaseUrl }
         : {}
-      let effectivePanelUrl = ''
-      const deployBootstrapToken = crypto.randomBytes(24).toString('hex')
+      let effectivePanelUrl = normalizePanelUrl(panelUrl || '')
+      const resumeState = normalizeDeploymentResumeState(params?.deploymentState || {})
+      const deployment = createDeploymentRun({
+        initialResults: resumeState.results,
+        completedSteps: resumeState.completedSteps,
+      })
+      const prepareStage = await deployment.run('prepare', async () => ({
+        deployBootstrapToken: crypto.randomBytes(24).toString('hex'),
+      }))
+      const deployBootstrapToken = prepareStage.deployBootstrapToken
       const workerSecrets = {
         BOT_TOKEN: botToken,
         ADMIN_CHAT_ID: adminChatId,
         DEPLOY_BOOTSTRAP_TOKEN: deployBootstrapToken,
       }
-      send('步骤 1/4：合并配置...')
-      await runScript('merge-wrangler-config.mjs', [], env)
-
-      const updatedVars = syncRuntimeUrlsToLocalConfig(
-        effectiveWorkerUrl,
-        effectivePanelUrl,
-        env,
-        { TOPIC_MODE: 'true', ...runtimeVarUpdates },
-      )
-      if (updatedVars.length > 0) {
-        send(`已更新账号运行配置：${updatedVars.join(', ')}`)
+      await deployment.run('merge_config', async () => {
+        send('步骤 1/4：合并配置...')
         await runScript('merge-wrangler-config.mjs', [], env)
-      }
 
-      send('步骤 2/4：初始化 KV 和 D1...')
-      await ensureKvBindingViaApi(env, {}, send)
-      await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
-      {
+        const updatedVars = syncRuntimeUrlsToLocalConfig(
+          effectiveWorkerUrl,
+          effectivePanelUrl,
+          env,
+          { TOPIC_MODE: 'true', ...runtimeVarUpdates },
+        )
+        if (updatedVars.length > 0) {
+          send(`已更新账号运行配置：${updatedVars.join(', ')}`)
+          await runScript('merge-wrangler-config.mjs', [], env)
+        }
+      })
+
+      await deployment.run('resources', async () => {
+        send('步骤 2/4：初始化 KV 和 D1...')
+        await ensureKvBindingViaApi(env, {}, send)
+        await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
         const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
         if (postInitUpdates.length > 0) {
           send(`已更新账号运行配置：${postInitUpdates.join(', ')}`)
         }
-      }
-      await runScript('merge-wrangler-config.mjs', [], env)
-      send('步骤 3/4：部署 Worker...')
-      const workerConfigPath = getPrivateWranglerPath(env)
+        await runScript('merge-wrangler-config.mjs', [], env)
+      })
+      const workerStage = await deployment.run('worker', async () => {
+        send('步骤 3/4：部署 Worker...')
+        const workerConfigPath = getPrivateWranglerPath(env)
       validatePrivateWranglerConfig(workerConfigPath)
       await uploadWorkerViaApi(env, workerConfigPath, send)
       const publicEndpoint = await ensureWorkerPublicEndpoint(env, workerConfigPath, effectiveWorkerUrl, send)
@@ -3083,28 +3146,33 @@ async function runAction(action, params, env) {
           send('Worker 机器人配置警告：缺少 Worker URL，已跳过运行时检查。')
         }
       }
-      send('步骤 4/4：部署 Pages 面板...')
-      const panelResult = await runAction(
-        'deploy-panel',
-        {
-          workerUrl: effectiveWorkerUrl,
-          verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl,
-          panelUrl: effectivePanelUrl,
-          pagesProjectName: params?.pagesProjectName,
-          pagesBranch: params?.pagesBranch,
-        },
-        env,
-      )
-      if (panelResult?.panelUrl) {
-        send(`Pages 面板地址：${panelResult.panelUrl}`)
-      }
-      if (panelResult?.panelEntryUrl) {
-        send(`面板入口地址：${panelResult.panelEntryUrl}`)
-      }
-      const finalPanelUrl = panelResult?.panelUrl || effectivePanelUrl
-      const finalPanelRuntimeUrl = buildPanelTargetUrl(finalPanelUrl, effectiveWorkerUrl)
-      const finalPanelEntryUrl = panelResult?.panelEntryUrl || buildAdminPanelEntryUrl(effectiveWorkerUrl) || finalPanelRuntimeUrl || finalPanelUrl
-      const finalRuntimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, '', env, {
+        return { workerConfigPath, effectiveWorkerUrl }
+      })
+      const { workerConfigPath } = workerStage
+      effectiveWorkerUrl = normalizeHttpUrl(workerStage.effectiveWorkerUrl || effectiveWorkerUrl || '')
+      const panelStage = await deployment.run('panel', async () => {
+        send('步骤 4/4：部署 Pages 面板...')
+        const panelResult = await runAction(
+          'deploy-panel',
+          {
+            workerUrl: effectiveWorkerUrl,
+            verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl,
+            panelUrl: effectivePanelUrl,
+            pagesProjectName: params?.pagesProjectName,
+            pagesBranch: params?.pagesBranch,
+          },
+          env,
+        )
+        if (panelResult?.panelUrl) send(`Pages 面板地址：${panelResult.panelUrl}`)
+        if (panelResult?.panelEntryUrl) send(`面板入口地址：${panelResult.panelEntryUrl}`)
+        const finalPanelUrl = panelResult?.panelUrl || effectivePanelUrl
+        const finalPanelRuntimeUrl = buildPanelTargetUrl(finalPanelUrl, effectiveWorkerUrl)
+        const finalPanelEntryUrl = panelResult?.panelEntryUrl || buildAdminPanelEntryUrl(effectiveWorkerUrl) || finalPanelRuntimeUrl || finalPanelUrl
+        return { finalPanelUrl, finalPanelRuntimeUrl, finalPanelEntryUrl }
+      })
+      const { finalPanelUrl, finalPanelRuntimeUrl, finalPanelEntryUrl } = panelStage
+      await deployment.run('finalize', async () => {
+        const finalRuntimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, '', env, {
         ...runtimeVarUpdates,
         ADMIN_PANEL_URL: finalPanelRuntimeUrl || '',
       })
@@ -3200,8 +3268,15 @@ async function runAction(action, params, env) {
         pagesBranch: normalizePagesBranch(params?.pagesBranch || env.PAGES_BRANCH || 'main') || undefined,
         openPanelInClient: Boolean(params?.openPanelInClient),
       })
+      })
       send('\n首次部署完成。')
-      return { panelUrl: finalPanelUrl, panelEntryUrl: finalPanelEntryUrl, workerUrl: effectiveWorkerUrl }
+      return {
+        panelUrl: finalPanelUrl,
+        panelEntryUrl: finalPanelEntryUrl,
+        workerUrl: effectiveWorkerUrl,
+        completedSteps: deployment.snapshot().completedSteps,
+        deploymentState: deployment.snapshot(),
+      }
     }
   }
 }
@@ -3221,7 +3296,43 @@ function createWindow() {
 ipcMain.handle('run-action', async (_, action, params) => {
   const account = getActiveAccount()
   const env = buildEnv(account)
-  return await runAction(action, params, env)
+  const accountKey = String(account?.id || account?.accountId || 'default')
+  const fingerprint = buildDeploymentFingerprint(params)
+  const pending = action === 'first-deploy' ? deploymentResumeByAccountId.get(accountKey) : null
+  if (action !== 'first-deploy' || (pending && pending.fingerprint !== fingerprint)) {
+    deploymentResumeByAccountId.delete(accountKey)
+  }
+  const effectiveParams = pending?.fingerprint === fingerprint && !params?.deploymentState
+    ? { ...(params || {}), deploymentState: pending.state }
+    : params
+  if (pending?.fingerprint === fingerprint && !params?.deploymentState) {
+    BrowserWindow.getAllWindows()[0]?.webContents.send(
+      'output',
+      '检测到上次失败部署，将从已完成步骤后继续。\n',
+    )
+  }
+  try {
+    const result = await runAction(action, effectiveParams, env)
+    if (action === 'first-deploy') deploymentResumeByAccountId.delete(accountKey)
+    return result
+  } catch (error) {
+    if (action === 'first-deploy' && error?.deploymentState?.completedSteps?.length) {
+      deploymentResumeByAccountId.set(accountKey, {
+        fingerprint,
+        state: normalizeDeploymentResumeState(error.deploymentState),
+      })
+    }
+    if (error?.deploymentStep) {
+      const completed = Array.isArray(error.completedSteps) && error.completedSteps.length > 0
+        ? error.completedSteps.join(', ')
+        : 'none'
+      BrowserWindow.getAllWindows()[0]?.webContents.send(
+        'output',
+        `部署失败阶段：${error.deploymentStep}；已完成阶段：${completed}\n`,
+      )
+    }
+    throw error
+  }
 })
 
 ipcMain.handle('dashboard:snapshot', async () => {
@@ -3242,7 +3353,7 @@ ipcMain.handle('dashboard:snapshot', async () => {
   }
 })
 
-ipcMain.handle('accounts:list', () => loadAccounts())
+ipcMain.handle('accounts:list', () => publicAccounts(loadAccounts()))
 ipcMain.handle('accounts:add', (_, account) => {
   const accounts = loadAccounts()
   const newAccount = { ...account, id: crypto.randomUUID(), deployPrefs: normalizeDeployPrefs(account?.deployPrefs) }
@@ -3252,9 +3363,10 @@ ipcMain.handle('accounts:add', (_, account) => {
     activeAccountId = newAccount.id
     fs.writeFileSync(activeFile(), activeAccountId)
   }
-  return accounts
+  return publicAccounts(accounts)
 })
 ipcMain.handle('accounts:delete', (_, id) => {
+  deploymentResumeByAccountId.delete(String(id || ''))
   const before = loadAccounts()
   const removed = before.find(a => a.id === id)
   const accounts = before.filter(a => a.id !== id)
@@ -3267,7 +3379,7 @@ ipcMain.handle('accounts:delete', (_, id) => {
     if (activeAccountId) fs.writeFileSync(activeFile(), activeAccountId)
     else try { fs.rmSync(activeFile(), { force: true }) } catch {}
   }
-  return accounts
+  return publicAccounts(accounts)
 })
 ipcMain.handle('accounts:setActive', (_, id) => {
   activeAccountId = id
@@ -3278,12 +3390,27 @@ ipcMain.handle('accounts:getActive', () => activeAccountId)
 ipcMain.handle('accounts:saveDeployPrefs', (_, prefs) => {
   return saveActiveDeployPrefsPatch(prefs)
 })
+ipcMain.handle('accounts:clearCredentials', (_, id) => {
+  deploymentResumeByAccountId.delete(String(id || ''))
+  const accounts = loadAccounts()
+  const index = accounts.findIndex((item) => item.id === id)
+  if (index < 0) return publicAccounts(accounts)
+  const next = { ...accounts[index] }
+  delete next.apiToken
+  next.deployPrefs = { ...(next.deployPrefs || {}) }
+  delete next.deployPrefs.botToken
+  delete next.deployPrefs.adminChatId
+  accounts[index] = next
+  saveAccounts(accounts)
+  return publicAccounts(accounts)
+})
 ipcMain.handle('data:clear', () => {
   const dir = app.getPath('userData')
   try { fs.rmSync(path.join(dir, 'accounts.json'), { force: true }) } catch {}
   try { fs.rmSync(path.join(dir, 'active-account.txt'), { force: true }) } catch {}
   try { fs.rmSync(path.join(dir, 'cf-accounts'), { recursive: true, force: true }) } catch {}
   activeAccountId = null
+  volatileAccounts = null
 })
 ipcMain.handle('get-repo-root', () => getRepoRoot())
 

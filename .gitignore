@@ -13,6 +13,7 @@ mobile-app/release-apk/
 mobile-app/android/keystore/
 release-packages/
 npm-debug.log*
+worker.bundle.js
 
 # Wrangler / Cloudflare
 .wrangler/

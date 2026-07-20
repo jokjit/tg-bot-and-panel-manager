@@ -2,6 +2,8 @@
 import { Preferences } from '@capacitor/preferences';
 // @ts-ignore Shared CommonJS utility module is bundled by Vite.
 import deployUtils from '../../shared/deploy-utils.cjs';
+// @ts-ignore Shared CommonJS deployment orchestration is bundled by Vite.
+import deploymentCore from '../../shared/deployment-core.cjs';
 
 const {
   buildCfErrorReason,
@@ -41,6 +43,30 @@ const {
   suggestPagesProjectName: (workerName: string) => string;
 };
 
+const {
+  ensurePagesProject: ensurePagesProjectCore,
+  runDeploymentSteps,
+} = deploymentCore as {
+  ensurePagesProject: (options: {
+    projectName: string;
+    getProject: (projectName: string) => Promise<PageProjectResult>;
+    createProject: (projectName: string) => Promise<PageProjectResult>;
+    onProgress: (text: string) => void;
+    messages: Record<string, (context: any) => string>;
+  }) => Promise<{ project: any; created: boolean }>;
+  runDeploymentSteps: (
+    steps: Array<{
+      id: string;
+      run: (context: { results: Record<string, any> }) => Promise<any>;
+    }>,
+    options?: {
+      initialResults?: Record<string, any>;
+      completedSteps?: string[];
+      onStep?: (event: any) => void;
+    },
+  ) => Promise<{ results: Record<string, any>; completedSteps: string[] }>;
+};
+
 const CF_API_BASE = 'https://api.cloudflare.com/client/v4';
 const CF_GRAPHQL_API = `${CF_API_BASE}/graphql`;
 const STORAGE_KEY = 'tg_bot_mobile_deploy_config_v2';
@@ -78,6 +104,16 @@ export interface DeployRunResult {
   pagesProjectName: string;
   bootstrapOk: boolean;
   bootstrapReason: string;
+  completedSteps: string[];
+}
+
+export interface DeploymentResumeState {
+  results: Record<string, any>;
+  completedSteps: string[];
+}
+
+export interface RunDeployOptions {
+  resumeState?: DeploymentResumeState | null;
 }
 
 export interface DashboardD1DatabaseUsage {
@@ -1004,14 +1040,14 @@ export async function loadSavedFormState(): Promise<Partial<DeployFormState>> {
     }
     if (!raw) return {};
     const parsed = JSON.parse(raw);
-    return sanitizeFormState(parsed);
+    return sanitizeFormState({ ...parsed, cfApiToken: '', botToken: '', adminChatId: '' });
   } catch {
     return {};
   }
 }
 
 export async function saveFormState(state: DeployFormState): Promise<void> {
-  const payload = JSON.stringify(sanitizeFormState(state));
+  const payload = JSON.stringify(sanitizeFormState({ ...state, cfApiToken: '', botToken: '', adminChatId: '' }));
   if (isNativePlatform()) {
     await Preferences.set({ key: STORAGE_KEY, value: payload });
   } else {
@@ -1542,6 +1578,9 @@ async function triggerDeployBootstrap(
 
     const data = response.json || {};
     const webhookUrl = String(data?.webhookUrl || '').trim();
+    if (response.status === 410 && data?.error === 'deploy_bootstrap_consumed') {
+      return { ok: true, webhookUrl, reason: 'already_consumed' };
+    }
     if (response.status >= 200 && response.status < 300 && data) {
       const ok = Boolean(data.ok);
       const reason = ok
@@ -1602,28 +1641,21 @@ async function ensurePagesProject(
   projectName: string,
   onLog: (text: string) => void,
 ): Promise<any> {
-  const current = await getPagesProject(token, accountId, projectName);
-  if (current.ok && current.project) {
-    onLog(`Pages 项目已存在: ${projectName}`);
-    return current.project;
-  }
-
-  if (String(current.reason || '').includes('8000007')) {
-    onLog(`Pages 项目不存在，正在创建: ${projectName}`);
-    const created = await createPagesProject(token, accountId, projectName);
-    if (!created.ok) {
-      throw new Error(`Pages 项目创建失败: ${created.reason || 'unknown'}`);
-    }
-    onLog(`Pages 项目创建完成: ${projectName}`);
-
-    const checked = await getPagesProject(token, accountId, projectName);
-    if (!checked.ok || !checked.project) {
-      throw new Error(`Pages 项目创建后校验失败: ${checked.reason || 'unknown'}`);
-    }
-    return checked.project;
-  }
-
-  throw new Error(`Pages 项目前置校验失败: ${current.reason || 'unknown'}`);
+  const result = await ensurePagesProjectCore({
+    projectName,
+    getProject: (name) => getPagesProject(token, accountId, name),
+    createProject: (name) => createPagesProject(token, accountId, name),
+    onProgress: onLog,
+    messages: {
+      existing: ({ projectName: name }) => `Pages 项目已存在: ${name}`,
+      creating: ({ projectName: name }) => `Pages 项目不存在，正在创建: ${name}`,
+      created: ({ projectName: name }) => `Pages 项目创建完成: ${name}`,
+      createFailed: ({ reason }) => `Pages 项目创建失败: ${reason}`,
+      verifyFailed: ({ reason }) => `Pages 项目创建后校验失败: ${reason}`,
+      preflightFailed: ({ reason }) => `Pages 项目前置校验失败: ${reason}`,
+    },
+  });
+  return result.project;
 }
 
 async function getPagesUploadToken(token: string, accountId: string, projectName: string): Promise<string> {
@@ -1959,6 +1991,7 @@ async function deployPanelToPages(
 export async function runDeploy(
   formInput: DeployFormState,
   onLog: (text: string) => void,
+  options: RunDeployOptions = {},
 ): Promise<DeployRunResult> {
   const form = sanitizeFormState(formInput);
   const token = form.cfApiToken;
@@ -1983,136 +2016,169 @@ export async function runDeploy(
   const pagesProjectName = normalizePagesProjectName(form.pagesProjectName) || suggestPagesProjectName(workerName);
   const pagesBranch = String(form.pagesBranch || DEFAULT_PAGES_BRANCH).trim() || DEFAULT_PAGES_BRANCH;
 
-  onLog('步骤 1/6: 初始化 KV 和 D1');
-  const kv = await ensureKvNamespace(token, accountId, kvNamespaceTitle, onLog);
-  const d1 = await ensureD1Database(token, accountId, d1DatabaseName, assets.migrations, onLog);
-
-  onLog('步骤 2/6: 初次上传 Worker');
-  const firstVars: Record<string, string> = {
-    ...assets.defaultVars,
-  };
-  if (workerUrlInput) firstVars.PUBLIC_BASE_URL = workerUrlInput;
-  if (verifyPublicBaseUrl) firstVars.VERIFY_PUBLIC_BASE_URL = verifyPublicBaseUrl;
-  if (manualPanelUrl) firstVars.ADMIN_PANEL_URL = manualPanelUrl;
-
-  await uploadWorker(
-    token,
-    accountId,
-    workerName,
-    assets.workerCode,
-    buildWorkerUploadMetadata({
-      compatibilityDate: assets.compatibilityDate,
-      vars: firstVars,
-      namespaceId: kv.namespaceId,
-      databaseId: d1.databaseId,
-    }),
-    onLog,
-  );
-
-  onLog('步骤 3/6: 配置 Worker 公开入口');
-  const customHost = getCustomDomainHost(workerUrlInput);
-  const workersDevUrl = await ensureWorkersDevEndpoint(token, accountId, workerName, onLog);
-  let workerUrl = workersDevUrl;
-
-  if (customHost) {
-    await ensureWorkerCustomDomainByHost(token, accountId, workerName, customHost, onLog);
-    workerUrl = workerUrlInput;
-    onLog('自定义域名已提交绑定，证书与边缘生效可能有短暂延迟。');
-  } else {
-    workerUrl = workersDevUrl;
-  }
-
-  const verifyHost = getCustomDomainHost(verifyPublicBaseUrl);
-  if (verifyHost && verifyHost !== customHost) {
-    await ensureWorkerCustomDomainByHost(token, accountId, workerName, verifyHost, onLog);
-  }
-
-  let effectivePanelUrl = manualPanelUrl;
-  if (deployPanel) {
-    onLog('步骤 4/6: 部署 Pages 管理面板');
-    const pagesResult = await deployPanelToPages(
-      token,
-      accountId,
-      pagesProjectName,
-      pagesBranch,
-      assets.panelAssets,
-      onLog,
-    );
-    if (!effectivePanelUrl) {
-      effectivePanelUrl = pagesResult.panelUrl;
-    }
-  } else {
-    onLog('步骤 4/6: 跳过 Pages 管理面板部署（已关闭）。');
-  }
-
-  const effectivePanelTargetUrl = buildPanelTargetUrl(effectivePanelUrl, workerUrl);
-
-  onLog('步骤 5/6: 回写最终运行变量并更新 Worker');
-  const finalVars: Record<string, string> = {
-    ...firstVars,
-    PUBLIC_BASE_URL: workerUrl,
-  };
-  if (deployPanel) {
-    // In auto Pages deploy mode, overwrite stale values from older runs.
-    finalVars.ADMIN_PANEL_URL = effectivePanelTargetUrl || '';
-  } else if (effectivePanelTargetUrl) {
-    finalVars.ADMIN_PANEL_URL = effectivePanelTargetUrl;
-  }
-
-  await uploadWorker(
-    token,
-    accountId,
-    workerName,
-    assets.workerCode,
-    buildWorkerUploadMetadata({
-      compatibilityDate: assets.compatibilityDate,
-      vars: finalVars,
-      namespaceId: kv.namespaceId,
-      databaseId: d1.databaseId,
-    }),
-    onLog,
-  );
-
-  onLog('步骤 6/6: 更新 Worker Secrets + 触发部署引导');
-  const bootstrapToken = randomHex(24);
-  await upsertWorkerSecrets(
-    token,
-    accountId,
-    workerName,
+  const pipeline = await runDeploymentSteps([
     {
-      BOT_TOKEN: form.botToken,
-      ADMIN_CHAT_ID: form.adminChatId,
-      DEPLOY_BOOTSTRAP_TOKEN: bootstrapToken,
+      id: 'resources',
+      run: async () => {
+        onLog('步骤 1/6: 初始化 KV 和 D1');
+        const kv = await ensureKvNamespace(token, accountId, kvNamespaceTitle, onLog);
+        const d1 = await ensureD1Database(token, accountId, d1DatabaseName, assets.migrations, onLog);
+        return { kv, d1 };
+      },
     },
-    onLog,
-  );
+    {
+      id: 'initial_worker',
+      run: async ({ results }) => {
+        onLog('步骤 2/6: 初次上传 Worker');
+        const firstVars: Record<string, string> = { ...assets.defaultVars };
+        if (workerUrlInput) firstVars.PUBLIC_BASE_URL = workerUrlInput;
+        if (verifyPublicBaseUrl) firstVars.VERIFY_PUBLIC_BASE_URL = verifyPublicBaseUrl;
+        if (manualPanelUrl) firstVars.ADMIN_PANEL_URL = manualPanelUrl;
+        await uploadWorker(
+          token,
+          accountId,
+          workerName,
+          assets.workerCode,
+          buildWorkerUploadMetadata({
+            compatibilityDate: assets.compatibilityDate,
+            vars: firstVars,
+            namespaceId: results.resources.kv.namespaceId,
+            databaseId: results.resources.d1.databaseId,
+          }),
+          onLog,
+        );
+        return { firstVars };
+      },
+    },
+    {
+      id: 'endpoint',
+      run: async () => {
+        onLog('步骤 3/6: 配置 Worker 公开入口');
+        const customHost = getCustomDomainHost(workerUrlInput);
+        const workersDevUrl = await ensureWorkersDevEndpoint(token, accountId, workerName, onLog);
+        let workerUrl = workersDevUrl;
+        if (customHost) {
+          await ensureWorkerCustomDomainByHost(token, accountId, workerName, customHost, onLog);
+          workerUrl = workerUrlInput;
+          onLog('自定义域名已提交绑定，证书与边缘生效可能有短暂延迟。');
+        }
+        const verifyHost = getCustomDomainHost(verifyPublicBaseUrl);
+        if (verifyHost && verifyHost !== customHost) {
+          await ensureWorkerCustomDomainByHost(token, accountId, workerName, verifyHost, onLog);
+        }
+        return { workerUrl, workersDevUrl };
+      },
+    },
+    {
+      id: 'panel',
+      run: async ({ results }) => {
+        let effectivePanelUrl = manualPanelUrl;
+        if (deployPanel) {
+          onLog('步骤 4/6: 部署 Pages 管理面板');
+          const pagesResult = await deployPanelToPages(
+            token,
+            accountId,
+            pagesProjectName,
+            pagesBranch,
+            assets.panelAssets,
+            onLog,
+          );
+          if (!effectivePanelUrl) effectivePanelUrl = pagesResult.panelUrl;
+        } else {
+          onLog('步骤 4/6: 跳过 Pages 管理面板部署（已关闭）。');
+        }
+        return {
+          effectivePanelUrl,
+          effectivePanelTargetUrl: buildPanelTargetUrl(effectivePanelUrl, results.endpoint.workerUrl),
+        };
+      },
+    },
+    {
+      id: 'final_worker',
+      run: async ({ results }) => {
+        onLog('步骤 5/6: 回写最终运行变量并更新 Worker');
+        const { effectivePanelUrl, effectivePanelTargetUrl } = results.panel;
+        const finalVars: Record<string, string> = {
+          ...results.initial_worker.firstVars,
+          PUBLIC_BASE_URL: results.endpoint.workerUrl,
+        };
+        if (deployPanel) {
+          finalVars.ADMIN_PANEL_URL = effectivePanelTargetUrl || '';
+        } else if (effectivePanelTargetUrl) {
+          finalVars.ADMIN_PANEL_URL = effectivePanelTargetUrl;
+        }
+        await uploadWorker(
+          token,
+          accountId,
+          workerName,
+          assets.workerCode,
+          buildWorkerUploadMetadata({
+            compatibilityDate: assets.compatibilityDate,
+            vars: finalVars,
+            namespaceId: results.resources.kv.namespaceId,
+            databaseId: results.resources.d1.databaseId,
+          }),
+          onLog,
+        );
+        return { finalVars, effectivePanelUrl, effectivePanelTargetUrl };
+      },
+    },
+    {
+      id: 'bootstrap',
+      run: async ({ results }) => {
+        onLog('步骤 6/6: 更新 Worker Secrets + 触发部署引导');
+        const bootstrapToken = randomHex(24);
+        await upsertWorkerSecrets(
+          token,
+          accountId,
+          workerName,
+          {
+            BOT_TOKEN: form.botToken,
+            ADMIN_CHAT_ID: form.adminChatId,
+            DEPLOY_BOOTSTRAP_TOKEN: bootstrapToken,
+          },
+          onLog,
+        );
+        const bootstrapWorkerUrl = results.endpoint.workersDevUrl || results.endpoint.workerUrl;
+        if (bootstrapWorkerUrl !== results.endpoint.workerUrl) {
+          onLog('部署引导将通过 workers.dev 入口执行，避免自定义域名尚未生效导致超时。');
+        }
+        await waitForWorkerHealth(bootstrapWorkerUrl, onLog);
+        const bootstrap = await triggerDeployBootstrap(bootstrapWorkerUrl, bootstrapToken);
+        if (bootstrap.ok) {
+          onLog(`Webhook 已设置: ${bootstrap.webhookUrl || `${getUrlOrigin(results.endpoint.workerUrl)}/webhook`}`);
+        } else {
+          onLog(`部署引导警告: ${bootstrap.reason}`);
+        }
+        return { bootstrap };
+      },
+    },
+  ], {
+    initialResults: options.resumeState?.results,
+    completedSteps: options.resumeState?.completedSteps,
+    onStep: (event) => {
+      if (event?.status === 'resumed') {
+        onLog(`步骤已恢复：${event.id}`);
+      }
+    },
+  });
 
-  const bootstrapWorkerUrl = workersDevUrl || workerUrl;
-  if (bootstrapWorkerUrl !== workerUrl) {
-    onLog('部署引导将通过 workers.dev 入口执行，避免自定义域名尚未生效导致超时。');
-  }
-  await waitForWorkerHealth(bootstrapWorkerUrl, onLog);
-  const bootstrap = await triggerDeployBootstrap(bootstrapWorkerUrl, bootstrapToken);
-  if (bootstrap.ok) {
-    onLog(`Webhook 已设置: ${bootstrap.webhookUrl || `${getUrlOrigin(workerUrl)}/webhook`}`);
-  } else {
-    onLog(`部署引导警告: ${bootstrap.reason}`);
-  }
-
-  const finalVerifyBaseUrl = verifyPublicBaseUrl || workerUrl;
-  const panelEntryUrl = buildAdminPanelEntryUrl(workerUrl) || effectivePanelTargetUrl || effectivePanelUrl;
+  const { resources, endpoint, panel, final_worker: finalWorker, bootstrap: bootstrapResult } = pipeline.results;
+  const finalVerifyBaseUrl = verifyPublicBaseUrl || endpoint.workerUrl;
+  const panelEntryUrl = buildAdminPanelEntryUrl(endpoint.workerUrl) || panel.effectivePanelTargetUrl || panel.effectivePanelUrl;
 
   return {
     workerName,
-    workerUrl,
+    workerUrl: endpoint.workerUrl,
     verifyPublicBaseUrl: finalVerifyBaseUrl,
-    kvNamespaceId: kv.namespaceId,
-    d1DatabaseId: d1.databaseId,
-    webhookUrl: bootstrap.webhookUrl || `${getUrlOrigin(workerUrl)}${normalizeWebhookPath(finalVars.WEBHOOK_PATH || '/webhook')}`,
-    panelUrl: effectivePanelTargetUrl || effectivePanelUrl,
+    kvNamespaceId: resources.kv.namespaceId,
+    d1DatabaseId: resources.d1.databaseId,
+    webhookUrl: bootstrapResult.bootstrap.webhookUrl || `${getUrlOrigin(endpoint.workerUrl)}${normalizeWebhookPath(finalWorker.finalVars.WEBHOOK_PATH || '/webhook')}`,
+    panelUrl: finalWorker.effectivePanelTargetUrl || finalWorker.effectivePanelUrl,
     panelEntryUrl,
     pagesProjectName,
-    bootstrapOk: bootstrap.ok,
-    bootstrapReason: bootstrap.reason,
+    bootstrapOk: bootstrapResult.bootstrap.ok,
+    bootstrapReason: bootstrapResult.bootstrap.reason,
+    completedSteps: pipeline.completedSteps,
   };
 }

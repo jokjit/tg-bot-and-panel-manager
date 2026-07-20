@@ -137,7 +137,7 @@ if (accountId) {
   }
 }
 
-const workerMainPath = resolve(cwd, 'worker.js').replace(/\\/g, '/');
+const workerMainPath = resolve(cwd, 'worker.bundle.js').replace(/\\/g, '/');
 const mainLine = `main = ${JSON.stringify(workerMainPath)}`;
 if (/^[ \t]*main[ \t]*=.*$/m.test(merged)) {
   merged = merged.replace(/^[ \t]*main[ \t]*=.*$/m, mainLine);

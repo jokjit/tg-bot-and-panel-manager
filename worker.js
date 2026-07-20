@@ -1,3 +1,231 @@
+import { collectKvKeys } from './worker-src/storage/kv.js';
+import { pruneTimedCache, readTimedCacheValue, writeTimedCacheValue } from './worker-src/storage/cache.js';
+import {
+  areJsonStorageValuesEqual,
+  getJsonChangedKeys,
+  serializeJsonForStorage,
+  shouldThrottleUserProfileWrite,
+} from './worker-src/storage/json.js';
+import {
+  isSameD1VerificationMeaning,
+  normalizeD1VerificationStatusRecord,
+} from './worker-src/storage/d1.js';
+import { createVerificationD1Repository } from './worker-src/storage/verification.js';
+import {
+  getVerificationPassedAtFromD1,
+  writeVerificationStatusCleared,
+  writeVerificationStatusPassed,
+} from './worker-src/storage/verification-status.js';
+import {
+  clearLatestVerificationSessionState,
+  getLatestVerificationSession,
+  persistLatestVerificationSessionState,
+  readVerificationSessionFromD1,
+  writeVerificationSessionToD1,
+} from './worker-src/storage/verification-session.js';
+import { createVerificationCache } from './worker-src/auth/verification-cache.js';
+import { normalizeIsoTime, parseIsoTimeMs } from './worker-src/utils/time.js';
+import {
+  buildStructuredLogRecord,
+  getRequestId,
+  getTelegramUpdateContext,
+  writeStructuredLog,
+} from './worker-src/observability/logging.js';
+import {
+  buildDeploymentHealthRecord,
+  buildWebhookErrorStats,
+} from './worker-src/observability/health.js';
+import {
+  buildD1ModerationIndexRecord,
+  buildD1UserDirectoryRecord,
+  deleteD1DirectoryEntries,
+  ensureDirectoryD1Schema,
+  writeD1ModerationIndex,
+  writeD1UserDirectory,
+} from './worker-src/storage/directory.js';
+import {
+  DIRECTORY_INDEX_BACKFILL_KEY,
+  runDirectoryIndexBackfill,
+} from './worker-src/maintenance/directory-backfill.js';
+import {
+  DATA_CLEANUP_CHECK_MIN_INTERVAL_MS,
+  DATA_CLEANUP_MAX_BATCH,
+  DATA_CLEANUP_MIN_BATCH,
+  DATA_RETENTION_MAX_DAYS,
+  DATA_RETENTION_MIN_DAYS,
+  DELETED_ACCOUNT_SWEEP_CHECK_MIN_INTERVAL_MS,
+  DELETED_ACCOUNT_SWEEP_MAX_BATCH,
+  DELETED_ACCOUNT_SWEEP_MIN_BATCH,
+  getDataCleanupBatchSize,
+  getDataRetentionDays,
+  getDeletedAccountSweepBatchSize,
+  parsePositiveInt,
+} from './worker-src/maintenance/config.js';
+import { createIntervalGate } from './worker-src/maintenance/schedule.js';
+import { probeDeletedTelegramUser } from './worker-src/maintenance/deleted-account.js';
+import { executeDataCleanup } from './worker-src/maintenance/data-cleanup.js';
+import { executeDeletedAccountSweep } from './worker-src/maintenance/deleted-account-sweep.js';
+import { purgeDeletedUserRecords } from './worker-src/maintenance/purge.js';
+import { dispatchAdminRoutes } from './worker-src/routes/admin.js';
+import { handleAdminUserRoute } from './worker-src/routes/admin-users.js';
+import {
+  handleAdminBlacklistRoute,
+  handleAdminTrustRoute,
+} from './worker-src/routes/admin-moderation.js';
+import { handleAuthorizedAdminRoute } from './worker-src/routes/admin-access.js';
+import { handleAdminReplyRoute } from './worker-src/routes/admin-reply.js';
+import { handleAdminSystemRoute } from './worker-src/routes/admin-system.js';
+import { TOP_LEVEL_ROUTES, classifyTopLevelRoute } from './worker-src/routes/top-level.js';
+import {
+  classifyVerificationApiRoute,
+  dispatchVerificationApiRoute,
+} from './worker-src/routes/verification.js';
+import { buildDeployBootstrapConsumptionKey } from './worker-src/auth/bootstrap.js';
+import { normalizeRotationAngle, normalizeSliderTrace } from './worker-src/auth/verification.js';
+import {
+  buildSliderSubmitProof,
+  validateSliderSubmitProof,
+} from './worker-src/auth/slider-proof.js';
+import { validateSliderAttemptHuman } from './worker-src/auth/slider-human.js';
+import {
+  buildRotationCaptchaDataUrl,
+  buildSliderBackgroundDataUrl,
+} from './worker-src/auth/web-image.js';
+import {
+  createGridChallengeForWebVerification,
+  createSliderChallengeForWebVerification,
+} from './worker-src/auth/web-challenge.js';
+import { createOrRefreshVerificationWebSessionState } from './worker-src/auth/web-session.js';
+import {
+  repairVerificationStateFromProfileState,
+  resetVerificationStateAfterProfileRevocationState,
+} from './worker-src/auth/profile-state.js';
+import {
+  clearProfileVerificationPassedState,
+  markProfileVerificationPassedState,
+} from './worker-src/auth/profile-status.js';
+import {
+  applyResolvedVerificationStatusToProfileState,
+  isVerificationStateActiveState,
+  isVerificationStateInvalidatedByD1State,
+  resolveVerificationPassedAtState,
+} from './worker-src/auth/verification-resolution.js';
+import {
+  extractMessageText,
+  extractPrimaryMediaFileId,
+  extractTargetUserId,
+  detectMessageType,
+  isIgnoredAdminServiceMessage,
+  isUserPrivateCommand,
+  normalizeBotCommandText,
+  parseReplyCommand,
+} from './worker-src/telegram/message.js';
+import { matchKeywordFilter } from './worker-src/telegram/moderation.js';
+import {
+  telegram,
+  telegramMultipart,
+  telegramWithThreadFallback,
+} from './worker-src/telegram/api.js';
+import { relayAdminMessageToUser, relayUserMessageToAdmins } from './worker-src/telegram/relay.js';
+import { syncTelegramCommandMenu } from './worker-src/telegram/commands.js';
+import { handleAdminModerationCommand } from './worker-src/telegram/admin-moderation-commands.js';
+import { handleAdminMaintenanceCommand } from './worker-src/telegram/admin-maintenance-commands.js';
+import { handleAdminAccessCommand } from './worker-src/telegram/admin-access-commands.js';
+import { handleAdminUserCommand } from './worker-src/telegram/admin-user-commands.js';
+import { handleAdminSystemCommand } from './worker-src/telegram/admin-system-commands.js';
+import { handleAdminActionCallbackCommand } from './worker-src/telegram/admin-action-callback.js';
+import { handleAuthorizedAdminMessage } from './worker-src/telegram/admin-message.js';
+import { handleVerificationSessionApiRequest } from './worker-src/telegram/verification-session-api.js';
+import { loadVerificationApiContext } from './worker-src/telegram/verification-api-context.js';
+import { handleVerificationChoiceApiRequest } from './worker-src/telegram/verification-choice-api.js';
+import { handleVerificationGridApiRequest } from './worker-src/telegram/verification-grid-api.js';
+import { handleVerificationSliderApiRequest } from './worker-src/telegram/verification-slider-api.js';
+import { buildVerificationSessionPayloadResponse } from './worker-src/telegram/verification-payload.js';
+import {
+  normalizeVerificationBaseUrl,
+  sendVerificationWebPromptRequest,
+} from './worker-src/telegram/verification-web-prompt.js';
+import {
+  clearVerificationPromptMessageRequest,
+  deleteVerificationPromptMessageRequest,
+  setVerificationPromptMessageIdState,
+} from './worker-src/telegram/verification-prompt.js';
+import {
+  lockVerificationAndReportState,
+  reportVerificationFailureToAdmin,
+} from './worker-src/telegram/verification-lock.js';
+import { approveUserVerificationState } from './worker-src/telegram/verification-approval.js';
+import { restartUserVerificationState } from './worker-src/telegram/verification-restart.js';
+import {
+  buildDisplayName,
+  buildFallbackText,
+  buildTopicName,
+  formatMessagePreview,
+  formatUserProfile,
+  trimText,
+} from './worker-src/telegram/format.js';
+import {
+  createChallengeToken,
+  createSessionToken,
+  timingSafeEqualText,
+} from './worker-src/auth/crypto.js';
+import {
+  createSeededRandom,
+  drawLine,
+  encodePngRgb,
+  setPixel,
+} from './worker-src/auth/image-codec.js';
+import {
+  generateNumericChoiceChallenge as createNumericChoiceChallenge,
+} from './worker-src/auth/challenge.js';
+import {
+  getProfileVerificationPassedAt,
+  isProfileVerificationPassed,
+  isVerificationPassedAtCleared as isPassedAtCleared,
+  isVerificationSessionExpired,
+  isVerificationSessionUsable,
+  isVerificationStateInvalidatedByProfile,
+  sanitizeVerificationSessionState,
+} from './worker-src/auth/verification-status.js';
+import {
+  adminKey,
+  blacklistKey,
+  buildGroupAdminMemberCacheKey,
+  buildMessageHistoryDedupeKey,
+  topicThreadKey,
+  topicUserKey,
+  trustKey,
+  userKey,
+  verificationCacheKey,
+  verifyKey,
+} from './worker-src/storage/keys.js';
+import {
+  getAdminMetaMode,
+  getRootAdminIds,
+  isRootAdmin,
+  shouldSendUserMetaMessage,
+} from './worker-src/auth/admin.js';
+import {
+  isDataCleanupAutoEnabled,
+  isDeletedAccountSweepAutoEnabled,
+  isTopicModeEnabled,
+  isUserVerificationEnabled,
+} from './worker-src/config/features.js';
+import {
+  ADMIN_SESSION_TTL_SECONDS,
+  buildExpiredSessionCookie,
+  buildSessionCookie,
+  parseCookies,
+} from './worker-src/auth/session.js';
+import {
+  MAX_LIST_LIMIT,
+  clamp,
+  normalizeWebhookPath,
+  parseIdList,
+  parseLimit,
+  parseOffset,
+} from './worker-src/config/values.js';
+
 const DEFAULT_WELCOME = [
   '你好，欢迎使用私聊中转机器人。',
   '直接给我发送消息，我会转发给管理员；管理员回复后，我会继续把消息转发给你。',
@@ -6,19 +234,15 @@ const DEFAULT_WELCOME = [
 const DEFAULT_BLOCKED_TEXT = '你已被管理员限制联系，如有需要请稍后再试。';
 const ADMIN_PANEL_PATH = '/admin';
 const ADMIN_API_PREFIX = '/admin/api';
-const MAX_LIST_LIMIT = 100;
 const MAX_SCAN_KEYS = 500;
-const VERIFY_EXPIRE_MS = 15 * 60 * 1000;
-const VERIFY_FAIL_BLOCK_MS = 60 * 1000;
-const VERIFY_TIMEOUT_BLOCK_MS = 60 * 1000;
-const VERIFY_MAX_FAILURES = 2;
 const SYSTEM_CONFIG_KEY = 'sys:config';
 const ADMIN_SESSION_PREFIX = 'admin:session:';
-const ADMIN_SESSION_TTL_SECONDS = 12 * 60 * 60;
 const ADMIN_BOOTSTRAP_TTL_MS = 1 * 60 * 60 * 1000;
 const PROFILE_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_ADMIN_PANEL_EXTERNAL_URL = '';
 const LAST_WEBHOOK_ERROR_KEY = 'sys:last_webhook_error';
+const WEBHOOK_ERROR_STATS_KEY = 'sys:webhook_error_stats';
+const DEPLOYMENT_HEALTH_KEY = 'sys:deployment_health';
 const VERIFY_IMAGE_PATH = '/verify-image';
 const VERIFY_WEB_PATH = '/verify';
 const VERIFY_API_PREFIX = '/verify/api';
@@ -29,25 +253,11 @@ const VERIFY_MIN_SLIDER_TIME_MS = 250;
 const VERIFY_SLIDER_TOLERANCE = 18;
 const VERIFY_ROTATION_TOLERANCE = 12;
 const VERIFY_OBSERVE_MESSAGE_COUNT = 5;
-const DEFAULT_DATA_RETENTION_DAYS = 90;
-const DEFAULT_DATA_CLEANUP_BATCH_SIZE = 200;
-const DATA_RETENTION_MIN_DAYS = 7;
-const DATA_RETENTION_MAX_DAYS = 3650;
-const DATA_CLEANUP_MIN_BATCH = 20;
-const DATA_CLEANUP_MAX_BATCH = 1000;
 const DATA_CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000;
-const DATA_CLEANUP_CHECK_MIN_INTERVAL_MS = 5 * 60 * 1000;
 const LAST_DATA_CLEANUP_KEY = 'sys:last_cleanup';
 const LAST_DELETED_ACCOUNT_SWEEP_KEY = 'sys:last_deleted_account_sweep';
 const DEFAULT_DELETED_ACCOUNT_SWEEP_INTERVAL_DAYS = 7;
 const DELETED_ACCOUNT_SWEEP_INTERVAL_MS = DEFAULT_DELETED_ACCOUNT_SWEEP_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
-const DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE = 120;
-const DELETED_ACCOUNT_SWEEP_MIN_BATCH = 20;
-const DELETED_ACCOUNT_SWEEP_MAX_BATCH = 1000;
-const DELETED_ACCOUNT_SWEEP_CHECK_MIN_INTERVAL_MS = 5 * 60 * 1000;
-const ADMIN_META_MODE_NEW_TOPIC = 'new-topic';
-const ADMIN_META_MODE_ALWAYS = 'always';
-const ADMIN_META_MODE_OFF = 'off';
 const WELCOME_TYPE_TEXT = 'text';
 const WELCOME_TYPE_PHOTO = 'photo';
 const WELCOME_TYPE_VIDEO = 'video';
@@ -63,14 +273,12 @@ const WELCOME_SETUP_PENDING_TTL_SECONDS = 10 * 60;
 const SYSTEM_CONFIG_CACHE_TTL_MS = 5 * 1000;
 const GROUP_ADMIN_MEMBER_CACHE_TTL_MS = 90 * 1000;
 const GROUP_ADMIN_LIST_CACHE_TTL_MS = 60 * 1000;
-const LOCAL_CACHE_MAX_ENTRIES = 2048;
 const HOT_KV_JSON_CACHE_TTL_MS = 30 * 1000;
 const USER_PROFILE_CACHE_TTL_MS = 60 * 1000;
 const VERIFY_STATE_CACHE_TTL_MS = 15 * 1000;
 const TOPIC_MAPPING_CACHE_TTL_MS = 5 * 60 * 1000;
 const AUTHORIZED_ADMIN_CACHE_TTL_MS = 30 * 1000;
 const USER_LIST_SNAPSHOT_CACHE_TTL_MS = 60 * 1000;
-const USER_PROFILE_WRITE_THROTTLE_MS = 5 * 60 * 1000;
 const D1_VERIFICATION_STATUS_CACHE_TTL_MS = 60 * 1000;
 const MESSAGE_HISTORY_DEDUPE_TTL_MS = 10 * 60 * 1000;
 const MESSAGE_HISTORY_CONVERSATION_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -80,28 +288,29 @@ const VERIFICATION_SESSION_CACHE_TTL_MS = 20 * 60 * 1000;
 const VERIFICATION_SESSION_D1_SCHEMA_RETRY_MS = 60 * 1000;
 const KV_JSON_NULL = Symbol('kv-json-null');
 const USER_LIST_SNAPSHOT_CACHE_KEY = 'all';
-const USER_PROFILE_VOLATILE_FIELDS = new Set(['lastSeenAt', 'lastMessageType', 'lastMessagePreview']);
 
 const groupAdminMembershipCache = new Map();
 const groupAdminListCache = new Map();
-const verificationPassedCache = new Map();
-const verificationClearedCache = new Map();
-const verificationSessionCache = new Map();
 const kvJsonCache = new Map();
 const userListSnapshotCache = new Map();
-const d1VerificationStatusCache = new Map();
 const messageHistoryDedupeCache = new Map();
 const messageHistoryConversationCache = new Map();
 let systemConfigCache = { value: null, expiresAt: 0 };
-let lastAutoCleanupCheckAt = 0;
-let lastDeletedAccountSweepCheckAt = 0;
-let verificationStatusD1SchemaReady = false;
-let verificationStatusD1SchemaLastErrorAt = 0;
-let verificationSessionD1SchemaReady = false;
-let verificationSessionD1SchemaLastErrorAt = 0;
+const shouldScheduleAutoCleanupCheck = createIntervalGate(DATA_CLEANUP_CHECK_MIN_INTERVAL_MS);
+const shouldScheduleDeletedAccountSweepCheck = createIntervalGate(DELETED_ACCOUNT_SWEEP_CHECK_MIN_INTERVAL_MS);
+const verificationD1Repository = createVerificationD1Repository({
+  retryMs: Math.max(VERIFICATION_D1_SCHEMA_RETRY_MS, VERIFICATION_SESSION_D1_SCHEMA_RETRY_MS),
+});
+const verificationCache = createVerificationCache({
+  statusTtlMs: D1_VERIFICATION_STATUS_CACHE_TTL_MS,
+  passedTtlMs: VERIFICATION_PASS_CACHE_TTL_MS,
+  sessionTtlMs: VERIFICATION_SESSION_CACHE_TTL_MS,
+});
 
 export default {
   async fetch(request, env, ctx) {
+    const startedAt = Date.now();
+    const requestId = getRequestId(request);
     try {
       if (request.method === 'OPTIONS') {
         return new Response(null, {
@@ -124,35 +333,20 @@ export default {
       const topLevelResponse = await handleTopLevelRequest(request, url, runtimeEnv, webhookPath, publicBaseUrl);
       if (topLevelResponse) return topLevelResponse;
 
-      const adminAuthResponse = await handleAdminAuthRequest(request, url, runtimeEnv);
-      if (adminAuthResponse) return adminAuthResponse;
-
-      const adminSystemResponse = await handleAdminSystemRequest(request, url, runtimeEnv, webhookPath, publicBaseUrl);
-      if (adminSystemResponse) return adminSystemResponse;
-
-      const adminUserResponse = await handleAdminUserRequest(request, url, runtimeEnv);
-      if (adminUserResponse) return adminUserResponse;
-
-      const adminReplyResponse = await handleAdminReplyRequest(request, url, runtimeEnv);
-      if (adminReplyResponse) return adminReplyResponse;
-
-      const adminBlacklistResponse = await handleAdminBlacklistRequest(request, url, runtimeEnv);
-      if (adminBlacklistResponse) return adminBlacklistResponse;
-
-      const adminTrustResponse = await handleAdminTrustRequest(request, url, runtimeEnv);
-      if (adminTrustResponse) return adminTrustResponse;
-
-      const authorizedAdminResponse = await handleAuthorizedAdminRequest(request, url, runtimeEnv);
-      if (authorizedAdminResponse) return authorizedAdminResponse;
-
-      const webhookManagementResponse = await handleWebhookManagementRequest(
-        request,
-        url,
-        runtimeEnv,
-        webhookPath,
-        publicBaseUrl,
+      const adminResponse = await dispatchAdminRoutes(
+        { request, url, env: runtimeEnv, webhookPath, publicBaseUrl },
+        {
+          auth: handleAdminAuthRequest,
+          system: handleAdminSystemRequest,
+          users: handleAdminUserRequest,
+          reply: handleAdminReplyRequest,
+          blacklist: handleAdminBlacklistRequest,
+          trust: handleAdminTrustRequest,
+          authorizedAdmins: handleAuthorizedAdminRequest,
+          webhookManagement: handleWebhookManagementRequest,
+        },
       );
-      if (webhookManagementResponse) return webhookManagementResponse;
+      if (adminResponse) return adminResponse;
 
       if (request.method === 'POST' && url.pathname === webhookPath) {
         return await handleWebhookRequest(request, runtimeEnv, publicBaseUrl, ctx);
@@ -161,6 +355,16 @@ export default {
       return new Response('Not Found', { status: 404, headers: corsHeaders(request) });
     } catch (error) {
       const status = error instanceof AppError ? error.status : 500;
+      writeStructuredLog('error', 'http_request_failed', {
+        requestId,
+        stage: 'fetch',
+      }, {
+        method: request.method,
+        path: new URL(request.url).pathname,
+        status,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return json(
         {
           ok: false,
@@ -174,8 +378,31 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    const startedAt = Date.now();
+    const requestId = `scheduled_${Number(event?.scheduledTime || startedAt)}`;
     const runtimeEnv = await getRuntimeEnv(env);
-    const task = runScheduledMaintenance(runtimeEnv);
+    const task = runScheduledMaintenance(runtimeEnv)
+      .then((result) => {
+        writeStructuredLog('info', 'scheduled_maintenance_completed', {
+          requestId,
+          stage: 'maintenance',
+        }, {
+          durationMs: Date.now() - startedAt,
+          status: 'ok',
+        });
+        return result;
+      })
+      .catch((error) => {
+        writeStructuredLog('error', 'scheduled_maintenance_failed', {
+          requestId,
+          stage: 'maintenance',
+        }, {
+          durationMs: Date.now() - startedAt,
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      });
     if (ctx?.waitUntil) {
       ctx.waitUntil(task.catch(() => {}));
       return;
@@ -192,48 +419,38 @@ class AppError extends Error {
 }
 
 async function handleTopLevelRequest(request, url, env, webhookPath, publicBaseUrl) {
-  if (request.method === 'GET' && url.pathname === '/') {
-    return json(await getAdminStatus(url, env, webhookPath, publicBaseUrl), 200, {}, request);
-  }
+  const route = classifyTopLevelRoute(request.method, url.pathname, {
+    verifyImage: VERIFY_IMAGE_PATH,
+    verifyWeb: VERIFY_WEB_PATH,
+    verifyApiPrefix: VERIFY_API_PREFIX,
+    adminPanel: ADMIN_PANEL_PATH,
+  });
 
-  if (request.method === 'GET' && url.pathname === '/health') {
-    return json({ ok: true, now: new Date().toISOString() }, 200, {}, request);
-  }
-
-  if (request.method === 'GET' && url.pathname === VERIFY_IMAGE_PATH) {
-    return serveVerificationImage(url, request);
-  }
-
-  if (request.method === 'GET' && url.pathname === VERIFY_WEB_PATH) {
-    return html(
-      renderVerificationWebPage(),
-      200,
-      request,
-      {
+  switch (route) {
+    case TOP_LEVEL_ROUTES.STATUS:
+      return json(await getAdminStatus(url, env, webhookPath, publicBaseUrl), 200, {}, request);
+    case TOP_LEVEL_ROUTES.HEALTH:
+      return json({ ok: true, now: new Date().toISOString() }, 200, {}, request);
+    case TOP_LEVEL_ROUTES.VERIFY_IMAGE:
+      return serveVerificationImage(url, request);
+    case TOP_LEVEL_ROUTES.VERIFY_WEB:
+      return html(renderVerificationWebPage(), 200, request, {
         'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
         pragma: 'no-cache',
         expires: '0',
-      },
-    );
-  }
-
-  if (request.method === 'POST' && url.pathname.startsWith(VERIFY_API_PREFIX)) {
-    return await handleVerificationApiRequest(request, url, env, publicBaseUrl);
-  }
-
-  if (request.method === 'POST' && url.pathname === '/deploy/bootstrap') {
-    return await handleDeployBootstrap(request, env, webhookPath, publicBaseUrl);
-  }
-
-  if (request.method === 'GET' && url.pathname === ADMIN_PANEL_PATH) {
-    const panelUrl = buildAdminPanelRedirectUrl(env, publicBaseUrl, request);
-    if (isAbsoluteHttpUrl(panelUrl)) {
-      return Response.redirect(panelUrl, 302);
+      });
+    case TOP_LEVEL_ROUTES.VERIFY_API:
+      return handleVerificationApiRequest(request, url, env, publicBaseUrl);
+    case TOP_LEVEL_ROUTES.DEPLOY_BOOTSTRAP:
+      return handleDeployBootstrap(request, env, webhookPath, publicBaseUrl);
+    case TOP_LEVEL_ROUTES.ADMIN_ENTRY: {
+      const panelUrl = buildAdminPanelRedirectUrl(env, publicBaseUrl, request);
+      if (isAbsoluteHttpUrl(panelUrl)) return Response.redirect(panelUrl, 302);
+      return html(renderAdminPage(url, env, webhookPath, publicBaseUrl), 200, request);
     }
-    return html(renderAdminPage(url, env, webhookPath, publicBaseUrl), 200, request);
+    default:
+      return null;
   }
-
-  return null;
 }
 
 async function handleWebhookRequest(request, env, publicBaseUrl = '', ctx = null) {
@@ -245,12 +462,28 @@ async function handleWebhookRequest(request, env, publicBaseUrl = '', ctx = null
     }
   }
 
+  const startedAt = Date.now();
+  const requestId = getRequestId(request);
   const update = await request.json();
+  const updateContext = getTelegramUpdateContext(update);
   try {
     await handleUpdate(update, env, publicBaseUrl, ctx);
+    writeStructuredLog('info', 'telegram_update_completed', {
+      requestId,
+      ...updateContext,
+      stage: 'handle_update',
+    }, {
+      durationMs: Date.now() - startedAt,
+      status: 'ok',
+    });
   } catch (error) {
     await runNonCriticalTask(ctx, async () => {
-      await recordWebhookError(env, error, update);
+      await recordWebhookError(env, error, update, {
+        requestId,
+        ...updateContext,
+        stage: 'handle_update',
+        durationMs: Date.now() - startedAt,
+      });
       await notifyWebhookError(env, error, update);
     });
   }
@@ -280,338 +513,115 @@ async function handleAdminAuthRequest(request, url, env) {
 }
 
 async function handleAdminSystemRequest(request, url, env, webhookPath, publicBaseUrl) {
-  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/status`) {
-    await requireHttpAdmin(request, env);
-    return json(await getAdminStatus(url, env, webhookPath, publicBaseUrl), 200, {}, request);
-  }
-
-  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/system-config`) {
-    await requireHttpAdmin(request, env);
-    return json({ ok: true, config: buildSystemConfigView(await getEffectiveSystemConfig(env)) }, 200, {}, request);
-  }
-
-  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/system-config`) {
-    await requireHttpAdmin(request, env);
-    const body = await readJsonBody(request);
-    const updated = await updateSystemConfig(env, body);
-    return json(
-      {
-        ok: true,
-        config: buildSystemConfigView(await getEffectiveSystemConfig(env)),
-        profileMetaSynced: Boolean(updated?.metaSync?.synced),
-        profileMetaSyncError: updated?.metaSync?.error || null,
-      },
-      200,
-      {},
-      request,
-    );
-  }
-
-  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/maintenance/cleanup`) {
-    await requireHttpAdmin(request, env);
-    const body = await readJsonBody(request);
-    const result = await runDataCleanup(env, {
-      retentionDays: body?.retentionDays,
-      batchSize: body?.batchSize,
-      source: 'admin-api',
-      force: true,
-    });
-    return json({ ok: true, result }, 200, {}, request);
-  }
-
-  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/maintenance/deleted-account-sweep`) {
-    await requireHttpAdmin(request, env);
-    const body = await readJsonBody(request);
-    const result = await runDeletedAccountSweep(env, {
-      batchSize: body?.batchSize,
-      source: 'admin-api',
-      force: true,
-    });
-    return json({ ok: true, result }, 200, {}, request);
-  }
-
-  return null;
+  return handleAdminSystemRoute({ request, url, webhookPath, publicBaseUrl }, {
+    getAdminApiPrefix: () => ADMIN_API_PREFIX,
+    requireAdmin: (value) => requireHttpAdmin(value, env),
+    getStatus: (value, hookPath, baseUrl) => getAdminStatus(value, env, hookPath, baseUrl),
+    getEffectiveSystemConfig: () => getEffectiveSystemConfig(env),
+    buildSystemConfigView,
+    readJsonBody,
+    updateSystemConfig: (body) => updateSystemConfig(env, body),
+    runDataCleanup: (options) => runDataCleanup(env, options),
+    runDeletedAccountSweep: (options) => runDeletedAccountSweep(env, options),
+    runDirectoryIndexBackfill: (options) => runDirectoryIndexBackfill(env, options),
+    json,
+  });
 }
 
 async function handleAdminUserRequest(request, url, env) {
-  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/users`) {
-    await requireHttpAdmin(request, env);
-    const limit = parseLimit(url.searchParams.get('limit'), 50);
-    const offset = parseOffset(url.searchParams.get('offset'), 0);
-    const page = await listUsersPage(env, { limit, offset });
-    return json(
-      {
-        ok: true,
-        users: page.items,
-        summary: page.summary,
-        total: page.total,
-        limit: page.limit,
-        offset: page.offset,
-        nextOffset: page.nextOffset,
-        prevOffset: page.prevOffset,
-        hasMore: page.hasMore,
-      },
-      200,
-      {},
-      request,
-    );
-  }
-
-  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/history`) {
-    await requireHttpAdmin(request, env);
-    const userIdRaw = url.searchParams.get('userId');
-    const limit = parseLimit(url.searchParams.get('limit'), 50);
-    const userId = userIdRaw ? toChatId(userIdRaw) : null;
-    const beforeId = parsePositiveInt(url.searchParams.get('beforeId'), 0);
-    const query = String(url.searchParams.get('q') || '').trim();
-    const direction = String(url.searchParams.get('direction') || '').trim().toLowerCase();
-    const messageType = String(url.searchParams.get('messageType') || '').trim().toLowerCase();
-    const history = await listMessageHistory(env, {
-      userId,
-      limit,
-      beforeId,
-      query,
-      direction,
-      messageType,
-    });
-    return json(
-      {
-        ok: true,
-        ...history,
-      },
-      200,
-      {},
-      request,
-    );
-  }
-
-  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/avatar`) {
-    await requireHttpAdmin(request, env);
-    return await handleTelegramAvatarProxy(request, env);
-  }
-
-  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/welcome-media/upload`) {
-    await requireHttpAdmin(request, env);
-    ensureEnv(env, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
-    const form = await request.formData();
-    const type = String(form.get('type') || '').trim().toLowerCase();
-    const file = form.get('file');
-    if (!file || typeof file === 'string') {
-      throw new AppError(400, '请先选择要上传的文件');
-    }
-    const result = await uploadWelcomeMediaToTelegram(env, type, file);
-    return json({ ok: true, result }, 200, {}, request);
-  }
-
-  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/users/action`) {
-    await requireHttpAdmin(request, env);
-    const body = await readJsonBody(request);
-    const action = String(body.action || '').trim().toLowerCase();
-    const userId = toChatId(body.userId);
-    const operator = getHttpAdminOperator(request);
-
-    if (action === 'ban') {
-      const entry = await setBlacklistEntry(env, userId, {
-        reason: String(body.reason || '通过用户管理封禁').trim() || '通过用户管理封禁',
-        createdAt: new Date().toISOString(),
-        createdBy: operator,
-      });
-      return json({ ok: true, action, entry }, 200, {}, request);
-    }
-
-    if (action === 'unban') {
-      await deleteBlacklistEntry(env, userId);
-      return json({ ok: true, action, userId }, 200, {}, request);
-    }
-
-    if (action === 'trust') {
-      const entry = await setTrustEntry(env, userId, {
-        note: String(body.note || '通过用户管理设为信任用户').trim() || '通过用户管理设为信任用户',
-        createdAt: new Date().toISOString(),
-        createdBy: operator,
-      });
-      return json({ ok: true, action, entry }, 200, {}, request);
-    }
-
-    if (action === 'untrust') {
-      await deleteTrustEntry(env, userId);
-      return json({ ok: true, action, userId }, 200, {}, request);
-    }
-
-    if (action === 'restart') {
-      const state = await restartUserVerification(env, userId, operator);
-      return json({ ok: true, action, state }, 200, {}, request);
-    }
-
-    if (action === 'verifypass') {
-      const state = await adminApproveUserVerification(env, userId, operator, {
-        notifyUser: true,
-      });
-      return json({ ok: true, action, state }, 200, {}, request);
-    }
-
-    if (action === 'delete') {
-      const result = await purgeDeletedUserData(env, userId);
-      return json({ ok: true, action, userId, result }, 200, {}, request);
-    }
-
-    throw new AppError(400, 'action 必须是 ban / unban / trust / untrust / restart / verifypass / delete');
-  }
-
-  return null;
+  return handleAdminUserRoute({ request, url }, {
+    getAdminApiPrefix: () => ADMIN_API_PREFIX,
+    requireAdmin: (value) => requireHttpAdmin(value, env),
+    parseLimit,
+    parseOffset,
+    parsePositiveInt,
+    toChatId,
+    listUsersPage: (options) => listUsersPage(env, options),
+    listMessageHistory: (options) => listMessageHistory(env, options),
+    handleAvatarProxy: (value) => handleTelegramAvatarProxy(value, env),
+    ensureUploadEnvironment: () => ensureEnv(env, ['BOT_TOKEN', 'ADMIN_CHAT_ID']),
+    uploadWelcomeMedia: (type, file) => uploadWelcomeMediaToTelegram(env, type, file),
+    readJsonBody,
+    getOperator: getHttpAdminOperator,
+    nowIso: () => new Date().toISOString(),
+    setBlacklist: (userId, entry) => setBlacklistEntry(env, userId, entry),
+    deleteBlacklist: (userId) => deleteBlacklistEntry(env, userId),
+    setTrust: (userId, entry) => setTrustEntry(env, userId, entry),
+    deleteTrust: (userId) => deleteTrustEntry(env, userId),
+    restartVerification: (userId, operator) => restartUserVerification(env, userId, operator),
+    approveVerification: (userId, operator, options) => adminApproveUserVerification(env, userId, operator, options),
+    purgeUser: (userId) => purgeDeletedUserData(env, userId),
+    createError: (status, message) => new AppError(status, message),
+    json,
+  });
 }
 
 async function handleAdminReplyRequest(request, url, env) {
-  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/reply`) {
-    await requireHttpAdmin(request, env);
-    ensureEnv(env, ['BOT_TOKEN']);
-    const body = await readJsonBody(request);
-    const userId = toChatId(body.userId);
-    const text = String(body.text || '').trim();
-    if (!text) {
-      throw new AppError(400, 'text 不能为空');
-    }
-
-    const result = await telegram(env, 'sendMessage', {
-      chat_id: userId,
-      text,
-    });
-
-    await saveMessageHistory(env, {
-      userId: Number(userId),
-      chatType: 'private',
-      topicId: null,
-      telegramMessageId: Number(result?.message_id) || null,
-      direction: 'admin_to_user',
-      senderRole: 'admin',
-      messageType: 'text',
-      textContent: text,
-      mediaFileId: null,
-      rawPayload: {
-        source: 'admin-api',
-        operator: getHttpAdminOperator(request),
-        telegram: result,
-      },
-    });
-
-    return json({ ok: true, result }, 200, {}, request);
-  }
-
-  return null;
+  return handleAdminReplyRoute({ request, url }, {
+    getAdminApiPrefix: () => ADMIN_API_PREFIX,
+    requireAdmin: (value) => requireHttpAdmin(value, env),
+    ensureBotToken: () => ensureEnv(env, ['BOT_TOKEN']),
+    readJsonBody,
+    toChatId,
+    sendMessage: (userId, text) => telegram(env, 'sendMessage', { chat_id: userId, text }),
+    saveMessageHistory: (entry) => saveMessageHistory(env, entry),
+    getOperator: getHttpAdminOperator,
+    createError: (status, message) => new AppError(status, message),
+    json,
+  });
 }
 
 async function handleAdminBlacklistRequest(request, url, env) {
-  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/blacklist`) {
-    await requireHttpAdmin(request, env);
-    return json(
-      { ok: true, blacklist: await listBlacklist(env, parseLimit(url.searchParams.get('limit'), 50)) },
-      200,
-      {},
-      request,
-    );
-  }
-
-  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/blacklist`) {
-    await requireHttpAdmin(request, env);
-    const body = await readJsonBody(request);
-    const action = String(body.action || '').trim().toLowerCase();
-    const userId = toChatId(body.userId);
-    const operator = getHttpAdminOperator(request);
-
-    if (action === 'add') {
-      const entry = await setBlacklistEntry(env, userId, {
-        reason: String(body.reason || '通过管理面板封禁').trim() || '通过管理面板封禁',
-        createdAt: new Date().toISOString(),
-        createdBy: operator,
-      });
-      return json({ ok: true, action, entry }, 200, {}, request);
-    }
-
-    if (action === 'remove') {
-      await deleteBlacklistEntry(env, userId);
-      return json({ ok: true, action, userId }, 200, {}, request);
-    }
-
-    throw new AppError(400, 'action 必须是 add 或 remove');
-  }
-
-  return null;
+  return handleAdminBlacklistRoute({ request, url }, {
+    getAdminApiPrefix: () => ADMIN_API_PREFIX,
+    requireAdmin: (value) => requireHttpAdmin(value, env),
+    parseLimit,
+    parseOffset,
+    listPage: (options) => listBlacklistPage(env, options),
+    readJsonBody,
+    toChatId,
+    getOperator: getHttpAdminOperator,
+    nowIso: () => new Date().toISOString(),
+    addEntry: (userId, entry) => setBlacklistEntry(env, userId, entry),
+    deleteEntry: (userId) => deleteBlacklistEntry(env, userId),
+    createError: (status, message) => new AppError(status, message),
+    json,
+  });
 }
 
 async function handleAdminTrustRequest(request, url, env) {
-  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/trust`) {
-    await requireHttpAdmin(request, env);
-    return json(
-      { ok: true, trust: await listTrust(env, parseLimit(url.searchParams.get('limit'), 50)) },
-      200,
-      {},
-      request,
-    );
-  }
-
-  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/trust`) {
-    await requireHttpAdmin(request, env);
-    const body = await readJsonBody(request);
-    const action = String(body.action || '').trim().toLowerCase();
-    const userId = toChatId(body.userId);
-    const operator = getHttpAdminOperator(request);
-
-    if (action === 'add') {
-      const entry = await setTrustEntry(env, userId, {
-        note: String(body.note || '通过白名单面板设为信任用户').trim() || '通过白名单面板设为信任用户',
-        createdAt: new Date().toISOString(),
-        createdBy: operator,
-      });
-      return json({ ok: true, action, entry }, 200, {}, request);
-    }
-
-    if (action === 'remove') {
-      await deleteTrustEntry(env, userId);
-      return json({ ok: true, action, userId }, 200, {}, request);
-    }
-
-    throw new AppError(400, 'action 必须是 add 或 remove');
-  }
-
-  return null;
+  return handleAdminTrustRoute({ request, url }, {
+    getAdminApiPrefix: () => ADMIN_API_PREFIX,
+    requireAdmin: (value) => requireHttpAdmin(value, env),
+    parseLimit,
+    parseOffset,
+    listPage: (options) => listTrustPage(env, options),
+    readJsonBody,
+    toChatId,
+    getOperator: getHttpAdminOperator,
+    nowIso: () => new Date().toISOString(),
+    addEntry: (userId, entry) => setTrustEntry(env, userId, entry),
+    deleteEntry: (userId) => deleteTrustEntry(env, userId),
+    createError: (status, message) => new AppError(status, message),
+    json,
+  });
 }
 
 async function handleAuthorizedAdminRequest(request, url, env) {
-  if (request.method === 'GET' && url.pathname === `${ADMIN_API_PREFIX}/admins`) {
-    await requireHttpAdmin(request, env);
-    return json(
-      { ok: true, admins: await listAuthorizedAdmins(env, parseLimit(url.searchParams.get('limit'), 50)) },
-      200,
-      {},
-      request,
-    );
-  }
-
-  if (request.method === 'POST' && url.pathname === `${ADMIN_API_PREFIX}/admins`) {
-    await requireHttpAdmin(request, env);
-    const body = await readJsonBody(request);
-    const action = String(body.action || '').trim().toLowerCase();
-    const userId = toChatId(body.userId);
-    const operator = getHttpAdminOperator(request);
-
-    if (action === 'add') {
-      const entry = await setAuthorizedAdmin(env, userId, {
-        note: String(body.note || '').trim() || null,
-        createdAt: new Date().toISOString(),
-        createdBy: operator,
-      });
-      return json({ ok: true, action, entry }, 200, {}, request);
-    }
-
-    if (action === 'remove') {
-      await deleteAuthorizedAdmin(env, userId);
-      return json({ ok: true, action, userId }, 200, {}, request);
-    }
-
-    throw new AppError(400, 'action 必须是 add 或 remove');
-  }
-
-  return null;
+  return handleAuthorizedAdminRoute({ request, url }, {
+    getAdminApiPrefix: () => ADMIN_API_PREFIX,
+    requireAdmin: (value) => requireHttpAdmin(value, env),
+    parseLimit,
+    listAdmins: (limit) => listAuthorizedAdmins(env, limit),
+    readJsonBody,
+    toChatId,
+    getOperator: getHttpAdminOperator,
+    nowIso: () => new Date().toISOString(),
+    setAdmin: (userId, entry) => setAuthorizedAdmin(env, userId, entry),
+    deleteAdmin: (userId) => deleteAuthorizedAdmin(env, userId),
+    createError: (status, message) => new AppError(status, message),
+    json,
+  });
 }
 
 async function handleWebhookManagementRequest(request, url, env, webhookPath, publicBaseUrl) {
@@ -647,59 +657,6 @@ async function handleWebhookManagementRequest(request, url, env, webhookPath, pu
   }
 
   return null;
-}
-
-function shouldScheduleAutoCleanupCheck(nowMs = Date.now()) {
-  if (nowMs - lastAutoCleanupCheckAt < DATA_CLEANUP_CHECK_MIN_INTERVAL_MS) {
-    return false;
-  }
-  lastAutoCleanupCheckAt = nowMs;
-  return true;
-}
-
-function shouldScheduleDeletedAccountSweepCheck(nowMs = Date.now()) {
-  if (nowMs - lastDeletedAccountSweepCheckAt < DELETED_ACCOUNT_SWEEP_CHECK_MIN_INTERVAL_MS) {
-    return false;
-  }
-  lastDeletedAccountSweepCheckAt = nowMs;
-  return true;
-}
-
-function readTimedCacheValue(cache, key, nowMs = Date.now()) {
-  const hit = cache.get(key);
-  if (!hit) return null;
-  if (!Number.isFinite(hit.expiresAt) || hit.expiresAt <= nowMs) {
-    cache.delete(key);
-    return null;
-  }
-  return hit.value;
-}
-
-function writeTimedCacheValue(cache, key, value, ttlMs, nowMs = Date.now()) {
-  if (!Number.isFinite(ttlMs) || ttlMs <= 0) return;
-  cache.set(key, {
-    value,
-    expiresAt: nowMs + ttlMs,
-  });
-  pruneTimedCache(cache, LOCAL_CACHE_MAX_ENTRIES, nowMs);
-}
-
-function pruneTimedCache(cache, maxEntries, nowMs = Date.now()) {
-  if (cache.size <= maxEntries) {
-    return;
-  }
-  for (const [key, value] of cache.entries()) {
-    if (!value || !Number.isFinite(value.expiresAt) || value.expiresAt <= nowMs) {
-      cache.delete(key);
-    }
-  }
-  while (cache.size > maxEntries) {
-    const oldestKey = cache.keys().next().value;
-    if (typeof oldestKey === 'undefined') {
-      break;
-    }
-    cache.delete(oldestKey);
-  }
 }
 
 function readKvJsonCacheEntry(key, nowMs = Date.now()) {
@@ -752,14 +709,6 @@ function noteKvJsonDelete(key) {
   invalidateUserListSnapshotCache(key);
 }
 
-function serializeJsonForStorage(value) {
-  return JSON.stringify(typeof value === 'undefined' ? null : value);
-}
-
-function areJsonStorageValuesEqual(left, right) {
-  return serializeJsonForStorage(left) === serializeJsonForStorage(right);
-}
-
 async function getCachedJson(env, key, ttlMs = HOT_KV_JSON_CACHE_TTL_MS) {
   if (!env?.BOT_KV) return null;
   const cacheKey = String(key);
@@ -791,21 +740,6 @@ async function putJsonIfChanged(env, key, value, options = {}) {
   return true;
 }
 
-function getJsonChangedKeys(left, right) {
-  const keys = new Set([...Object.keys(left || {}), ...Object.keys(right || {})]);
-  return Array.from(keys).filter((key) => !areJsonStorageValuesEqual(left?.[key], right?.[key]));
-}
-
-function shouldThrottleUserProfileWrite(existing, next, nowMs = Date.now()) {
-  if (!existing || typeof existing !== 'object') return false;
-  const changedKeys = getJsonChangedKeys(existing, next);
-  if (changedKeys.length === 0) return false;
-  if (!changedKeys.every((key) => USER_PROFILE_VOLATILE_FIELDS.has(key))) return false;
-  const previousSeenMs = parseIsoTimeMs(existing.lastSeenAt) || parseIsoTimeMs(existing.firstSeenAt);
-  if (!previousSeenMs) return false;
-  return nowMs - previousSeenMs < USER_PROFILE_WRITE_THROTTLE_MS;
-}
-
 async function putUserProfileIfChanged(env, userId, record, options = {}) {
   if (!env?.BOT_KV) return false;
   const key = userKey(userId);
@@ -822,7 +756,9 @@ async function putUserProfileIfChanged(env, userId, record, options = {}) {
   if (hasComparableExisting) {
     putOptions.existing = existing;
   }
-  return putJsonIfChanged(env, key, record, putOptions);
+  const changed = await putJsonIfChanged(env, key, record, putOptions);
+  if (changed) await writeD1UserDirectory(env, record);
+  return changed;
 }
 
 async function putVerificationState(env, userId, state, options = {}) {
@@ -834,55 +770,15 @@ async function putVerificationState(env, userId, state, options = {}) {
 }
 
 function readD1VerificationStatusCache(userId) {
-  const cached = readTimedCacheValue(d1VerificationStatusCache, verificationCacheKey(userId));
-  if (cached === null) {
-    return { hit: false, value: null };
-  }
-  return {
-    hit: true,
-    value: cached === KV_JSON_NULL ? null : cached,
-  };
+  return verificationCache.readD1Status(userId);
 }
 
 function writeD1VerificationStatusCache(userId, value) {
-  writeTimedCacheValue(
-    d1VerificationStatusCache,
-    verificationCacheKey(userId),
-    value === null ? KV_JSON_NULL : value,
-    D1_VERIFICATION_STATUS_CACHE_TTL_MS,
-  );
+  verificationCache.writeD1Status(userId, value);
 }
 
 function invalidateD1VerificationStatusCache(userId) {
-  d1VerificationStatusCache.delete(verificationCacheKey(userId));
-}
-
-function normalizeD1VerificationStatusRecord(record) {
-  if (!record) return null;
-  return {
-    userId: Number(record.userId),
-    status: String(record.status || '').toLowerCase(),
-    passedAt: normalizeIsoTime(record.passedAt),
-    clearedAt: normalizeIsoTime(record.clearedAt),
-    updatedAt: normalizeIsoTime(record.updatedAt),
-  };
-}
-
-function isSameD1VerificationMeaning(left, right) {
-  const normalizedLeft = normalizeD1VerificationStatusRecord(left);
-  const normalizedRight = normalizeD1VerificationStatusRecord(right);
-  return (
-    normalizedLeft?.status === normalizedRight?.status &&
-    normalizedLeft?.passedAt === normalizedRight?.passedAt &&
-    normalizedLeft?.clearedAt === normalizedRight?.clearedAt
-  );
-}
-
-function buildMessageHistoryDedupeKey(entry, userId) {
-  const messageId = Number(entry?.telegramMessageId || 0);
-  const direction = String(entry?.direction || '').trim();
-  if (!(Number.isFinite(messageId) && messageId > 0 && direction)) return '';
-  return `${Number(userId)}:${direction}:${messageId}`;
+  verificationCache.invalidateD1Status(userId);
 }
 
 function shouldSkipDuplicateMessageHistory(entry, userId) {
@@ -949,10 +845,15 @@ async function runScheduledMaintenance(env) {
   if (isDeletedAccountSweepAutoEnabled(env)) {
     tasks.push(runDeletedAccountSweepIfDue(env));
   }
-  if (tasks.length === 0) {
+  if (tasks.length === 0 && !(env?.BOT_KV && env?.DB)) {
     return { ok: true, skipped: 'disabled' };
   }
   const results = await Promise.allSettled(tasks);
+  if (env?.BOT_KV && env?.DB) {
+    results.push(await Promise.resolve(runDirectoryIndexBackfill(env, { source: 'scheduled' }))
+      .then((value) => ({ status: 'fulfilled', value }))
+      .catch((reason) => ({ status: 'rejected', reason })));
+  }
   return {
     ok: true,
     results,
@@ -972,10 +873,6 @@ async function runNonCriticalTask(ctx, task) {
   }
 
   await promise;
-}
-
-function buildGroupAdminMemberCacheKey(chatId, userId) {
-  return `${Number(chatId)}:${Number(userId)}`;
 }
 
 function getGroupAdminStatusFromCachedList(chatId, userId) {
@@ -1132,6 +1029,7 @@ async function handleUserMessage(message, env, adminChatId, ctx = null) {
   }
   const messageThreadId = topicRecord?.threadId;
   const topicModeActive = Boolean(messageThreadId);
+  const shouldSendMeta = shouldSendUserMetaMessage(env, topicModeEnabled, topicRecord, topicModeActive);
   const metaText = [
     '用户新消息',
     `#UID:${message.chat.id}`,
@@ -1148,65 +1046,18 @@ async function handleUserMessage(message, env, adminChatId, ctx = null) {
     .filter(Boolean)
     .join('\n');
 
-  let delivered = false;
-  let lastError = null;
-  const shouldSendMeta = shouldSendUserMetaMessage(env, topicModeEnabled, topicRecord, topicModeActive);
-
-  for (const relayChatId of relayChatIds) {
-    let forwarded;
-    try {
-      forwarded = await telegramWithThreadFallback(env, 'forwardMessage', {
-        chat_id: relayChatId,
-        from_chat_id: message.chat.id,
-        message_id: message.message_id,
-        message_thread_id: messageThreadId || undefined,
-      });
-      delivered = true;
-    } catch (error) {
-      try {
-        forwarded = await telegramWithThreadFallback(env, 'sendMessage', {
-          chat_id: relayChatId,
-          text: buildFallbackText(message, sender),
-          message_thread_id: messageThreadId || undefined,
-        });
-        delivered = true;
-      } catch (fallbackError) {
-        lastError = fallbackError;
-        continue;
-      }
-    }
-
-    if (!shouldSendMeta) {
-      continue;
-    }
-
-    try {
-      const sentMeta = await telegramWithThreadFallback(env, 'sendMessage', {
-        chat_id: relayChatId,
-        text: metaText,
-        message_thread_id: messageThreadId || undefined,
-        reply_to_message_id: forwarded.message_id,
-        reply_markup: buildAdminActionKeyboard(message.chat.id),
-      });
-      if (topicModeActive) {
-        await markUserTopicMetaSent(env, topicRecord, sentMeta).catch(() => {});
-      }
-    } catch (error) {
-      try {
-        const sentMeta = await telegram(env, 'sendMessage', {
-          chat_id: relayChatId,
-          text: `${metaText}\n\n提示：元信息补发失败：${trimText(formatErrorMessage(error), 300)}`,
-          reply_markup: buildAdminActionKeyboard(message.chat.id),
-        });
-        if (topicModeActive) {
-          await markUserTopicMetaSent(env, topicRecord, sentMeta).catch(() => {});
-        }
-      } catch (fallbackError) {
-        lastError = fallbackError;
-      }
-    }
-  }
-
+  const { delivered, lastError } = await relayUserMessageToAdmins({
+    env,
+    message,
+    relayChatIds,
+    messageThreadId,
+    fallbackText: buildFallbackText(message, sender),
+    metaText,
+    replyMarkup: buildAdminActionKeyboard(message.chat.id),
+    shouldSendMeta,
+    topicModeActive,
+    markTopicMeta: (sentMeta) => markUserTopicMetaSent(env, topicRecord, sentMeta),
+  });
   if (!delivered) {
     await notifyUserAdminDeliveryFailed(env, message, lastError || new Error('消息转发失败'));
     await runNonCriticalTask(ctx, () => saveMessageHistory(env, {
@@ -1271,152 +1122,32 @@ async function getPrivateRelayAdminUserIds(env) {
 
 
 async function handleAdminMessage(message, env, adminChatId, preAuthorized = null, publicBaseUrl = '', ctx = null) {
-  const senderId = message.from?.id ? Number(message.from.id) : null;
-  const chatId = Number(message.chat.id);
-  const hasPreAuthorized = preAuthorized === true || preAuthorized === false;
-  let authorized = hasPreAuthorized ? preAuthorized : senderId ? await isAuthorizedAdmin(env, senderId) : false;
-
-  // 兼容“匿名管理员”发言（sender_chat = 当前管理员群）。
-  if (!authorized && isAnonymousAdminMessage(message, adminChatId)) {
-    authorized = true;
-  }
-
-  // 兼容多管理员群场景：如果消息来自管理员群，允许“群管理员身份”直接回复。
-  // 这样即便没写入 ADMIN_IDS/KV 授权，也能在群里处理会话（尤其是新增协作人员时）。
-  if (!authorized && senderId && chatId === adminChatId && message.chat.type !== 'private') {
-    authorized = await isTelegramGroupAdmin(env, adminChatId, senderId);
-  }
-
-  if (!authorized) {
-    const rawText = typeof message?.text === 'string' ? message.text.trim() : '';
-    if (/^\/\S+/.test(rawText)) {
-      await sendAdminNotice(
-        env,
-        message,
-        '未识别到管理员权限，请先确认：\n1) 你的用户 ID 已加入 ADMIN_IDS 或 ADMIN_ID；\n2) 若使用群管理员自动识别，请将机器人设为该管理群管理员后重试。',
-      );
-    }
-    return;
-  }
-
-  if (senderId) {
-    await runNonCriticalTask(ctx, () => syncTelegramProfile(env, senderId, {
-      user: message.from || {},
-      adminChatId,
-    }));
-  }
-
-  const privateRelayAdminIds = isTopicModeEnabled(env) ? [] : await getPrivateRelayAdminUserIds(env);
-  const isPrivateRelayAdminChat = !isTopicModeEnabled(env) && privateRelayAdminIds.includes(chatId);
-  const isGroupAdminChat = message.chat.type !== 'private' && chatId === adminChatId;
-  const isAuthorizedPrivateAdminChat =
-    message.chat.type === 'private' && (chatId === adminChatId || isPrivateRelayAdminChat || Boolean(senderId && authorized));
-
-  if (!isGroupAdminChat && !isAuthorizedPrivateAdminChat) {
-    return;
-  }
-
-  if (isIgnoredAdminServiceMessage(message)) {
-    return;
-  }
-
-  const welcomeSetupHandled = await tryConsumePendingWelcomeSetup(message, env);
-  if (welcomeSetupHandled) {
-    return;
-  }
-
-  const defaultTargetUserId = await resolveAdminTargetUserId(message, env, adminChatId);
-  const handled = await handleAdminCommand(message, env, defaultTargetUserId, publicBaseUrl);
-  if (handled) {
-    return;
-  }
-
-  const parsedCommand = parseReplyCommand(message.text);
-
-  if (parsedCommand) {
-    const text = parsedCommand.text?.trim();
-    if (!text) {
-      await sendAdminNotice(env, message, '命令格式错误，请使用：/reply 用户ID 内容，或在话题内使用：/r 内容');
-      return;
-    }
-
-    const targetUserId = parsedCommand.userId || defaultTargetUserId;
-    if (!targetUserId) {
-      await sendAdminNotice(
-        env,
-        message,
-        '未识别到目标用户。请使用：/reply 用户ID 内容，或在对应用户话题内发送：/r 内容（也可直接回复用户提示消息）。',
-      );
-      return;
-    }
-
-    try {
-      await telegram(env, 'sendMessage', {
-        chat_id: targetUserId,
-        text,
-      });
-    } catch (error) {
-      await sendAdminNotice(env, message, `发送给用户失败：${trimText(formatErrorMessage(error), 500)}`);
-      return;
-    }
-
-    await runNonCriticalTask(ctx, () => saveMessageHistory(env, {
-      userId: Number(targetUserId),
-      chatType: 'private',
-      topicId: message.message_thread_id || null,
-      telegramMessageId: Number(message.message_id) || null,
-      direction: 'admin_to_user',
-      senderRole: 'admin',
-      messageType: 'text',
-      textContent: text,
-      mediaFileId: null,
-      rawPayload: message,
-    }));
-    return;
-  }
-
-  if (!defaultTargetUserId) {
-    if (chatId === adminChatId && message.chat.type !== 'private') {
-      await sendAdminNotice(
-        env,
-        message,
-        '未识别到目标用户。请回复包含 #UID 的转发消息，或使用 /reply userId 内容。',
-      );
-    } else if (message.chat.type === 'private' && isPrivateRelayAdminChat) {
-      await sendAdminNotice(
-        env,
-        message,
-        '未识别到目标用户。请回复包含 #UID 的转发消息，或使用 /reply userId 内容。',
-      );
-    }
-    return;
-  }
-
-  try {
-    await relayAdminMessageToUser(message, env, defaultTargetUserId);
-  } catch (error) {
-    await sendAdminNotice(env, message, `发送给用户失败：${trimText(formatErrorMessage(error), 500)}`);
-    return;
-  }
-
-  await runNonCriticalTask(ctx, () => saveMessageHistory(env, {
-    userId: Number(defaultTargetUserId),
-    chatType: 'private',
-    topicId: message.message_thread_id || null,
-    telegramMessageId: Number(message.message_id) || null,
-    direction: 'admin_to_user',
-    senderRole: 'admin',
-    messageType: detectMessageType(message),
-    textContent: extractMessageText(message),
-    mediaFileId: extractPrimaryMediaFileId(message),
-    rawPayload: message,
-  }));
-}
-
-function normalizeBotCommandText(text) {
-  return String(text || '')
-    .trim()
-    .replace(/^\/([a-z0-9_]{1,32})@[a-z0-9_]{3,64}(?=\s|$)/i, '/$1');
+  return handleAuthorizedAdminMessage({
+    message,
+    adminChatId,
+    preAuthorized,
+    publicBaseUrl,
+    ctx,
+  }, {
+    isAuthorizedAdmin: (senderId) => isAuthorizedAdmin(env, senderId),
+    isAnonymousAdminMessage,
+    isTelegramGroupAdmin: (chatId, senderId) => isTelegramGroupAdmin(env, chatId, senderId),
+    sendAdminNotice: (value, text) => sendAdminNotice(env, value, text),
+    runNonCriticalTask,
+    syncTelegramProfile: (senderId, details) => syncTelegramProfile(env, senderId, details),
+    isTopicModeEnabled: () => isTopicModeEnabled(env),
+    getPrivateRelayAdminUserIds: () => getPrivateRelayAdminUserIds(env),
+    tryConsumePendingWelcomeSetup: (value) => tryConsumePendingWelcomeSetup(value, env),
+    resolveAdminTargetUserId: (value, chatId) => resolveAdminTargetUserId(value, env, chatId),
+    handleAdminCommand: (value, targetUserId, baseUrl) => handleAdminCommand(value, env, targetUserId, baseUrl),
+    sendUserMessage: (targetUserId, text) => telegram(env, 'sendMessage', {
+      chat_id: targetUserId,
+      text,
+    }),
+    saveMessageHistory: (entry) => saveMessageHistory(env, entry),
+    relayAdminMessageToUser: (value, targetUserId) => relayAdminMessageToUser(value, env, targetUserId),
+    formatError: formatErrorMessage,
+  });
 }
 
 async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseUrl = '') {
@@ -1427,401 +1158,84 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
   const rootAdmin = senderId ? isRootAdmin(env, senderId) : false;
   const pendingScope = getWelcomeSetupScopeKey(message);
 
-  if (trimmed === '/start' || trimmed === '/help') {
-    await sendAdminNotice(
-      env,
-      message,
-      [
-        '管理员使用说明：',
-        isTopicModeEnabled(env)
-          ? '1. 当前默认是话题模式：每个用户进入独立话题，直接在对应话题发消息即可回复。'
-          : '1. 当前为普通回复链模式：建议回复“📩 新的用户消息”提示。',
-        '2. 也可以使用命令：/reply 用户ID 内容；在话题内可用 /r 内容 快速回复。',
-        '3. 若群里“直接发消息回复”无效，请在 @BotFather 里关闭该机器人隐私模式（/setprivacy -> Disable）。',
-        '4. 黑名单：/ban 用户ID 原因、/unban 用户ID、/blacklist',
-        '5. 白名单：/trust 用户ID 备注、/untrust 用户ID',
-        '6. 重置验证：/restart 用户ID（或在话题 / 回复上下文中直接发送 /restart）',
-        '7. 查询用户：/user 用户ID、/users 20',
-        '8. 管理员授权：/adminadd 用户ID、/admindel 用户ID、/admins',
-        '9. 关键词过滤：在系统配置里填写 KEYWORD_FILTERS，命中后会自动上报并封禁。',
-        '10. 打开浏览器管理面板：/panel',
-        '11. 重发当前临时密码：/panelpass',
-        '12. 强制生成新的临时密码：/panelreset',
-        '13. 手动放行验证：/verifypass 用户ID',
-        '14. 清理历史数据：/cleanup （按保留期）或 /cleanup 天数',
-        '15. 检测已注销账户并清理：/sweepdeleted',
-        '16. 彻底删除用户（含历史消息）：/deleteuser 用户ID',
-        '17. 设置欢迎内容：/setwelcome（下一条消息自动识别并回填）',
-        '18. 取消欢迎设置：/cancelwelcome',
-        '19. 召回用户快捷操作按钮：/actions 用户ID（话题内可直接 /actions）',
-        '20. 同步 Telegram 斜杠菜单：/setcommands',
-      ].join('\n'),
-    );
-    return true;
-  }
+  const systemHandled = await handleAdminSystemCommand(
+    {
+      trimmed,
+      topicModeEnabled: isTopicModeEnabled(env),
+      pendingScope,
+      operator: formatAdminOperator(message.from),
+      chatId: message.chat?.id,
+      threadId: message.message_thread_id,
+    },
+    {
+      syncCommands: () => syncTelegramCommands(env),
+      clearWelcomeSetup: (scope) => clearPendingWelcomeSetup(env, scope),
+      setWelcomeSetup: (scope, payload) => setPendingWelcomeSetup(env, scope, payload),
+      normalizeWelcomeType: normalizeWelcomeTypeForSetup,
+      resolvePanelUrl: () => getAdminPanelEntryUrl(env, publicBaseUrl) || resolveAdminPanelUrl(env, publicBaseUrl),
+      resendPanelPassword: () => resendBootstrapPassword(env),
+      resetPanelPassword: () => resetBootstrapPassword(env),
+      sendNotice: (text) => sendAdminNotice(env, message, text),
+    },
+  );
+  if (systemHandled) return true;
 
-  if (/^\/(?:setcommands|synccommands|commands)\s*$/i.test(trimmed)) {
-    const result = await syncTelegramCommands(env);
-    const adminChats = Array.isArray(result.adminCommandChats) ? result.adminCommandChats : [];
-    const adminTargets = Array.isArray(result.adminCommandTargets) ? result.adminCommandTargets : [];
-    const failedScopes = Array.isArray(result.failedScopes) ? result.failedScopes : [];
-    await sendAdminNotice(
-      env,
-      message,
-      [
-        'Telegram 斜杠菜单已同步。',
-        `管理聊天：${adminChats.length ? adminChats.join(', ') : '未配置'}`,
-        `管理员私聊：${adminTargets.length} 个`,
-        failedScopes.length ? `失败 scope：${failedScopes.length} 个，可在面板或 /setCommands 返回中查看详情。` : '',
-      ].filter(Boolean).join('\n'),
-    );
-    return true;
-  }
+  const accessHandled = await handleAdminAccessCommand(
+    { trimmed, rootAdmin, operator: formatAdminOperator(message.from) },
+    {
+      setAuthorizedAdmin: (userId, payload) => setAuthorizedAdmin(env, userId, payload),
+      deleteAuthorizedAdmin: (userId) => deleteAuthorizedAdmin(env, userId),
+      listAuthorizedAdmins: (limit) => listAuthorizedAdmins(env, limit),
+      parseLimit,
+      sendNotice: (text) => sendAdminNotice(env, message, text),
+    },
+  );
+  if (accessHandled) return true;
 
-  if (/^\/(?:cancelwelcome|cancelsetwelcome|welcomecancel)\s*$/i.test(trimmed)) {
-    await clearPendingWelcomeSetup(env, pendingScope);
-    await sendAdminNotice(env, message, '已取消欢迎内容设置。');
-    return true;
-  }
+  const moderationHandled = await handleAdminModerationCommand(
+    { trimmed, defaultTargetUserId, message, blockedText: env.BLOCKED_TEXT || DEFAULT_BLOCKED_TEXT, operator: formatAdminOperator(message.from) },
+    {
+      sendNotice: (text) => sendAdminNotice(env, message, text),
+      setTrust: (userId, payload) => setTrustEntry(env, userId, payload),
+      deleteTrust: (userId) => deleteTrustEntry(env, userId),
+      setBlacklist: (userId, payload) => setBlacklistEntry(env, userId, payload),
+      deleteBlacklist: (userId) => deleteBlacklistEntry(env, userId),
+      sendBlockedMessage: (userId, text) => telegram(env, 'sendMessage', { chat_id: userId, text }),
+      listBlacklist: (limit) => listBlacklist(env, limit),
+      parseLimit,
+    },
+  );
+  if (moderationHandled) return true;
 
-  const setWelcomeMatch = trimmed.match(/^\/(?:setwelcome|welcome|setupwelcome)(?:\s+(text|photo|video|animation|audio|voice|sticker|document|auto))?\s*$/i);
-  if (setWelcomeMatch) {
-    const requestedType = String(setWelcomeMatch[1] || 'auto').trim().toLowerCase();
-    const normalizedType = requestedType === 'auto' ? 'auto' : normalizeWelcomeTypeForSetup(requestedType);
-    await setPendingWelcomeSetup(env, pendingScope, {
-      requestedType: normalizedType,
-      createdBy: formatAdminOperator(message.from),
-      chatId: Number(message.chat?.id || 0) || null,
-      threadId: Number(message.message_thread_id || 0) || null,
-    });
-    const tipLines = [
-      `欢迎设置已开启（模式：${normalizedType === 'auto' ? '自动识别' : normalizedType}）。`,
-      '请发送下一条消息作为欢迎内容：',
-      '1) 纯文本：自动更新 WELCOME_TEXT，并将类型设为 text',
-      '2) 图片/视频/动图/音频/语音/贴纸/文件：自动提取 file_id 并更新 WELCOME_MEDIA 与类型',
-      '3) 若媒体带 caption，会同时写入 WELCOME_TEXT',
-      '可用 /cancelwelcome 取消本次设置。',
-    ];
-    await sendAdminNotice(env, message, tipLines.join('\n'));
-    return true;
-  }
+  const maintenanceHandled = await handleAdminMaintenanceCommand(
+    { trimmed, defaultTargetUserId },
+    {
+      runDataCleanup: (options) => runDataCleanup(env, options),
+      runDeletedAccountSweep: (options) => runDeletedAccountSweep(env, options),
+      purgeDeletedUser: (userId) => purgeDeletedUserData(env, userId),
+      sendNotice: (text) => sendAdminNotice(env, message, text),
+    },
+  );
+  if (maintenanceHandled) return true;
 
-  if (/^\/(?:panel|openpanel|adminpanel|admin)\s*$/i.test(trimmed)) {
-    const panelUrl = getAdminPanelEntryUrl(env, publicBaseUrl) || await resolveAdminPanelUrl(env, publicBaseUrl);
-    await sendAdminNotice(
-      env,
-      message,
-      [
-        '浏览器管理面板入口：',
-        panelUrl,
-        '请在浏览器中打开以上地址，并使用管理员密码登录。',
-      ].join('\n'),
-    );
-    return true;
-  }
-
-  if (/^\/(?:panelpass|panelpassword|adminpass)\s*$/i.test(trimmed)) {
-    const result = await resendBootstrapPassword(env);
-    await sendAdminNotice(env, message, result.message);
-    return true;
-  }
-
-  if (/^\/(?:panelreset|resetpanelpass|resetadminpass)\s*$/i.test(trimmed)) {
-    const result = await resetBootstrapPassword(env);
-    await sendAdminNotice(env, message, result.message);
-    return true;
-  }
-
-  const adminAddMatch = trimmed.match(/^\/(?:adminadd|grantadmin|authadmin)\s+(\-?\d+)(?:\s+([\s\S]+))?$/i);
-  if (adminAddMatch) {
-    if (!rootAdmin) {
-      await sendAdminNotice(env, message, '只有根管理员才可以授权新的管理员。');
-      return true;
-    }
-
-    const userId = Number(adminAddMatch[1]);
-    const note = (adminAddMatch[2] || '').trim() || null;
-    const entry = await setAuthorizedAdmin(env, userId, {
-      note,
-      createdAt: new Date().toISOString(),
-      createdBy: formatAdminOperator(message.from),
-    });
-    await sendAdminNotice(env, message, `已授权管理员：${userId}${entry.note ? `\n备注：${entry.note}` : ''}`);
-    return true;
-  }
-
-  const adminRemoveMatch = trimmed.match(/^\/(?:admindel|revokeadmin|deauthadmin)\s+(\-?\d+)\s*$/i);
-  if (adminRemoveMatch) {
-    if (!rootAdmin) {
-      await sendAdminNotice(env, message, '只有根管理员才可以移除管理员授权。');
-      return true;
-    }
-
-    const userId = Number(adminRemoveMatch[1]);
-    await deleteAuthorizedAdmin(env, userId);
-    await sendAdminNotice(env, message, `已移除管理员授权：${userId}`);
-    return true;
-  }
-
-  const adminsMatch = trimmed.match(/^\/admins(?:\s+(\d+))?\s*$/i);
-  if (adminsMatch) {
-    const limit = parseLimit(adminsMatch[1], 20);
-    const admins = await listAuthorizedAdmins(env, limit);
-    if (admins.length === 0) {
-      await sendAdminNotice(env, message, '当前没有可用管理员。');
-      return true;
-    }
-
-    const text = [
-      `已授权管理员（最多 ${admins.length} 条）：`,
-      ...admins.map((item) => {
-        const suffix = [item.source, item.note].filter(Boolean).join(' | ');
-        return `- ${item.userId}${suffix ? ` | ${suffix}` : ''}`;
-      }),
-    ].join('\n');
-
-    await sendAdminNotice(env, message, text);
-    return true;
-  }
-
-  const trustMatch = trimmed.match(/^\/(?:trust|whitelist)\s*(\-?\d+)?(?:\s+([\s\S]+))?$/i);
-  if (trustMatch) {
-    const userId = trustMatch[1] ? Number(trustMatch[1]) : defaultTargetUserId;
-    const note = (trustMatch[2] || '').trim() || '管理员加入白名单';
-    if (!userId) {
-      await sendAdminNotice(env, message, '请使用 /trust 用户ID 备注，或在回复/话题上下文中直接发送 /trust');
-      return true;
-    }
-
-    const entry = await setTrustEntry(env, userId, {
-      note,
-      createdAt: new Date().toISOString(),
-      createdBy: formatAdminOperator(message.from),
-    });
-    await sendAdminNotice(env, message, `已设为信任用户：${userId}${entry.note ? `\n备注：${entry.note}` : ''}`);
-    return true;
-  }
-
-  const untrustMatch = trimmed.match(/^\/(?:untrust|unwhitelist)\s*(\-?\d+)?\s*$/i);
-  if (untrustMatch) {
-    const userId = untrustMatch[1] ? Number(untrustMatch[1]) : defaultTargetUserId;
-    if (!userId) {
-      await sendAdminNotice(env, message, '请使用 /untrust 用户ID，或在回复/话题上下文中直接发送 /untrust');
-      return true;
-    }
-
-    await deleteTrustEntry(env, userId);
-    await sendAdminNotice(env, message, `已移出信任用户：${userId}`);
-    return true;
-  }
-
-  const restartMatch = trimmed.match(/^\/(?:restart|reverify)\s*(\-?\d+)?\s*$/i);
-  if (restartMatch) {
-    const userId = restartMatch[1] ? Number(restartMatch[1]) : defaultTargetUserId;
-    if (!userId) {
-      await sendAdminNotice(env, message, '请使用 /restart 用户ID，或在回复/话题上下文中直接发送 /restart');
-      return true;
-    }
-
-    await restartUserVerification(env, userId, formatAdminOperator(message.from));
-    await sendAdminNotice(env, message, `已重置用户验证：${userId}\n用户下一条消息将触发新的验证入口。`);
-    return true;
-  }
-
-  const verifyPassMatch = trimmed.match(/^\/(?:verifypass|passverify|approveverify)\s*(\-?\d+)?\s*$/i);
-  if (verifyPassMatch) {
-    const userId = verifyPassMatch[1] ? Number(verifyPassMatch[1]) : defaultTargetUserId;
-    if (!userId) {
-      await sendAdminNotice(env, message, '请使用 /verifypass 用户ID，或在回复/话题上下文中直接发送 /verifypass');
-      return true;
-    }
-
-    await adminApproveUserVerification(env, userId, formatAdminOperator(message.from), { notifyUser: true });
-    await sendAdminNotice(env, message, `已手动通过验证：${userId}`);
-    return true;
-  }
-
-  const cleanupMatch = trimmed.match(/^\/cleanup(?:\s+(\d+))?\s*$/i);
-  if (cleanupMatch) {
-    const retentionDays = cleanupMatch[1] ? Number(cleanupMatch[1]) : undefined;
-    const result = await runDataCleanup(env, {
-      retentionDays,
-      source: 'telegram-admin',
-      force: true,
-    });
-    const lines = [
-      '清理完成：',
-      `保留天数：${result.retentionDays}`,
-      `扫描用户：${result.kv.scannedUsers}`,
-      `删除用户档案：${result.kv.deletedUsers}`,
-      `删除验证状态：${result.kv.deletedVerifyStates}`,
-      `删除话题映射：${result.kv.deletedTopicMappings}`,
-      `删除历史消息：${result.d1.deletedMessages}`,
-      `删除空会话：${result.d1.deletedConversations}`,
-      result.kv.protectedUsers > 0 ? `保护跳过：${result.kv.protectedUsers}` : '',
-      result.kv.errors > 0 ? `异常条数：${result.kv.errors}` : '',
-    ].filter(Boolean);
-    await sendAdminNotice(env, message, lines.join('\n'));
-    return true;
-  }
-
-  const sweepDeletedMatch = trimmed.match(/^\/(?:sweepdeleted|deletedsweep|sweepdeleteds)\s*(\d+)?\s*$/i);
-  if (sweepDeletedMatch) {
-    const batchSize = sweepDeletedMatch[1] ? Number(sweepDeletedMatch[1]) : undefined;
-    const result = await runDeletedAccountSweep(env, {
-      batchSize,
-      source: 'telegram-admin',
-      force: true,
-    });
-    const lines = [
-      '注销账户巡检完成：',
-      `扫描用户：${result.kv.scannedUsers}`,
-      `命中：${result.detections.length}`,
-      `删除用户档案：${result.kv.deletedUsers}`,
-      `删除验证状态：${result.kv.deletedVerifyStates}`,
-      `删除话题映射：${result.kv.deletedTopicMappings}`,
-      `删除黑名单：${result.kv.deletedBlacklistEntries}`,
-      `删除信任：${result.kv.deletedTrustEntries}`,
-      `删除管理员：${result.kv.deletedAdminEntries}`,
-      `删除历史消息：${result.d1.deletedMessages}`,
-      `删除空会话：${result.d1.deletedConversations}`,
-      result.kv.protectedUsers > 0 ? `保护跳过：${result.kv.protectedUsers}` : '',
-      result.kv.probeErrors > 0 ? `探测失败：${result.kv.probeErrors}` : '',
-    ].filter(Boolean);
-    await sendAdminNotice(env, message, lines.join('\n'));
-    return true;
-  }
-
-  const banMatch = trimmed.match(/^\/(?:ban|block)\s*(\-?\d+)?(?:\s+([\s\S]+))?$/i);
-  if (banMatch) {
-    const userId = banMatch[1] ? Number(banMatch[1]) : defaultTargetUserId;
-    const reason = (banMatch[2] || '').trim() || '管理员封禁';
-    if (!userId) {
-      await sendAdminNotice(env, message, '请使用 /ban 用户ID 原因，或在回复/话题上下文中直接发送 /ban 原因');
-      return true;
-    }
-
-    const entry = await setBlacklistEntry(env, userId, {
-      reason,
-      createdAt: new Date().toISOString(),
-      createdBy: formatAdminOperator(message.from),
-    });
-
-    await sendAdminNotice(env, message, `已加入黑名单：${userId}\n原因：${entry.reason}`);
-
-    try {
-      await telegram(env, 'sendMessage', {
-        chat_id: userId,
-        text: env.BLOCKED_TEXT || DEFAULT_BLOCKED_TEXT,
-      });
-    } catch (error) {
-      // ignore
-    }
-
-    return true;
-  }
-
-  const unbanMatch = trimmed.match(/^\/unban\s*(\-?\d+)?\s*$/i);
-  if (unbanMatch) {
-    const userId = unbanMatch[1] ? Number(unbanMatch[1]) : defaultTargetUserId;
-    if (!userId) {
-      await sendAdminNotice(env, message, '请使用 /unban 用户ID，或在回复/话题上下文中直接发送 /unban');
-      return true;
-    }
-
-    await deleteBlacklistEntry(env, userId);
-    await sendAdminNotice(env, message, `已解除黑名单：${userId}`);
-    return true;
-  }
-
-  const blacklistMatch = trimmed.match(/^\/blacklist(?:\s+(\d+))?\s*$/i);
-  if (blacklistMatch) {
-    const entries = await listBlacklist(env, parseLimit(blacklistMatch[1], 20));
-    if (entries.length === 0) {
-      await sendAdminNotice(env, message, '黑名单为空。');
-      return true;
-    }
-
-    const text = [
-      `黑名单列表（最多 ${entries.length} 条）：`,
-      ...entries.map((item) => `- ${item.userId}${item.reason ? ` | ${item.reason}` : ''}`),
-    ].join('\n');
-
-    await sendAdminNotice(env, message, text);
-    return true;
-  }
-
-  const userMatch = trimmed.match(/^\/user\s*(\-?\d+)?\s*$/i);
-  if (userMatch) {
-    const userId = userMatch[1] ? Number(userMatch[1]) : defaultTargetUserId;
-    if (!userId) {
-      await sendAdminNotice(env, message, '请使用 /user 用户ID，或在回复/话题上下文中直接发送 /user');
-      return true;
-    }
-
-    const profile = await getUserProfile(env, userId);
-    const blacklist = await getBlacklistEntry(env, userId);
-    const trust = await getTrustEntry(env, userId);
-    const topic = await getTopicByUser(env, userId);
-    const verifyState = await getUserVerificationState(env, userId);
-    await sendAdminNotice(env, message, formatUserDetailText(userId, profile, blacklist, trust, topic, verifyState));
-    return true;
-  }
-
-  const actionsMatch = trimmed.match(/^\/(?:actions|action|buttons|controls)\s*(\-?\d+)?\s*$/i);
-  if (actionsMatch) {
-    const userId = actionsMatch[1] ? Number(actionsMatch[1]) : defaultTargetUserId;
-    if (!userId) {
-      await sendAdminNotice(env, message, '请使用 /actions 用户ID，或在用户话题/回复上下文中直接发送 /actions');
-      return true;
-    }
-
-    await sendUserActionCard(env, message, userId);
-    return true;
-  }
-
-  const deleteUserMatch = trimmed.match(/^\/(?:deleteuser|deluser|removeuser|purgeuser)\s*(\-?\d+)?\s*$/i);
-  if (deleteUserMatch) {
-    const userId = deleteUserMatch[1] ? Number(deleteUserMatch[1]) : defaultTargetUserId;
-    if (!userId) {
-      await sendAdminNotice(env, message, '请使用 /deleteuser 用户ID，或在回复/话题上下文中直接发送 /deleteuser');
-      return true;
-    }
-
-    const result = await purgeDeletedUserData(env, userId);
-    const lines = [
-      `已删除用户：${userId}`,
-      `删除档案：${result.kv.deletedUsers}`,
-      `删除验证状态：${result.kv.deletedVerifyStates}`,
-      `删除话题映射：${result.kv.deletedTopicMappings}`,
-      `删除黑名单：${result.kv.deletedBlacklistEntries}`,
-      `删除信任：${result.kv.deletedTrustEntries}`,
-      `删除管理员：${result.kv.deletedAdminEntries}`,
-      `删除历史消息：${result.d1.deletedMessages}`,
-      `删除会话：${result.d1.deletedConversations}`,
-      result.kv.errors > 0 ? `KV 异常：${result.kv.errors}` : '',
-      result.d1.errors > 0 ? `D1 异常：${result.d1.errors}` : '',
-    ].filter(Boolean);
-    await sendAdminNotice(env, message, lines.join('\n'));
-    return true;
-  }
-
-  const usersMatch = trimmed.match(/^\/users(?:\s+(\d+))?\s*$/i);
-  if (usersMatch) {
-    const users = await listUsers(env, parseLimit(usersMatch[1], 20));
-    if (users.length === 0) {
-      await sendAdminNotice(env, message, '暂无用户记录，请先配置 BOT_KV 并让用户与机器人互动。');
-      return true;
-    }
-
-    const text = [
-      `最近活跃用户（最多 ${users.length} 条）：`,
-      ...users.map((item) => `- ${item.userId} | ${item.displayName || '未命名'} | ${item.lastSeenAt || '未知时间'}`),
-    ].join('\n');
-
-    await sendAdminNotice(env, message, text);
-    return true;
-  }
+  const userCommandHandled = await handleAdminUserCommand(
+    { trimmed, defaultTargetUserId, operator: formatAdminOperator(message.from) },
+    {
+      restartVerification: (userId, operator) => restartUserVerification(env, userId, operator),
+      approveVerification: (userId, operator, options) => adminApproveUserVerification(env, userId, operator, options),
+      getUserProfile: (userId) => getUserProfile(env, userId),
+      getBlacklist: (userId) => getBlacklistEntry(env, userId),
+      getTrust: (userId) => getTrustEntry(env, userId),
+      getTopic: (userId) => getTopicByUser(env, userId),
+      getVerificationState: (userId) => getUserVerificationState(env, userId),
+      formatUserDetail: formatUserDetailText,
+      sendUserActions: (userId) => sendUserActionCard(env, message, userId),
+      listUsers: (limit) => listUsers(env, limit),
+      parseLimit,
+      sendNotice: (text) => sendAdminNotice(env, message, text),
+    },
+  );
+  if (userCommandHandled) return true;
 
   return false;
 }
@@ -1846,353 +1260,33 @@ async function handleAdminActionCallback(callbackQuery, env, ctx = null) {
     adminChatId,
   }));
 
-  const parts = String(callbackQuery.data || '').split(':');
-  const action = parts[1];
-  const userId = Number(parts[2]);
-  if (!Number.isFinite(userId)) {
-    await answerCallback(env, callbackQuery.id, '无效的目标用户');
-    return;
-  }
-
-  const sourceMessage = callbackQuery.message || { chat: { id: senderId } };
-
-  if (action === 'reply') {
-    const tip = isTopicModeEnabled(env)
-      ? '请直接在当前话题中回复用户消息。'
-      : '请在机器人私聊中回复包含 #UID 的转发消息，或使用 /reply userId 内容。';
-    await answerCallback(env, callbackQuery.id, tip, true);
-    return;
-  }
-
-  if (action === 'user') {
-    const profile = await getUserProfile(env, userId);
-    const blacklist = await getBlacklistEntry(env, userId);
-    const trust = await getTrustEntry(env, userId);
-    const topic = await getTopicByUser(env, userId);
-    const verifyState = await getUserVerificationState(env, userId);
-    await sendAdminNotice(env, sourceMessage, formatUserDetailText(userId, profile, blacklist, trust, topic, verifyState));
-    await answerCallback(env, callbackQuery.id, '已发送用户资料');
-    return;
-  }
-
-  if (action === 'ban') {
-    const entry = await setBlacklistEntry(env, userId, {
-      reason: '通过按钮封禁',
-      createdAt: new Date().toISOString(),
-      createdBy: formatAdminOperator(callbackQuery.from),
-    });
-    await sendAdminNotice(env, sourceMessage, `已通过按钮加入黑名单：${userId}\n原因：${entry.reason}`);
-    try {
-      await telegram(env, 'sendMessage', {
-        chat_id: userId,
-        text: env.BLOCKED_TEXT || DEFAULT_BLOCKED_TEXT,
-      });
-    } catch (error) {
-      // ignore
-    }
-    await answerCallback(env, callbackQuery.id, '已拉黑该用户');
-    return;
-  }
-
-  if (action === 'unban') {
-    await deleteBlacklistEntry(env, userId);
-    await sendAdminNotice(env, sourceMessage, `已通过按钮解除黑名单：${userId}`);
-    await answerCallback(env, callbackQuery.id, '已解除黑名单');
-    return;
-  }
-
-  if (action === 'trust') {
-    const entry = await setTrustEntry(env, userId, {
-      note: '通过按钮加入白名单',
-      createdAt: new Date().toISOString(),
-      createdBy: formatAdminOperator(callbackQuery.from),
-    });
-    await sendAdminNotice(env, sourceMessage, `已通过按钮设为信任用户：${userId}${entry.note ? `\n备注：${entry.note}` : ''}`);
-    await answerCallback(env, callbackQuery.id, '已设为信任用户');
-    return;
-  }
-
-  if (action === 'untrust') {
-    await deleteTrustEntry(env, userId);
-    await sendAdminNotice(env, sourceMessage, `已通过按钮移出信任用户：${userId}`);
-    await answerCallback(env, callbackQuery.id, '已移出信任用户');
-    return;
-  }
-
-  if (action === 'restart') {
-    await restartUserVerification(env, userId, formatAdminOperator(callbackQuery.from));
-    await sendAdminNotice(env, sourceMessage, `已通过按钮重置用户验证：${userId}\n用户下一条消息将触发新的验证入口。`);
-    await answerCallback(env, callbackQuery.id, '已重置，等待用户发新消息触发验证');
-    return;
-  }
-
-  if (action === 'verifypass') {
-    await adminApproveUserVerification(env, userId, formatAdminOperator(callbackQuery.from), { notifyUser: true });
-    await sendAdminNotice(env, sourceMessage, `已通过按钮手动放行验证：${userId}`);
-    await answerCallback(env, callbackQuery.id, '已手动放行验证');
-    return;
-  }
-
-  await answerCallback(env, callbackQuery.id, '未识别的管理员操作');
-}
-
-async function handleUserVerificationCallback(callbackQuery, env, publicBaseUrl = '') {
-  const parts = String(callbackQuery.data || '').split(':');
-  const userId = Number(parts[1]);
-  const token = parts[2];
-  const answer = String(parts[3] || '');
-  const chatId = callbackQuery.message?.chat?.id ? Number(callbackQuery.message.chat.id) : null;
-  const senderId = callbackQuery.from?.id ? Number(callbackQuery.from.id) : null;
-
-  if (!chatId || !senderId || senderId !== userId || chatId !== userId) {
-    await answerCallback(env, callbackQuery.id, '这不是你的验证题目。', true);
-    return;
-  }
-
-  const result = await processUserVerificationAnswer(env, userId, answer, { expectedToken: token });
-
-  if (result.status === 'verified') {
-    await clearVerificationPromptMessage(env, userId, callbackQuery.message?.message_id, '✅ 验证通过，已解除限制。');
-
-    await sendWelcomeMessage(env, userId, {
-      extraText: '你已完成首次验证，现在可以正常发送消息了。',
-    });
-
-    await answerCallback(env, callbackQuery.id, '验证通过');
-    return;
-  }
-
-  if (result.status === 'already-verified') {
-    await answerCallback(env, callbackQuery.id, '你已经通过验证了。');
-    return;
-  }
-
-  if (result.status === 'blocked') {
-    await answerCallback(env, callbackQuery.id, `验证冷却中，请 ${result.leftSec} 秒后再试。`, true);
-    return;
-  }
-
-  if (result.status === 'token-mismatch') {
-    const refreshed = await createOrRefreshUserVerification(env, userId, true);
-    await updateVerificationPromptMessage(env, callbackQuery.message, refreshed, publicBaseUrl);
-    await answerCallback(env, callbackQuery.id, '题目已刷新，请重新验证。', true);
-    return;
-  }
-
-  if (result.status === 'expired') {
-    await clearVerificationPromptMessage(env, userId, callbackQuery.message?.message_id, [
-      '⏰ 验证已过期',
-      '本次验证题目已失效。',
-      '请等待 1 分钟后重新发送消息获取新题目。',
-    ].join('\n'));
-
-    await answerCallback(env, callbackQuery.id, '验证已过期，请 1 分钟后重试。', true);
-    return;
-  }
-
-  if (result.status === 'already-answered') {
-    await answerCallback(env, callbackQuery.id, '本题已处理，请勿重复提交。', true);
-    return;
-  }
-
-  if (result.status === 'banned') {
-    await clearVerificationPromptMessage(env, userId, callbackQuery.message?.message_id, [
-      '🚫 验证失败次数过多',
-      `连续失败次数：${result.failureCount}/${result.maxFailures}`,
-      '你已被自动加入黑名单，请等待管理员处理。',
-    ].join('\n'));
-    await answerCallback(env, callbackQuery.id, '验证失败次数过多，已限制联系。', true);
-    return;
-  }
-
-  if (result.status === 'incorrect') {
-    await clearVerificationPromptMessage(env, userId, callbackQuery.message?.message_id, [
-      '❌ 验证失败',
-      `你的答案：${answer}，正确答案：${result.correctAnswer}`,
-      `连续失败次数：${result.failureCount}/${result.maxFailures}`,
-      '请等待 1 分钟后重新发送消息获取新题目。',
-      `解封时间：${result.blockedUntil}`,
-    ].join('\n'));
-
-    await answerCallback(env, callbackQuery.id, '验证失败，请 1 分钟后重试。', true);
-    return;
-  }
-}
-
-async function tryHandleUserVerificationText(message, env) {
-  if (!isUserVerificationEnabled(env) || typeof message?.text !== 'string') {
-    return false;
-  }
-
-  ensureKv(env);
-  const userId = Number(message.chat.id);
-  const state = await getUserVerificationState(env, userId);
-  if (!state || state.verified || !state.challenge) {
-    return false;
-  }
-
-  const answer = String(message.text || '').trim();
-  if (!answer) {
-    return false;
-  }
-
-  const result = await processUserVerificationAnswer(env, userId, answer);
-
-  if (result.status === 'verified') {
-    const promptMessageId = Number(state.promptMessageId || 0);
-    if (promptMessageId) {
-      await clearVerificationPromptMessage(env, userId, promptMessageId, '✅ 验证通过，已解除限制。');
-    }
-
-    await sendWelcomeMessage(env, userId, {
-      extraText: '你已完成首次验证，现在可以正常发送消息了。',
-    });
-    return true;
-  }
-
-  if (result.status === 'blocked') {
-    await telegram(env, 'sendMessage', {
-      chat_id: userId,
-      text: `验证冷却中，请 ${result.leftSec} 秒后再试。`,
-    });
-    return true;
-  }
-
-  if (result.status === 'expired') {
-    const promptMessageId = Number(state.promptMessageId || 0);
-    if (promptMessageId) {
-      await clearVerificationPromptMessage(env, userId, promptMessageId, [
-        '⏰ 验证已过期',
-        '本次验证题目已失效。',
-        '请等待 1 分钟后重新发送消息获取新题目。',
-      ].join('\n'));
-    }
-
-    await telegram(env, 'sendMessage', {
-      chat_id: userId,
-      text: '验证已过期，请等待 1 分钟后重新发送消息获取新题目。',
-    });
-    return true;
-  }
-
-  if (result.status === 'incorrect') {
-    const promptMessageId = Number(state.promptMessageId || 0);
-    if (promptMessageId) {
-      await clearVerificationPromptMessage(env, userId, promptMessageId, [
-        '❌ 验证失败',
-        `你的答案：${answer}，正确答案：${result.correctAnswer}`,
-        `连续失败次数：${result.failureCount}/${result.maxFailures}`,
-        '请等待 1 分钟后重新发送消息获取新题目。',
-        `解封时间：${result.blockedUntil}`,
-      ].join('\n'));
-    }
-
-    await telegram(env, 'sendMessage', {
-      chat_id: userId,
-      text: '验证失败，请等待 1 分钟后重新发送消息获取新题目。',
-    });
-    return true;
-  }
-
-  if (result.status === 'banned') {
-    const promptMessageId = Number(state.promptMessageId || 0);
-    if (promptMessageId) {
-      await clearVerificationPromptMessage(env, userId, promptMessageId, [
-        '🚫 验证失败次数过多',
-        `连续失败次数：${result.failureCount}/${result.maxFailures}`,
-        '你已被自动加入黑名单，请等待管理员处理。',
-      ].join('\n'));
-    }
-
-    await telegram(env, 'sendMessage', {
-      chat_id: userId,
-      text: '验证失败次数过多，已限制联系。如有需要请等待管理员处理。',
-    });
-    return true;
-  }
-
-  if (result.status === 'already-answered') {
-    await telegram(env, 'sendMessage', {
-      chat_id: userId,
-      text: '本题已处理，请勿重复提交。',
-    });
-    return true;
-  }
-
-  return false;
-}
-
-async function processUserVerificationAnswer(env, userId, answer, options = {}) {
-  ensureKv(env);
-
-  const state = await getUserVerificationState(env, userId);
-  if (state?.verified) {
-    return { status: 'already-verified' };
-  }
-
-  const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
-  if (blockedUntilMs && blockedUntilMs > Date.now()) {
-    return {
-      status: 'blocked',
-      leftSec: Math.max(1, Math.ceil((blockedUntilMs - Date.now()) / 1000)),
-    };
-  }
-
-  if (!state?.challenge) {
-    return { status: 'no-challenge' };
-  }
-
-  if (options.expectedToken && state.challenge.token !== options.expectedToken) {
-    return { status: 'token-mismatch' };
-  }
-
-  if (isVerificationExpired(state.challenge, env)) {
-    await markUserVerificationFailed(env, userId, {
-      selectedAnswer: '',
-      correctAnswer: String(state.challenge.correct || ''),
-      blockMs: getVerificationTimeoutBlockMs(env),
-      countForBan: false,
-    });
-    return { status: 'expired' };
-  }
-
-  if (state?.answeredAt) {
-    return { status: 'already-answered' };
-  }
-
-  if (String(answer) !== String(state.challenge.correct)) {
-    const failedState = await markUserVerificationFailed(env, userId, {
-      selectedAnswer: answer,
-      correctAnswer: String(state.challenge.correct),
-      blockMs: getVerificationFailBlockMs(env),
-    });
-    const maxFailures = getVerificationMaxFailures(env);
-    if (failedState.failureCount >= maxFailures) {
-      const entry = await banUserForVerificationFailures(env, userId, failedState, maxFailures);
-      return {
-        status: 'banned',
-        correctAnswer: String(state.challenge.correct),
-        blockedUntil: failedState.blockedUntil,
-        failureCount: failedState.failureCount,
-        maxFailures,
-        blacklist: entry,
-      };
-    }
-    return {
-      status: 'incorrect',
-      correctAnswer: String(state.challenge.correct),
-      blockedUntil: failedState.blockedUntil,
-      failureCount: failedState.failureCount,
-      maxFailures,
-    };
-  }
-
-  await markUserVerified(env, userId);
-  return { status: 'verified' };
-}
-
-function isUserPrivateCommand(message) {
-  return typeof message?.text === 'string' && /^\/\S+/.test(String(message.text).trim());
+  await handleAdminActionCallbackCommand(
+    {
+      data: callbackQuery.data,
+      sourceMessage: callbackQuery.message || { chat: { id: senderId } },
+      senderId,
+      operator: formatAdminOperator(callbackQuery.from),
+      topicModeEnabled: isTopicModeEnabled(env),
+      blockedText: env.BLOCKED_TEXT || DEFAULT_BLOCKED_TEXT,
+    },
+    {
+      answer: (text, showAlert = false) => answerCallback(env, callbackQuery.id, text, showAlert),
+      sendNotice: (sourceMessage, text) => sendAdminNotice(env, sourceMessage, text),
+      getUserProfile: (userId) => getUserProfile(env, userId),
+      getBlacklist: (userId) => getBlacklistEntry(env, userId),
+      getTrust: (userId) => getTrustEntry(env, userId),
+      getTopic: (userId) => getTopicByUser(env, userId),
+      getVerificationState: (userId) => getUserVerificationState(env, userId),
+      formatUserDetail: formatUserDetailText,
+      setBlacklist: (userId, payload) => setBlacklistEntry(env, userId, payload),
+      deleteBlacklist: (userId) => deleteBlacklistEntry(env, userId),
+      setTrust: (userId, payload) => setTrustEntry(env, userId, payload),
+      deleteTrust: (userId) => deleteTrustEntry(env, userId),
+      restartVerification: (userId, operator) => restartUserVerification(env, userId, operator),
+      approveVerification: (userId, operator, options) => adminApproveUserVerification(env, userId, operator, options),
+      sendBlockedMessage: (userId, text) => telegram(env, 'sendMessage', { chat_id: userId, text }),
+    },
+  );
 }
 
 function getWelcomeType(env) {
@@ -2365,243 +1459,11 @@ async function ensureUserVerifiedOrPrompt(message, env, publicBaseUrl = '', opti
 }
 
 async function syncTelegramCommands(env) {
-  const userCommands = [
-    { command: 'start', description: '开始使用机器人 / 查看欢迎说明' },
-  ];
-  const adminCommands = [
-    { command: 'start', description: '开始使用机器人 / 查看欢迎说明' },
-    { command: 'help', description: '查看管理员帮助' },
-    { command: 'panel', description: '打开浏览器管理面板链接' },
-    { command: 'reply', description: '回复用户：/reply 用户ID 内容' },
-    { command: 'ban', description: '拉黑用户：/ban 用户ID 原因' },
-    { command: 'unban', description: '解除拉黑：/unban 用户ID' },
-    { command: 'trust', description: '设为信任用户：/trust 用户ID 备注' },
-    { command: 'untrust', description: '取消信任用户：/untrust 用户ID' },
-    { command: 'restart', description: '要求用户重新验证：/restart 用户ID' },
-    { command: 'verifypass', description: '手动放行验证：/verifypass 用户ID' },
-    { command: 'user', description: '查看用户详情：/user 用户ID' },
-    { command: 'actions', description: '发送用户快捷操作按钮：/actions 用户ID' },
-    { command: 'users', description: '查看最近用户：/users 20' },
-    { command: 'deleteuser', description: '彻底删除用户：/deleteuser 用户ID' },
-    { command: 'setwelcome', description: '设置欢迎内容：/setwelcome' },
-    { command: 'cancelwelcome', description: '取消欢迎设置：/cancelwelcome' },
-    { command: 'blacklist', description: '查看黑名单列表' },
-    { command: 'admins', description: '查看管理员列表' },
-    { command: 'adminadd', description: '授权管理员：/adminadd 用户ID 备注' },
-    { command: 'admindel', description: '移除管理员：/admindel 用户ID' },
-    { command: 'panelpass', description: '重发当前面板临时密码' },
-    { command: 'panelreset', description: '生成新的面板临时密码' },
-    { command: 'sweepdeleted', description: '巡检已注销账户并清理' },
-    { command: 'setcommands', description: '同步 Telegram 斜杠菜单' },
-  ];
-
-  const applied = [];
-  const failedScopes = [];
-  const adminChatIds = getCommandAdminChatIds(env);
-  const adminUserIds = await getCommandAdminUserIds(env);
-  const scopedAdminUserIds = adminUserIds.filter((userId) => !adminChatIds.includes(Number(userId)));
-
-  applied.push(
-    await telegram(env, 'setMyCommands', {
-      scope: { type: 'default' },
-      commands: userCommands,
-    }),
-  );
-
-  applied.push(
-    await telegram(env, 'setChatMenuButton', {
-      menu_button: {
-        type: 'commands',
-      },
-    }),
-  );
-
-  for (const chatId of adminChatIds) {
-    try {
-      applied.push(
-        await telegram(env, 'setMyCommands', {
-          scope: {
-            type: 'chat',
-            chat_id: chatId,
-          },
-          commands: adminCommands,
-        }),
-      );
-    } catch (error) {
-      failedScopes.push({
-        scope: 'admin_chat',
-        chatId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  for (const userId of scopedAdminUserIds) {
-    try {
-      applied.push(
-        await telegram(env, 'setMyCommands', {
-          scope: {
-            type: 'chat',
-            chat_id: userId,
-          },
-          commands: adminCommands,
-        }),
-      );
-    } catch (error) {
-      failedScopes.push({
-        scope: 'admin_private',
-        userId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  return {
-    commands: {
-      default: userCommands,
-      admin: adminCommands,
-    },
-    menuButton: 'commands',
-    adminCommandChats: adminChatIds,
-    adminCommandTargets: scopedAdminUserIds,
-    failedScopes,
-    appliedCount: applied.length,
-    note:
-      adminChatIds.length > 0 || scopedAdminUserIds.length > 0
-        ? '默认命令已同步；管理员命令已下发到 ADMIN_CHAT_ID 对应聊天，并按管理员私聊用户 ID 单独下发。'
-        : '默认命令已同步；未找到可用的 ADMIN_CHAT_ID 或管理员私聊用户 ID，因此管理员专属命令未单独下发。',
-  };
-}
-
-async function relayAdminMessageToUser(message, env, targetUserId) {
-  if (typeof message.text === 'string' && !message.text.startsWith('/')) {
-    await telegram(env, 'sendMessage', {
-      chat_id: targetUserId,
-      text: message.text,
-    });
-    return;
-  }
-
-  if (message.photo?.length) {
-    const photo = message.photo[message.photo.length - 1];
-    await telegram(env, 'sendPhoto', {
-      chat_id: targetUserId,
-      photo: photo.file_id,
-      caption: message.caption || undefined,
-    });
-    return;
-  }
-
-  if (message.document) {
-    await telegram(env, 'sendDocument', {
-      chat_id: targetUserId,
-      document: message.document.file_id,
-      caption: message.caption || undefined,
-    });
-    return;
-  }
-
-  if (message.video) {
-    await telegram(env, 'sendVideo', {
-      chat_id: targetUserId,
-      video: message.video.file_id,
-      caption: message.caption || undefined,
-    });
-    return;
-  }
-
-  if (message.animation) {
-    await telegram(env, 'sendAnimation', {
-      chat_id: targetUserId,
-      animation: message.animation.file_id,
-      caption: message.caption || undefined,
-    });
-    return;
-  }
-
-  if (message.audio) {
-    await telegram(env, 'sendAudio', {
-      chat_id: targetUserId,
-      audio: message.audio.file_id,
-      caption: message.caption || undefined,
-    });
-    return;
-  }
-
-  if (message.voice) {
-    await telegram(env, 'sendVoice', {
-      chat_id: targetUserId,
-      voice: message.voice.file_id,
-      caption: message.caption || undefined,
-    });
-    return;
-  }
-
-  if (message.video_note) {
-    await telegram(env, 'sendVideoNote', {
-      chat_id: targetUserId,
-      video_note: message.video_note.file_id,
-    });
-    return;
-  }
-
-  if (message.sticker) {
-    await telegram(env, 'sendSticker', {
-      chat_id: targetUserId,
-      sticker: message.sticker.file_id,
-    });
-    return;
-  }
-
-  if (message.contact) {
-    await telegram(env, 'sendContact', {
-      chat_id: targetUserId,
-      phone_number: message.contact.phone_number,
-      first_name: message.contact.first_name,
-      last_name: message.contact.last_name || undefined,
-      vcard: message.contact.vcard || undefined,
-    });
-    return;
-  }
-
-  if (message.location) {
-    await telegram(env, 'sendLocation', {
-      chat_id: targetUserId,
-      latitude: message.location.latitude,
-      longitude: message.location.longitude,
-    });
-    return;
-  }
-
-  if (message.text && message.text.startsWith('/')) {
-    return;
-  }
-
-  await telegram(env, 'sendMessage', {
-    chat_id: targetUserId,
-    text: '管理员发送了一条当前机器人暂未适配的消息类型。',
+  return syncTelegramCommandMenu({
+    env,
+    adminChatIds: getCommandAdminChatIds(env),
+    adminUserIds: await getCommandAdminUserIds(env),
   });
-}
-
-function parseReplyCommand(text) {
-  if (typeof text !== 'string') return null;
-  const withUserId = text.match(/^\/(?:reply|r)\s+(\-?\d+)\s+([\s\S]+)$/i);
-  if (withUserId) {
-    return {
-      userId: Number(withUserId[1]),
-      text: withUserId[2],
-    };
-  }
-
-  const withContext = text.match(/^\/(?:reply|r)\s+([\s\S]+)$/i);
-  if (withContext) {
-    return {
-      userId: null,
-      text: withContext[1],
-    };
-  }
-
-  return null;
 }
 
 async function resolveAdminTargetUserId(message, env, adminChatId) {
@@ -2621,73 +1483,6 @@ async function resolveAdminTargetUserId(message, env, adminChatId) {
   }
 
   return null;
-}
-
-function extractTargetUserId(message) {
-  if (!message) return null;
-
-  const textPool = [message.text, message.caption].filter(Boolean).join('\n');
-  const metaMatch = textPool.match(/#UID:(\-?\d+)/);
-  if (metaMatch) {
-    return Number(metaMatch[1]);
-  }
-
-  const forwardOriginUserId = message.forward_origin?.sender_user?.id;
-  if (forwardOriginUserId) {
-    return Number(forwardOriginUserId);
-  }
-
-  const forwardFromId = message.forward_from?.id;
-  if (forwardFromId) {
-    return Number(forwardFromId);
-  }
-
-  if (message.reply_to_message) {
-    return extractTargetUserId(message.reply_to_message);
-  }
-
-  return null;
-}
-
-function buildFallbackText(message, sender) {
-  const header = [
-    '📩 新的用户消息（降级文本模式）',
-    `#UID:${message.chat.id}`,
-    formatUserProfile(sender, message.chat),
-  ]
-    .filter(Boolean)
-    .join('\n');
-
-  return `${header}\n\n${formatMessagePreview(message)}`.trim();
-}
-
-function formatMessagePreview(message) {
-  if (message.text) return trimText(message.text, 300);
-  if (message.caption) return `[媒体消息]\n${trimText(message.caption, 300)}`;
-  if (message.sticker) return '[贴纸消息]';
-  if (message.voice) return '[语音消息]';
-  if (message.video_note) return '[视频笔记消息]';
-  if (message.photo) return '[图片消息]';
-  if (message.video) return '[视频消息]';
-  if (message.audio) return '[音频消息]';
-  if (message.document) return `[文件消息] ${message.document.file_name || ''}`.trim();
-  if (message.location) return `[位置消息] ${message.location.latitude}, ${message.location.longitude}`;
-  if (message.contact) return `[联系人] ${message.contact.first_name} ${message.contact.phone_number}`.trim();
-  return '[无法预览的消息类型]';
-}
-
-function trimText(text, maxLen) {
-  const value = String(text || '');
-  return value.length > maxLen ? `${value.slice(0, maxLen)}...` : value;
-}
-
-function formatUserProfile(sender, chat) {
-  const parts = [];
-  const name = [sender.first_name, sender.last_name].filter(Boolean).join(' ').trim();
-  if (name) parts.push(`用户：${name}`);
-  if (sender.username) parts.push(`@${sender.username}`);
-  if (chat?.id) parts.push(`ID:${chat.id}`);
-  return parts.join(' | ');
 }
 
 function formatUserDetailText(userId, profile, blacklist, trust, topic, verifyState) {
@@ -2764,45 +1559,6 @@ function buildAdminActionKeyboard(userId) {
       ],
       [{ text: '🧹 取消信任', callback_data: `adm:untrust:${userId}` }],
     ],
-  };
-}
-
-function buildUserVerificationText(challenge, env = {}) {
-  const expireMs = getVerificationExpireMs(env);
-  const modeText = challenge.mode === 'math' ? '10 以内算术题' : '图形验证码';
-  const promptText = challenge.mode === 'math'
-    ? '请从下方 4 个选项中选择正确答案，答错后需等待 1 分钟。'
-    : '请识别图片中的验证码，并从下方 4 个选项中选择正确答案，答错后需等待 1 分钟。';
-
-  return [
-    '🔐 首次私聊验证',
-    `⏱ 请在 ${Math.floor(expireMs / 60000)} 分钟内完成验证`,
-    promptText,
-    '❗ 验证失败后需等待 1 分钟',
-    `验证方式：${modeText}`,
-    `题目：${challenge.question}`,
-    `有效期：${Math.floor(expireMs / 60000)} 分钟`,
-  ].join('\n');
-}
-
-function buildTextVerificationPrompt(challenge, env = {}) {
-  const lines = [buildUserVerificationText(challenge, env)];
-  if (challenge?.mode === 'captcha') {
-    lines.push('');
-    lines.push(`验证码：${challenge.correct}`);
-    lines.push('图片发送失败时显示此文本验证码，请点选下方对应选项。');
-  }
-  return lines.join('\n');
-}
-
-function buildUserVerificationKeyboard(userId, challenge) {
-  const buttons = challenge.options.map((option) => ({
-    text: String(option),
-    callback_data: `verify:${userId}:${challenge.token}:${option}`,
-  }));
-
-  return {
-    inline_keyboard: [buttons.slice(0, 2), buttons.slice(2, 4)].filter((row) => row.length > 0),
   };
 }
 
@@ -2961,395 +1717,6 @@ function drawChar(pixels, width, height, ch, x, y, scale, color) {
   }
 }
 
-function drawLine(pixels, width, height, x0, y0, x1, y1, color) {
-  let dx = Math.abs(x1 - x0);
-  let dy = -Math.abs(y1 - y0);
-  const sx = x0 < x1 ? 1 : -1;
-  const sy = y0 < y1 ? 1 : -1;
-  let err = dx + dy;
-  while (true) {
-    setPixel(pixels, width, height, x0, y0, color);
-    if (x0 === x1 && y0 === y1) break;
-    const e2 = 2 * err;
-    if (e2 >= dy) {
-      err += dy;
-      x0 += sx;
-    }
-    if (e2 <= dx) {
-      err += dx;
-      y0 += sy;
-    }
-  }
-}
-
-function setPixel(pixels, width, height, x, y, color) {
-  if (x < 0 || y < 0 || x >= width || y >= height) return;
-  const idx = (Math.floor(y) * width + Math.floor(x)) * 3;
-  pixels[idx] = color[0];
-  pixels[idx + 1] = color[1];
-  pixels[idx + 2] = color[2];
-}
-
-function blendPixel(pixels, width, height, x, y, color, alpha = 1) {
-  if (x < 0 || y < 0 || x >= width || y >= height) return;
-  const idx = (Math.floor(y) * width + Math.floor(x)) * 3;
-  const a = clamp(Number(alpha), 0, 1);
-  pixels[idx] = Math.round(pixels[idx] * (1 - a) + color[0] * a);
-  pixels[idx + 1] = Math.round(pixels[idx + 1] * (1 - a) + color[1] * a);
-  pixels[idx + 2] = Math.round(pixels[idx + 2] * (1 - a) + color[2] * a);
-}
-
-function drawFilledCircle(pixels, width, height, cx, cy, radius, color, alpha = 1) {
-  const r = Math.max(0, Number(radius || 0));
-  const minX = Math.floor(cx - r);
-  const maxX = Math.ceil(cx + r);
-  const minY = Math.floor(cy - r);
-  const maxY = Math.ceil(cy + r);
-  for (let y = minY; y <= maxY; y += 1) {
-    for (let x = minX; x <= maxX; x += 1) {
-      const dx = x - cx;
-      const dy = y - cy;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      if (distance > r) continue;
-      blendPixel(pixels, width, height, x, y, color, alpha * Math.max(0, 1 - distance / Math.max(1, r + 1)));
-    }
-  }
-}
-
-function drawCircleOutline(pixels, width, height, cx, cy, radius, color) {
-  const r = Math.max(1, Number(radius || 0));
-  for (let i = 0; i < 720; i += 1) {
-    const angle = (Math.PI * 2 * i) / 720;
-    const x = Math.round(cx + Math.cos(angle) * r);
-    const y = Math.round(cy + Math.sin(angle) * r);
-    blendPixel(pixels, width, height, x, y, color, 0.55);
-  }
-}
-
-function createSeededRandom(seedText) {
-  let state = 2166136261;
-  for (let i = 0; i < seedText.length; i += 1) {
-    state ^= seedText.charCodeAt(i);
-    state = Math.imul(state, 16777619) >>> 0;
-  }
-  return () => {
-    state += 0x6d2b79f5;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function encodePngRgb(width, height, pixels) {
-  const raw = new Uint8Array((width * 3 + 1) * height);
-  let offset = 0;
-  for (let y = 0; y < height; y += 1) {
-    raw[offset] = 0;
-    offset += 1;
-    raw.set(pixels.subarray(y * width * 3, (y + 1) * width * 3), offset);
-    offset += width * 3;
-  }
-
-  const header = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
-  const ihdr = new Uint8Array(13);
-  writeUint32(ihdr, 0, width);
-  writeUint32(ihdr, 4, height);
-  ihdr[8] = 8;
-  ihdr[9] = 2;
-  ihdr[10] = 0;
-  ihdr[11] = 0;
-  ihdr[12] = 0;
-
-  return concatBytes([
-    header,
-    pngChunk('IHDR', ihdr),
-    pngChunk('IDAT', zlibStore(raw)),
-    pngChunk('IEND', new Uint8Array(0)),
-  ]);
-}
-
-function zlibStore(data) {
-  const parts = [new Uint8Array([0x78, 0x01])];
-  let offset = 0;
-  while (offset < data.length) {
-    const len = Math.min(65535, data.length - offset);
-    const final = offset + len >= data.length ? 1 : 0;
-    const block = new Uint8Array(5 + len);
-    block[0] = final;
-    block[1] = len & 0xff;
-    block[2] = (len >>> 8) & 0xff;
-    const nlen = (~len) & 0xffff;
-    block[3] = nlen & 0xff;
-    block[4] = (nlen >>> 8) & 0xff;
-    block.set(data.subarray(offset, offset + len), 5);
-    parts.push(block);
-    offset += len;
-  }
-
-  const adler = adler32(data);
-  const checksum = new Uint8Array(4);
-  writeUint32(checksum, 0, adler);
-  parts.push(checksum);
-  return concatBytes(parts);
-}
-
-function pngChunk(type, data) {
-  const typeBytes = new TextEncoder().encode(type);
-  const out = new Uint8Array(12 + data.length);
-  writeUint32(out, 0, data.length);
-  out.set(typeBytes, 4);
-  out.set(data, 8);
-  const crcInput = new Uint8Array(typeBytes.length + data.length);
-  crcInput.set(typeBytes, 0);
-  crcInput.set(data, typeBytes.length);
-  writeUint32(out, 8 + data.length, crc32(crcInput));
-  return out;
-}
-
-function adler32(data) {
-  let a = 1;
-  let b = 0;
-  for (const byte of data) {
-    a = (a + byte) % 65521;
-    b = (b + a) % 65521;
-  }
-  return (((b << 16) | a) >>> 0);
-}
-
-let crcTable = null;
-
-function crc32(data) {
-  if (!crcTable) {
-    crcTable = new Uint32Array(256);
-    for (let n = 0; n < 256; n += 1) {
-      let c = n;
-      for (let k = 0; k < 8; k += 1) {
-        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-      }
-      crcTable[n] = c >>> 0;
-    }
-  }
-  let crc = 0xffffffff;
-  for (const byte of data) {
-    crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function writeUint32(bytes, offset, value) {
-  bytes[offset] = (value >>> 24) & 0xff;
-  bytes[offset + 1] = (value >>> 16) & 0xff;
-  bytes[offset + 2] = (value >>> 8) & 0xff;
-  bytes[offset + 3] = value & 0xff;
-}
-
-function concatBytes(parts) {
-  const length = parts.reduce((sum, part) => sum + part.length, 0);
-  const out = new Uint8Array(length);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-}
-
-function generateCaptchaCode(length = 4) {
-  const pool = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-  let code = '';
-  for (let i = 0; i < length; i++) {
-    code += pool[randomInt(0, pool.length - 1)];
-  }
-  return code;
-}
-
-function mutateCaptchaCode(code) {
-  const pool = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-  const chars = String(code).split('');
-  const index = randomInt(0, chars.length - 1);
-  let next = chars[index];
-  while (next === chars[index]) {
-    next = pool[randomInt(0, pool.length - 1)];
-  }
-  chars[index] = next;
-  return chars.join('');
-}
-
-function createMathOperands(operator) {
-  if (operator === '+') {
-    return [randomInt(0, 10), randomInt(0, 10)];
-  }
-
-  if (operator === '-') {
-    const left = randomInt(0, 10);
-    const right = randomInt(0, left);
-    return [left, right];
-  }
-
-  const factors = [];
-  for (let left = 0; left <= 10; left += 1) {
-    for (let right = 0; right <= 10; right += 1) {
-      if (left * right <= 10) {
-        factors.push([left, right]);
-      }
-    }
-  }
-
-  return factors[randomInt(0, factors.length - 1)];
-}
-
-function calculateMathAnswer(left, right, operator) {
-  if (operator === '+') return left + right;
-  if (operator === '-') return left - right;
-  return left * right;
-}
-
-function generateMathOptions(correct) {
-  const options = new Set([Number(correct)]);
-  while (options.size < 4) {
-    const delta = randomInt(-3, 3);
-    const candidate = Math.max(0, Number(correct) + (delta === 0 ? 1 : delta));
-    options.add(candidate);
-  }
-  return shuffleArray(Array.from(options)).slice(0, 4);
-}
-
-function generateCaptchaChallenge() {
-  const correct = generateCaptchaCode(4);
-  const options = new Set([correct]);
-  while (options.size < 4) {
-    options.add(mutateCaptchaCode(correct));
-  }
-
-  return {
-    mode: 'captcha',
-    token: createChallengeToken(),
-    question: '请选择图片中正确的验证码',
-    imageText: correct,
-    correct,
-    options: shuffleArray(Array.from(options)).slice(0, 4),
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function generateMathChallenge() {
-  const operators = ['+', '-', '?'];
-  const displayOperator = operators[randomInt(0, operators.length - 1)];
-  const operator = displayOperator === '?' ? '*' : displayOperator;
-  const [left, right] = createMathOperands(operator);
-  const correct = calculateMathAnswer(left, right, operator);
-
-  return {
-    mode: 'math',
-    token: createChallengeToken(),
-    question: `${left} ${displayOperator} ${right} = ?（答案范围 0~10）`,
-    imageText: `${left} ${displayOperator} ${right} = ?`,
-    correct,
-    options: generateMathOptions(correct),
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function generateNumericCode(length = 4) {
-  let code = '';
-  for (let i = 0; i < length; i += 1) {
-    code += String(randomInt(0, 9));
-  }
-  return code;
-}
-
-function mutateNumericCode(code) {
-  const chars = String(code).split('');
-  const index = randomInt(0, chars.length - 1);
-  let next = chars[index];
-  while (next === chars[index]) {
-    next = String(randomInt(0, 9));
-  }
-  chars[index] = next;
-  return chars.join('');
-}
-
-function generateNumericChoiceChallenge() {
-  const correct = generateNumericCode(4);
-  const options = new Set([correct]);
-  while (options.size < 4) {
-    options.add(mutateNumericCode(correct));
-  }
-
-  return {
-    mode: 'numeric',
-    token: createChallengeToken(),
-    question: '请选择图片中的数字验证码',
-    imageText: correct,
-    correct,
-    options: shuffleArray(Array.from(options)).slice(0, 4),
-    attempts: 0,
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function generateVerificationChallenge(env = {}) {
-  const captchaEnabled = getVerificationCaptchaEnabled(env);
-  const mathEnabled = getVerificationMathEnabled(env);
-  if (captchaEnabled && mathEnabled) {
-    return randomInt(0, 1) === 0 ? generateCaptchaChallenge() : generateNumericChoiceChallenge();
-  }
-  if (mathEnabled) return generateNumericChoiceChallenge();
-  return generateCaptchaChallenge();
-}
-
-function isVerificationExpired(challenge, env = {}) {
-  if (!challenge?.createdAt) return true;
-  return Date.now() - new Date(challenge.createdAt).getTime() > getVerificationExpireMs(env);
-}
-
-async function updateVerificationPromptMessage(env, message, state, publicBaseUrl = '') {
-  const imageUrl = buildVerificationImageUrl(state.challenge, publicBaseUrl || env.PUBLIC_BASE_URL || '');
-  try {
-    if (!imageUrl) throw new Error('verification_image_url_not_ready');
-    await telegram(env, 'editMessageMedia', {
-      chat_id: message.chat.id,
-      message_id: message.message_id,
-      media: {
-        type: 'photo',
-        media: imageUrl,
-        caption: buildUserVerificationText(state.challenge, env),
-      },
-      reply_markup: buildUserVerificationKeyboard(Number(message.chat.id), state.challenge),
-    });
-    await setVerificationPromptMessageId(env, Number(message.chat.id), message.message_id);
-  } catch (error) {
-    const sent = await sendVerificationPromptMessage(env, Number(message.chat.id), state, publicBaseUrl);
-    await setVerificationPromptMessageId(env, Number(message.chat.id), sent.message_id);
-  }
-}
-
-async function sendUserVerificationPrompt(env, userId, state, publicBaseUrl = '') {
-  const sent = await sendVerificationPromptMessage(env, userId, state, publicBaseUrl);
-
-  await setVerificationPromptMessageId(env, userId, sent.message_id);
-}
-
-async function sendVerificationPromptMessage(env, userId, state, publicBaseUrl = '') {
-  const imageUrl = buildVerificationImageUrl(state.challenge, publicBaseUrl || env.PUBLIC_BASE_URL || '');
-  try {
-    if (!imageUrl) throw new Error('verification_image_url_not_ready');
-    return await telegram(env, 'sendPhoto', {
-      chat_id: userId,
-      photo: imageUrl,
-      caption: buildUserVerificationText(state.challenge, env),
-      reply_markup: buildUserVerificationKeyboard(userId, state.challenge),
-    });
-  } catch (error) {
-    return telegram(env, 'sendMessage', {
-      chat_id: userId,
-      text: buildTextVerificationPrompt(state.challenge, env),
-      reply_markup: buildUserVerificationKeyboard(userId, state.challenge),
-    });
-  }
-}
-
 async function answerCallback(env, callbackQueryId, text, showAlert = false) {
   try {
     await telegram(env, 'answerCallbackQuery', {
@@ -3363,50 +1730,28 @@ async function answerCallback(env, callbackQueryId, text, showAlert = false) {
 }
 
 async function clearVerificationPromptMessage(env, chatId, messageId, text) {
-  if (!messageId) return;
-  try {
-    await telegram(env, 'editMessageCaption', {
-      chat_id: chatId,
-      message_id: messageId,
-      caption: text,
-      reply_markup: { inline_keyboard: [] },
-    });
-    return;
-  } catch (error) {
-    // Text fallback prompts have no caption.
-  }
-
-  try {
-    await telegram(env, 'editMessageText', {
-      chat_id: chatId,
-      message_id: messageId,
-      text,
-      reply_markup: { inline_keyboard: [] },
-    });
-  } catch (error) {
-    // Ignore stale or already-deleted prompt messages.
-  }
+  return clearVerificationPromptMessageRequest(
+    { chatId, messageId, text },
+    {
+      editCaption: (payload) => telegram(env, 'editMessageCaption', payload),
+      editText: (payload) => telegram(env, 'editMessageText', payload),
+    },
+  );
 }
 
 async function deleteVerificationPromptMessage(env, chatId, messageId) {
-  const id = Number(messageId || 0);
-  if (!id) return false;
-  try {
-    await telegram(env, 'deleteMessage', {
-      chat_id: chatId,
-      message_id: id,
-    });
-    return true;
-  } catch (error) {
-    // Telegram may reject deletes for older/already changed messages; make the stale entry harmless.
-  }
-
-  try {
-    await clearVerificationPromptMessage(env, chatId, id, '此验证入口已失效，请使用最新验证消息。');
-  } catch (error) {
-    // Ignore stale prompt cleanup failure.
-  }
-  return false;
+  return deleteVerificationPromptMessageRequest(
+    {
+      chatId,
+      messageId,
+      staleText: '此验证入口已失效，请使用最新验证消息。',
+    },
+    {
+      deleteMessage: (payload) => telegram(env, 'deleteMessage', payload),
+      editCaption: (payload) => telegram(env, 'editMessageCaption', payload),
+      editText: (payload) => telegram(env, 'editMessageText', payload),
+    },
+  );
 }
 
 async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
@@ -3415,6 +1760,9 @@ async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
   let webhookInfo = null;
   let webhookError = null;
   let lastWebhookError = null;
+  let webhookErrorStats = null;
+  let deploymentHealth = null;
+  let directoryIndexBackfill = null;
 
   if (env.BOT_TOKEN) {
     try {
@@ -3425,7 +1773,12 @@ async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
   }
 
   if (env.BOT_KV) {
-    lastWebhookError = await getJson(env.BOT_KV, LAST_WEBHOOK_ERROR_KEY);
+    [lastWebhookError, webhookErrorStats, deploymentHealth, directoryIndexBackfill] = await Promise.all([
+      getJson(env.BOT_KV, LAST_WEBHOOK_ERROR_KEY),
+      getJson(env.BOT_KV, WEBHOOK_ERROR_STATS_KEY),
+      getJson(env.BOT_KV, DEPLOYMENT_HEALTH_KEY),
+      getJson(env.BOT_KV, DIRECTORY_INDEX_BACKFILL_KEY),
+    ]);
   }
 
   return {
@@ -3453,10 +1806,13 @@ async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
     webhookInfo,
     webhookError,
     lastWebhookError,
+    webhookErrorStats,
+    deploymentHealth,
+    directoryIndexBackfill,
   };
 }
 
-async function recordWebhookError(env, error, update) {
+async function recordWebhookError(env, error, update, context = {}) {
   const message = update?.message || update?.edited_message || update?.callback_query?.message || null;
   const record = {
     at: new Date().toISOString(),
@@ -3466,11 +1822,30 @@ async function recordWebhookError(env, error, update) {
     messageId: message?.message_id || null,
     senderId: update?.callback_query?.from?.id || message?.from?.id || null,
     messageType: message ? detectMessageType(message) : update?.callback_query ? 'callback_query' : 'unknown',
+    requestId: context.requestId || null,
+    stage: context.stage || 'handle_update',
+    durationMs: Number(context.durationMs || 0),
   };
-  console.error('Telegram webhook update failed', record);
+  writeStructuredLog('error', 'telegram_update_failed', {
+    requestId: record.requestId,
+    updateId: record.updateId,
+    userId: record.senderId,
+    chatId: record.chatId,
+    stage: record.stage,
+  }, {
+    messageId: record.messageId,
+    messageType: record.messageType,
+    durationMs: record.durationMs,
+    error: record.error,
+  });
   if (env.BOT_KV) {
     try {
-      await env.BOT_KV.put(LAST_WEBHOOK_ERROR_KEY, JSON.stringify(record));
+      const existingStats = await getJson(env.BOT_KV, WEBHOOK_ERROR_STATS_KEY);
+      const nextStats = buildWebhookErrorStats(existingStats, record);
+      await Promise.all([
+        env.BOT_KV.put(LAST_WEBHOOK_ERROR_KEY, JSON.stringify(record)),
+        env.BOT_KV.put(WEBHOOK_ERROR_STATS_KEY, JSON.stringify(nextStats)),
+      ]);
     } catch (kvError) {
       console.error('Failed to persist webhook error', formatErrorMessage(kvError));
     }
@@ -3549,562 +1924,214 @@ async function getUserProfile(env, userId) {
   return getCachedJson(env, userKey(userId), USER_PROFILE_CACHE_TTL_MS);
 }
 
-function parseIsoTimeMs(value) {
-  if (!value) return 0;
-  const ms = new Date(value).getTime();
-  return Number.isFinite(ms) ? ms : 0;
-}
-
-function normalizeIsoTime(value) {
-  const ms = parseIsoTimeMs(value);
-  return ms ? new Date(ms).toISOString() : null;
-}
-
-function verificationCacheKey(userId) {
-  return String(Number(userId));
-}
-
-function sanitizeVerificationSessionState(state) {
-  if (!state || typeof state !== 'object') return null;
-  return JSON.parse(JSON.stringify(state));
-}
-
-function isVerificationSessionUsable(state, token = '') {
-  if (!state || state.verified || !state.sessionToken) return false;
-  if (token && !timingSafeEqualText(String(token), String(state.sessionToken))) return false;
-  if (isVerificationSessionExpired(state)) return false;
-  return true;
-}
-
 function writeLocalVerificationSession(userId, state) {
-  const snapshot = sanitizeVerificationSessionState(state);
-  if (!snapshot?.sessionToken) return null;
-  writeTimedCacheValue(
-    verificationSessionCache,
-    verificationCacheKey(userId),
-    snapshot,
-    VERIFICATION_SESSION_CACHE_TTL_MS,
-  );
-  return snapshot;
+  return verificationCache.writeSession(userId, state);
 }
 
 function readLocalVerificationSession(userId, token = '') {
-  const snapshot = readTimedCacheValue(verificationSessionCache, verificationCacheKey(userId));
-  if (!isVerificationSessionUsable(snapshot, token)) return null;
-  return sanitizeVerificationSessionState(snapshot);
+  return verificationCache.readSession(userId, token);
 }
 
 function clearLocalVerificationSession(userId) {
-  verificationSessionCache.delete(verificationCacheKey(userId));
+  verificationCache.clearSession(userId);
 }
 
 function getLocalVerificationClearedAt(userId) {
-  const cached = readTimedCacheValue(verificationClearedCache, verificationCacheKey(userId));
-  return normalizeIsoTime(cached?.clearedAt);
+  return verificationCache.getClearedAt(userId);
 }
 
 function getLocalVerificationPassedAt(userId, profile = null) {
-  const cached = readTimedCacheValue(verificationPassedCache, verificationCacheKey(userId));
-  const passedAt = normalizeIsoTime(cached?.passedAt);
+  const passedAt = verificationCache.getPassedAt(userId);
   if (!passedAt) return null;
   if (isVerificationPassedAtCleared(userId, passedAt, profile)) return null;
   return passedAt;
 }
 
 function writeLocalVerificationPassed(userId, passedAt = null) {
-  const normalized = normalizeIsoTime(passedAt) || new Date().toISOString();
-  const key = verificationCacheKey(userId);
-  verificationClearedCache.delete(key);
-  writeTimedCacheValue(verificationPassedCache, key, { passedAt: normalized }, VERIFICATION_PASS_CACHE_TTL_MS);
-  return normalized;
+  return verificationCache.writePassed(userId, passedAt);
 }
 
 function writeLocalVerificationCleared(userId, clearedAt = null) {
-  const normalized = normalizeIsoTime(clearedAt) || new Date().toISOString();
-  const key = verificationCacheKey(userId);
-  verificationPassedCache.delete(key);
-  writeTimedCacheValue(verificationClearedCache, key, { clearedAt: normalized }, VERIFICATION_PASS_CACHE_TTL_MS);
-  return normalized;
+  return verificationCache.writeCleared(userId, clearedAt);
 }
 
 function isVerificationPassedAtCleared(userId, passedAt, profile = null) {
-  const passedMs = parseIsoTimeMs(passedAt);
-  if (!passedMs) return true;
-
-  const profileClearedMs = parseIsoTimeMs(profile?.verificationClearedAt);
-  if (profileClearedMs && profileClearedMs >= passedMs) return true;
-
-  const localClearedMs = parseIsoTimeMs(getLocalVerificationClearedAt(userId));
-  if (localClearedMs && localClearedMs >= passedMs) return true;
-
-  return false;
-}
-
-function getProfileVerificationPassedAt(profile) {
-  const passedAt = profile?.verificationPassedAt || null;
-  if (!passedAt) return null;
-
-  const passedMs = parseIsoTimeMs(passedAt);
-  if (!passedMs) return null;
-
-  const clearedMs = parseIsoTimeMs(profile?.verificationClearedAt);
-  if (clearedMs && clearedMs >= passedMs) return null;
-
-  const status = String(profile?.verificationStatus || '').toLowerCase();
-  if (['pending', 'reset', 'revoked', 'deleted'].includes(status)) return null;
-
-  return new Date(passedMs).toISOString();
-}
-
-function isProfileVerificationPassed(profile) {
-  return Boolean(getProfileVerificationPassedAt(profile));
-}
-
-function isVerificationStateInvalidatedByProfile(state, profile) {
-  if (!state?.verified) return false;
-
-  const verifiedMs =
-    parseIsoTimeMs(state.verifiedAt) || parseIsoTimeMs(state.answeredAt) || parseIsoTimeMs(state.updatedAt);
-  const clearedMs = parseIsoTimeMs(profile?.verificationClearedAt);
-  if (clearedMs && (!verifiedMs || clearedMs >= verifiedMs)) return true;
-
-  const firstSeenMs = parseIsoTimeMs(profile?.firstSeenAt);
-  if (firstSeenMs && verifiedMs && firstSeenMs > verifiedMs + 1000) return true;
-
-  return false;
+  return isPassedAtCleared(passedAt, {
+    profileClearedAt: profile?.verificationClearedAt,
+    localClearedAt: getLocalVerificationClearedAt(userId),
+  });
 }
 
 async function markUserProfileVerificationPassed(env, userId, verifiedAt = null) {
-  if (!env.BOT_KV) return null;
-  const nowIso = new Date().toISOString();
-  const passedAt = writeLocalVerificationPassed(userId, verifiedAt || nowIso);
-  await writeD1VerificationStatusPassed(env, userId, passedAt, nowIso);
-  const existing = (await getUserProfile(env, userId)) || { userId: Number(userId) };
-  const next = {
-    ...existing,
-    userId: Number(userId),
-    verificationStatus: 'verified',
-    verificationPassedAt: passedAt,
-    verificationClearedAt: null,
-    verificationUpdatedAt: nowIso,
-  };
-  await putJsonIfChanged(env, userKey(userId), next, {
-    existing,
-    ttlMs: USER_PROFILE_CACHE_TTL_MS,
+  return markProfileVerificationPassedState({ userId, verifiedAt }, {
+    hasKv: () => Boolean(env.BOT_KV),
+    nowIso: () => new Date().toISOString(),
+    writeLocalPassed: (id, passedAt) => writeLocalVerificationPassed(id, passedAt),
+    writeD1Passed: (id, passedAt, updatedAt) => writeD1VerificationStatusPassed(env, id, passedAt, updatedAt),
+    getProfile: (id) => getUserProfile(env, id),
+    saveProfile: (id, profile, existing) => putUserProfileIfChanged(env, id, profile, { existing }),
   });
-  return next;
 }
 
 async function clearUserProfileVerificationPassed(env, userId) {
-  const nowIso = new Date().toISOString();
-  writeLocalVerificationCleared(userId, nowIso);
-  await writeD1VerificationStatusCleared(env, userId, nowIso);
-
-  if (!env.BOT_KV) return null;
-  const existing = await getUserProfile(env, userId);
-  if (!existing) return null;
-
-  const next = {
-    ...existing,
-    userId: Number(userId),
-    verificationStatus: 'pending',
-    verificationPassedAt: null,
-    verificationClearedAt: nowIso,
-    verificationUpdatedAt: nowIso,
-  };
-  await putJsonIfChanged(env, userKey(userId), next, {
-    existing,
-    ttlMs: USER_PROFILE_CACHE_TTL_MS,
+  return clearProfileVerificationPassedState({ userId }, {
+    hasKv: () => Boolean(env.BOT_KV),
+    nowIso: () => new Date().toISOString(),
+    writeLocalCleared: (id, clearedAt) => writeLocalVerificationCleared(id, clearedAt),
+    writeD1Cleared: (id, clearedAt) => writeD1VerificationStatusCleared(env, id, clearedAt),
+    getProfile: (id) => getUserProfile(env, id),
+    saveProfile: (id, profile, existing) => putUserProfileIfChanged(env, id, profile, { existing }),
   });
-  return next;
 }
 
 async function ensureVerificationStatusD1Schema(env) {
-  if (!env?.DB) return false;
-  if (verificationStatusD1SchemaReady) return true;
-  if (
-    verificationStatusD1SchemaLastErrorAt &&
-    Date.now() - verificationStatusD1SchemaLastErrorAt < VERIFICATION_D1_SCHEMA_RETRY_MS
-  ) {
-    return false;
-  }
-
-  try {
-    await env.DB.prepare(
-      `CREATE TABLE IF NOT EXISTS user_verification_status (
-        user_id INTEGER PRIMARY KEY,
-        status TEXT NOT NULL DEFAULT 'pending',
-        passed_at TEXT,
-        cleared_at TEXT,
-        updated_at TEXT NOT NULL
-      )`,
-    ).run();
-    verificationStatusD1SchemaReady = true;
-    verificationStatusD1SchemaLastErrorAt = 0;
-    return true;
-  } catch (error) {
-    verificationStatusD1SchemaLastErrorAt = Date.now();
-    console.warn('Failed to ensure user_verification_status table', formatErrorMessage(error));
-    return false;
-  }
+  return verificationD1Repository.ensureStatusSchema(env?.DB);
 }
 
 async function writeD1VerificationStatusPassed(env, userId, passedAt, updatedAt = null) {
-  if (!(await ensureVerificationStatusD1Schema(env))) return false;
-  const normalizedRecord = {
-    userId: Number(userId),
-    status: 'verified',
-    passedAt: normalizeIsoTime(passedAt) || new Date().toISOString(),
-    clearedAt: null,
-    updatedAt: normalizeIsoTime(updatedAt) || new Date().toISOString(),
-  };
-  const cached = readD1VerificationStatusCache(userId);
-  if (cached.hit && isSameD1VerificationMeaning(cached.value, normalizedRecord)) {
-    return true;
-  }
-  try {
-    await env.DB.prepare(
-      `INSERT INTO user_verification_status (user_id, status, passed_at, cleared_at, updated_at)
-       VALUES (?1, 'verified', ?2, NULL, ?3)
-       ON CONFLICT(user_id) DO UPDATE SET
-         status = 'verified',
-         passed_at = excluded.passed_at,
-         cleared_at = NULL,
-         updated_at = excluded.updated_at`,
-    )
-      .bind(Number(userId), normalizedRecord.passedAt, normalizedRecord.updatedAt)
-      .run();
-    writeD1VerificationStatusCache(userId, normalizedRecord);
-    return true;
-  } catch (error) {
-    console.warn('Failed to write D1 verification pass status', formatErrorMessage(error));
-    return false;
-  }
+  return writeVerificationStatusPassed({ userId, passedAt, updatedAt }, {
+    ensureSchema: () => ensureVerificationStatusD1Schema(env),
+    nowIso: () => new Date().toISOString(),
+    readCache: (id) => readD1VerificationStatusCache(id),
+    writeRecord: (record) => verificationD1Repository.writeStatusPassed(env.DB, record),
+    writeCache: (id, record) => writeD1VerificationStatusCache(id, record),
+  });
 }
 
 async function writeD1VerificationStatusCleared(env, userId, clearedAt = null) {
-  if (!(await ensureVerificationStatusD1Schema(env))) return false;
-  const nowIso = normalizeIsoTime(clearedAt) || new Date().toISOString();
-  const normalizedRecord = {
-    userId: Number(userId),
-    status: 'pending',
-    passedAt: null,
-    clearedAt: nowIso,
-    updatedAt: nowIso,
-  };
-  const cached = readD1VerificationStatusCache(userId);
-  if (cached.hit && isSameD1VerificationMeaning(cached.value, normalizedRecord)) {
-    return true;
-  }
-  try {
-    await env.DB.prepare(
-      `INSERT INTO user_verification_status (user_id, status, passed_at, cleared_at, updated_at)
-       VALUES (?1, 'pending', NULL, ?2, ?2)
-       ON CONFLICT(user_id) DO UPDATE SET
-         status = 'pending',
-         passed_at = NULL,
-         cleared_at = excluded.cleared_at,
-         updated_at = excluded.updated_at`,
-    )
-      .bind(Number(userId), nowIso)
-      .run();
-    writeD1VerificationStatusCache(userId, normalizedRecord);
-    return true;
-  } catch (error) {
-    console.warn('Failed to write D1 verification clear status', formatErrorMessage(error));
-    return false;
-  }
+  return writeVerificationStatusCleared({ userId, clearedAt }, {
+    ensureSchema: () => ensureVerificationStatusD1Schema(env),
+    nowIso: () => new Date().toISOString(),
+    readCache: (id) => readD1VerificationStatusCache(id),
+    writeRecord: (record) => verificationD1Repository.writeStatusCleared(env.DB, record),
+    writeCache: (id, record) => writeD1VerificationStatusCache(id, record),
+  });
 }
 
 async function getD1VerificationStatus(env, userId) {
   if (!env?.DB) return null;
   const cached = readD1VerificationStatusCache(userId);
   if (cached.hit) return cached.value;
-  if (!(await ensureVerificationStatusD1Schema(env))) return null;
-  try {
-    const record = await env.DB.prepare(
-      `SELECT
-        user_id AS userId,
-        status,
-        passed_at AS passedAt,
-        cleared_at AS clearedAt,
-        updated_at AS updatedAt
-       FROM user_verification_status
-       WHERE user_id = ?1
-       LIMIT 1`,
-    )
-      .bind(Number(userId))
-      .first();
-    const normalizedRecord = normalizeD1VerificationStatusRecord(record);
-    writeD1VerificationStatusCache(userId, normalizedRecord);
-    return normalizedRecord;
-  } catch (error) {
-    console.warn('Failed to read D1 verification status', formatErrorMessage(error));
-    return null;
-  }
+  const normalizedRecord = await verificationD1Repository.readStatus(env.DB, userId);
+  if (normalizedRecord === undefined) return null;
+  writeD1VerificationStatusCache(userId, normalizedRecord);
+  return normalizedRecord;
 }
 
 async function getD1VerificationPassedAt(env, userId, profile = null) {
-  const record = await getD1VerificationStatus(env, userId);
-  if (!record) return null;
-
-  const clearedAt = normalizeIsoTime(record.clearedAt);
-  if (clearedAt && String(record.status || '').toLowerCase() !== 'verified') {
-    writeLocalVerificationCleared(userId, clearedAt);
-    return null;
-  }
-
-  const passedAt = normalizeIsoTime(record.passedAt);
-  if (String(record.status || '').toLowerCase() !== 'verified' || !passedAt) return null;
-  if (clearedAt && parseIsoTimeMs(clearedAt) >= parseIsoTimeMs(passedAt)) {
-    writeLocalVerificationCleared(userId, clearedAt);
-    return null;
-  }
-  if (isVerificationPassedAtCleared(userId, passedAt, profile)) return null;
-
-  writeLocalVerificationPassed(userId, passedAt);
-  return passedAt;
+  return getVerificationPassedAtFromD1({ userId, profile }, {
+    getStatus: (id) => getD1VerificationStatus(env, id),
+    writeLocalCleared: (id, clearedAt) => writeLocalVerificationCleared(id, clearedAt),
+    isPassedAtCleared: (id, passedAt, value) => isVerificationPassedAtCleared(id, passedAt, value),
+    writeLocalPassed: (id, passedAt) => writeLocalVerificationPassed(id, passedAt),
+  });
 }
 
 async function ensureVerificationSessionD1Schema(env) {
-  if (!env?.DB) return false;
-  if (verificationSessionD1SchemaReady) return true;
-  if (
-    verificationSessionD1SchemaLastErrorAt &&
-    Date.now() - verificationSessionD1SchemaLastErrorAt < VERIFICATION_SESSION_D1_SCHEMA_RETRY_MS
-  ) {
-    return false;
-  }
-
-  try {
-    await env.DB.prepare(
-      `CREATE TABLE IF NOT EXISTS user_verification_sessions (
-        user_id INTEGER PRIMARY KEY,
-        session_token TEXT NOT NULL,
-        state_json TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`,
-    ).run();
-    verificationSessionD1SchemaReady = true;
-    verificationSessionD1SchemaLastErrorAt = 0;
-    return true;
-  } catch (error) {
-    verificationSessionD1SchemaLastErrorAt = Date.now();
-    console.warn('Failed to ensure user_verification_sessions table', formatErrorMessage(error));
-    return false;
-  }
+  return verificationD1Repository.ensureSessionSchema(env?.DB);
 }
 
 async function writeD1VerificationSession(env, userId, state) {
-  const snapshot = sanitizeVerificationSessionState(state);
-  if (!snapshot?.sessionToken || !(await ensureVerificationSessionD1Schema(env))) return false;
-  try {
-    await env.DB.prepare(
-      `INSERT INTO user_verification_sessions (user_id, session_token, state_json, expires_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5)
-       ON CONFLICT(user_id) DO UPDATE SET
-         session_token = excluded.session_token,
-         state_json = excluded.state_json,
-         expires_at = excluded.expires_at,
-         updated_at = excluded.updated_at`,
-    )
-      .bind(
-        Number(userId),
-        String(snapshot.sessionToken),
-        JSON.stringify(snapshot),
-        snapshot.sessionExpiresAt || new Date(Date.now() + getVerifyWebSessionExpireMs(env)).toISOString(),
-        new Date().toISOString(),
-      )
-      .run();
-    return true;
-  } catch (error) {
-    console.warn('Failed to write D1 verification session', formatErrorMessage(error));
-    return false;
-  }
+  return writeVerificationSessionToD1({ userId, state }, {
+    sanitizeState: sanitizeVerificationSessionState,
+    ensureSchema: () => ensureVerificationSessionD1Schema(env),
+    nowMs: () => Date.now(),
+    getSessionExpireMs: () => getVerifyWebSessionExpireMs(env),
+    writeRecord: (record) => verificationD1Repository.writeSession(env.DB, record),
+  });
 }
 
 async function getD1VerificationSession(env, userId, token = '') {
-  if (!(await ensureVerificationSessionD1Schema(env))) return null;
-  try {
-    const record = await env.DB.prepare(
-      `SELECT session_token AS sessionToken, state_json AS stateJson, expires_at AS expiresAt
-       FROM user_verification_sessions
-       WHERE user_id = ?1
-       LIMIT 1`,
-    )
-      .bind(Number(userId))
-      .first();
-    if (!record?.stateJson) return null;
-    if (token && !timingSafeEqualText(String(token), String(record.sessionToken || ''))) return null;
-    const state = JSON.parse(String(record.stateJson || '{}'));
-    if (!isVerificationSessionUsable(state, token)) return null;
-    writeLocalVerificationSession(userId, state);
-    return state;
-  } catch (error) {
-    console.warn('Failed to read D1 verification session', formatErrorMessage(error));
-    return null;
-  }
+  return readVerificationSessionFromD1({ userId, token }, {
+    readRecord: (id) => verificationD1Repository.readSession(env?.DB, id),
+    tokensEqual: timingSafeEqualText,
+    isSessionUsable: isVerificationSessionUsable,
+    writeLocal: (id, state) => writeLocalVerificationSession(id, state),
+    onParseError: (error) => console.warn('Failed to parse D1 verification session', formatErrorMessage(error)),
+  });
 }
 
 async function clearD1VerificationSession(env, userId) {
-  if (!(await ensureVerificationSessionD1Schema(env))) return false;
-  try {
-    await env.DB.prepare('DELETE FROM user_verification_sessions WHERE user_id = ?1').bind(Number(userId)).run();
-    return true;
-  } catch (error) {
-    console.warn('Failed to clear D1 verification session', formatErrorMessage(error));
-    return false;
-  }
+  return (await verificationD1Repository.deleteSession(env?.DB, userId)).ok;
 }
 
 async function persistLatestVerificationSession(env, userId, state) {
-  writeLocalVerificationSession(userId, state);
-  await writeD1VerificationSession(env, userId, state);
+  return persistLatestVerificationSessionState({ userId, state }, {
+    writeLocal: (id, value) => writeLocalVerificationSession(id, value),
+    writeD1: (id, value) => writeD1VerificationSession(env, id, value),
+  });
 }
 
 async function clearLatestVerificationSession(env, userId) {
-  clearLocalVerificationSession(userId);
-  await clearD1VerificationSession(env, userId);
+  return clearLatestVerificationSessionState({ userId }, {
+    clearLocal: (id) => clearLocalVerificationSession(id),
+    clearD1: (id) => clearD1VerificationSession(env, id),
+  });
 }
 
 async function getLatestVerificationSessionState(env, userId, token = '') {
-  const local = readLocalVerificationSession(userId, token);
-  if (local) return local;
-  return getD1VerificationSession(env, userId, token);
+  return getLatestVerificationSession({ userId, token }, {
+    readLocal: (id, value) => readLocalVerificationSession(id, value),
+    readD1: (id, value) => getD1VerificationSession(env, id, value),
+  });
 }
 
 async function isVerificationStateInvalidatedByD1(env, userId, state) {
-  if (!state?.verified) return false;
-  const record = await getD1VerificationStatus(env, userId);
-  if (!record) return false;
-
-  const status = String(record.status || '').toLowerCase();
-  const verifiedMs =
-    parseIsoTimeMs(state.verifiedAt) || parseIsoTimeMs(state.answeredAt) || parseIsoTimeMs(state.updatedAt);
-  const clearedMs = parseIsoTimeMs(record.clearedAt);
-  if (status !== 'verified' && clearedMs && (!verifiedMs || clearedMs >= verifiedMs)) {
-    writeLocalVerificationCleared(userId, record.clearedAt);
-    return true;
-  }
-
-  return false;
+  return isVerificationStateInvalidatedByD1State({ userId, state }, {
+    getD1Status: (id) => getD1VerificationStatus(env, id),
+    writeLocalCleared: (id, clearedAt) => writeLocalVerificationCleared(id, clearedAt),
+  });
 }
 
 async function isVerificationStateActive(env, userId, state, profile = null) {
-  if (!state?.verified) return false;
-  if (isVerificationStateInvalidatedByProfile(state, profile)) return false;
-  if (await isVerificationStateInvalidatedByD1(env, userId, state)) return false;
-  writeLocalVerificationPassed(userId, state.verifiedAt || state.answeredAt || state.updatedAt);
-  return true;
+  return isVerificationStateActiveState({ userId, state, profile }, {
+    isInvalidatedByProfile: isVerificationStateInvalidatedByProfile,
+    isInvalidatedByD1: (id, value) => isVerificationStateInvalidatedByD1(env, id, value),
+    writeLocalPassed: (id, passedAt) => writeLocalVerificationPassed(id, passedAt),
+  });
 }
 
 async function resolveVerificationPassedAt(env, userId, profile = null) {
-  const profilePassedAt = getProfileVerificationPassedAt(profile);
-  if (profilePassedAt && !isVerificationPassedAtCleared(userId, profilePassedAt, profile)) {
-    writeLocalVerificationPassed(userId, profilePassedAt);
-    return profilePassedAt;
-  }
-
-  const localPassedAt = getLocalVerificationPassedAt(userId, profile);
-  if (localPassedAt) return localPassedAt;
-
-  return getD1VerificationPassedAt(env, userId, profile);
+  return resolveVerificationPassedAtState({ userId, profile }, {
+    getProfilePassedAt: getProfileVerificationPassedAt,
+    isPassedAtCleared: (id, passedAt, value) => isVerificationPassedAtCleared(id, passedAt, value),
+    writeLocalPassed: (id, passedAt) => writeLocalVerificationPassed(id, passedAt),
+    getLocalPassedAt: (id, value) => getLocalVerificationPassedAt(id, value),
+    getD1PassedAt: (id, value) => getD1VerificationPassedAt(env, id, value),
+  });
 }
 
 async function applyResolvedVerificationStatusToProfile(env, userId, profile) {
-  if (!profile || typeof profile !== 'object' || !isUserVerificationEnabled(env)) return profile;
-
-  const passedAt = await resolveVerificationPassedAt(env, userId, profile);
-  if (passedAt) {
-    profile.verificationStatus = 'verified';
-    profile.verificationPassedAt = passedAt;
-    profile.verificationClearedAt = null;
-    profile.verificationUpdatedAt = profile.verificationUpdatedAt || new Date().toISOString();
-    return profile;
-  }
-
-  const clearedAt = getLocalVerificationClearedAt(userId);
-  if (clearedAt) {
-    profile.verificationStatus = 'pending';
-    profile.verificationPassedAt = null;
-    profile.verificationClearedAt = clearedAt;
-    profile.verificationUpdatedAt = profile.verificationUpdatedAt || new Date().toISOString();
-  }
-  return profile;
+  return applyResolvedVerificationStatusToProfileState({ userId, profile }, {
+    isVerificationEnabled: () => isUserVerificationEnabled(env),
+    resolvePassedAt: (id, value) => resolveVerificationPassedAt(env, id, value),
+    getLocalClearedAt: (id) => getLocalVerificationClearedAt(id),
+    nowIso: () => new Date().toISOString(),
+  });
 }
 
 async function repairVerificationStateFromProfile(env, userId, state = null, profile = null) {
-  const passedAt = await resolveVerificationPassedAt(env, userId, profile);
-  if (!passedAt) return null;
-
-  const nowIso = new Date().toISOString();
-  const remaining = Number(state?.postVerifyRemaining);
-  const promptMessageId = Number(state?.promptMessageId || 0);
-  const nextState = {
-    ...(state || {}),
-    userId: Number(userId),
-    verificationVersion: 'web-v2',
-    verified: true,
-    verifiedAt: state?.verifiedAt || passedAt,
-    answeredAt: state?.answeredAt || passedAt,
-    promptMessageId: null,
-    blockedUntil: null,
-    stage: 'passed',
-    sessionToken: null,
-    sessionIssuedAt: null,
-    sessionExpiresAt: null,
-    slider: null,
-    grid: null,
-    choice: null,
-    selectedAnswer: null,
-    correctAnswer: null,
-    challenge: null,
-    failureCount: 0,
-    postVerifyRemaining: Number.isFinite(remaining) && remaining > 0 ? remaining : 0,
-    repairedFromProfileAt: nowIso,
-    updatedAt: nowIso,
-  };
-
-  await putVerificationState(env, userId, nextState, { existing });
-  await clearLatestVerificationSession(env, userId);
-  await markUserProfileVerificationPassed(env, userId, passedAt);
-  if (promptMessageId) {
-    await clearVerificationPromptMessage(env, userId, promptMessageId, '✅ 验证已通过，当前验证入口已自动失效。');
-  }
-  return nextState;
+  return repairVerificationStateFromProfileState({ userId, state, profile }, {
+    resolvePassedAt: (id, value) => resolveVerificationPassedAt(env, id, value),
+    nowIso: () => new Date().toISOString(),
+    saveState: (id, nextState, existing) => putVerificationState(env, id, nextState, { existing }),
+    clearLatest: (id) => clearLatestVerificationSession(env, id),
+    markProfilePassed: (id, passedAt) => markUserProfileVerificationPassed(env, id, passedAt),
+    clearPrompt: (id, promptMessageId) => clearVerificationPromptMessage(
+      env,
+      id,
+      promptMessageId,
+      '✅ 验证已通过，当前验证入口已自动失效。',
+    ),
+  });
 }
 
 async function resetVerificationStateAfterProfileRevocation(env, userId, state = null) {
-  const nowIso = new Date().toISOString();
-  const nextState = {
-    ...(state || {}),
-    userId: Number(userId),
-    verificationVersion: 'web-v2',
-    flowMode: null,
-    verified: false,
-    verifiedAt: null,
-    answeredAt: null,
-    promptMessageId: null,
-    blockedUntil: null,
-    stage: null,
-    sessionToken: null,
-    sessionIssuedAt: null,
-    sessionExpiresAt: null,
-    slider: null,
-    grid: null,
-    choice: null,
-    selectedAnswer: null,
-    correctAnswer: null,
-    challenge: null,
-    failureCount: 0,
-    postVerifyRemaining: 0,
-    resetFromProfileAt: nowIso,
-    updatedAt: nowIso,
-  };
-  await putVerificationState(env, userId, nextState, { existing: state });
-  await clearLatestVerificationSession(env, userId);
-  return nextState;
+  return resetVerificationStateAfterProfileRevocationState({ userId, state }, {
+    nowIso: () => new Date().toISOString(),
+    saveState: (id, nextState, existing) => putVerificationState(env, id, nextState, { existing }),
+    clearLatest: (id) => clearLatestVerificationSession(env, id),
+  });
 }
 
 async function listUsers(env, requestedLimit = 50) {
@@ -4118,7 +2145,7 @@ async function getUserListSnapshot(env) {
     return cached;
   }
 
-  const names = await collectKvKeys(env.BOT_KV, 'user:', MAX_SCAN_KEYS);
+  const names = await collectKvKeys(env.BOT_KV, 'user:');
   const users = await Promise.all(names.map((name) => getCachedJson(env, name, USER_PROFILE_CACHE_TTL_MS)));
   const enriched = await Promise.all(
     users.filter(Boolean).map(async (item) => {
@@ -4169,6 +2196,102 @@ async function getUserListSnapshot(env) {
   return snapshot;
 }
 
+function parseD1JsonValue(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    return null;
+  }
+}
+
+async function isDirectoryIndexReady(env) {
+  if (!env?.BOT_KV || !env?.DB) return false;
+  const state = await getJson(env.BOT_KV, DIRECTORY_INDEX_BACKFILL_KEY);
+  return state?.version === 1 && state?.status === 'complete';
+}
+
+async function listUsersPageFromD1(env, options = {}) {
+  if (!env?.DB || !(await ensureDirectoryD1Schema(env))) return null;
+  const limit = clamp(Math.floor(Number(options.limit) || 50), 1, MAX_LIST_LIMIT);
+  const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+
+  try {
+    const [summaryRow, pageResult] = await Promise.all([
+      env.DB.prepare(
+        `SELECT
+           COUNT(d.user_id) AS total,
+           SUM(CASE WHEN b.user_id IS NOT NULL THEN 1 ELSE 0 END) AS blacklisted,
+           SUM(CASE WHEN t.user_id IS NOT NULL THEN 1 ELSE 0 END) AS trusted,
+           SUM(CASE WHEN json_extract(d.profile_json, '$.verificationStatus') = 'verified' THEN 1 ELSE 0 END) AS verified
+         FROM user_directory d
+         LEFT JOIN user_moderation_index b ON b.user_id = d.user_id AND b.kind = 'blacklist'
+         LEFT JOIN user_moderation_index t ON t.user_id = d.user_id AND t.kind = 'trust'`,
+      ).first(),
+      env.DB.prepare(
+        `SELECT
+           d.profile_json AS profileJson,
+           b.entry_json AS blacklistJson,
+           t.entry_json AS trustJson
+         FROM user_directory d
+         LEFT JOIN user_moderation_index b ON b.user_id = d.user_id AND b.kind = 'blacklist'
+         LEFT JOIN user_moderation_index t ON t.user_id = d.user_id AND t.kind = 'trust'
+         ORDER BY COALESCE(d.last_seen_at, '') DESC, d.user_id DESC
+         LIMIT ?1 OFFSET ?2`,
+      ).bind(limit, offset).all(),
+    ]);
+
+    const rows = Array.isArray(pageResult?.results) ? pageResult.results : [];
+    const items = await Promise.all(rows.map(async (row) => {
+      const profile = parseD1JsonValue(row.profileJson);
+      if (!profile?.userId) return null;
+      const blacklist = parseD1JsonValue(row.blacklistJson);
+      const trust = parseD1JsonValue(row.trustJson);
+      const verifyState = await getUserVerificationState(env, profile.userId);
+      const verified = Boolean(verifyState?.verified || isProfileVerificationPassed(profile));
+      return {
+        ...profile,
+        displayName: profile.displayName || buildDisplayName(profile) || `用户 ${profile.userId}`,
+        profileStatus: profile.profileStatus || 'message-only',
+        blacklisted: Boolean(blacklist),
+        blacklistReason: blacklist?.reason || null,
+        trusted: Boolean(trust),
+        trustNote: trust?.note || null,
+        verified,
+        verificationStatus:
+          verified
+            ? 'verified'
+            : verifyState?.challenge || verifyState?.sessionToken || verifyState?.stage
+              ? 'pending'
+              : 'unknown',
+      };
+    }));
+
+    const total = Number(summaryRow?.total || 0);
+    const nextOffset = offset + limit < total ? offset + limit : null;
+    return {
+      items: items.filter(Boolean),
+      summary: {
+        total,
+        blacklisted: Number(summaryRow?.blacklisted || 0),
+        trusted: Number(summaryRow?.trusted || 0),
+        verified: Number(summaryRow?.verified || 0),
+      },
+      total,
+      limit,
+      offset,
+      nextOffset,
+      prevOffset: offset > 0 ? Math.max(0, offset - limit) : null,
+      hasMore: nextOffset !== null,
+      source: 'd1',
+    };
+  } catch (error) {
+    console.warn('Failed to list users from D1 directory; falling back to KV', formatErrorMessage(error));
+    return null;
+  }
+}
+
 async function listUsersPage(env, options = {}) {
   const limit = clamp(Math.floor(Number(options.limit) || 50), 1, MAX_LIST_LIMIT);
   const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
@@ -4188,6 +2311,11 @@ async function listUsersPage(env, options = {}) {
       prevOffset: offset > 0 ? Math.max(0, offset - limit) : null,
       hasMore: false,
     };
+  }
+
+  if (await isDirectoryIndexReady(env)) {
+    const d1Page = await listUsersPageFromD1(env, { limit, offset });
+    if (d1Page) return d1Page;
   }
 
   const { sorted, summary } = await getUserListSnapshot(env);
@@ -4227,6 +2355,7 @@ async function setBlacklistEntry(env, userId, payload) {
   await putJsonIfChanged(env, blacklistKey(userId), entry, {
     ttlMs: HOT_KV_JSON_CACHE_TTL_MS,
   });
+  await writeD1ModerationIndex(env, 'blacklist', entry);
   return entry;
 }
 
@@ -4235,56 +2364,103 @@ async function deleteBlacklistEntry(env, userId) {
   const key = blacklistKey(userId);
   await env.BOT_KV.delete(key);
   noteKvJsonDelete(key);
+  await deleteD1DirectoryEntries(env, userId, 'blacklist');
+}
+
+function buildOffsetPage(items, total, limit, offset, source) {
+  const nextOffset = offset + limit < total ? offset + limit : null;
+  return {
+    items,
+    total,
+    limit,
+    offset,
+    nextOffset,
+    prevOffset: offset > 0 ? Math.max(0, offset - limit) : null,
+    hasMore: nextOffset !== null,
+    source,
+  };
+}
+
+function enrichModerationItem(entry, profile) {
+  return {
+    ...entry,
+    displayName: entry.displayName || profile?.displayName || buildDisplayName(profile) || `用户 ${entry.userId}`,
+    username: entry.username || profile?.username || null,
+    firstName: profile?.firstName || null,
+    lastName: profile?.lastName || null,
+    hasAvatar: Boolean(profile?.hasAvatar),
+    avatarUrl: profile?.avatarUrl || null,
+    profileStatus: profile?.profileStatus || 'message-only',
+  };
+}
+
+async function listModerationIndexPageFromD1(env, kind, options = {}) {
+  if (!env?.DB || !(await ensureDirectoryD1Schema(env))) return null;
+  const limit = clamp(Math.floor(Number(options.limit) || 50), 1, MAX_LIST_LIMIT);
+  const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+  try {
+    const [countRow, result] = await Promise.all([
+      env.DB.prepare('SELECT COUNT(*) AS total FROM user_moderation_index WHERE kind = ?1')
+        .bind(String(kind))
+        .first(),
+      env.DB.prepare(
+        `SELECT m.entry_json AS entryJson, d.profile_json AS profileJson
+         FROM user_moderation_index m
+         LEFT JOIN user_directory d ON d.user_id = m.user_id
+         WHERE m.kind = ?1
+         ORDER BY COALESCE(m.created_at, '') DESC, m.user_id DESC
+         LIMIT ?2 OFFSET ?3`,
+      ).bind(String(kind), limit, offset).all(),
+    ]);
+    const rows = Array.isArray(result?.results) ? result.results : [];
+    const items = rows.map((row) => {
+      const entry = parseD1JsonValue(row.entryJson) || {};
+      const profile = parseD1JsonValue(row.profileJson) || {};
+      return enrichModerationItem(entry, profile);
+    });
+    return buildOffsetPage(items, Number(countRow?.total || 0), limit, offset, 'd1');
+  } catch (error) {
+    console.warn(`Failed to list ${kind} from D1 directory; falling back to KV`, formatErrorMessage(error));
+    return null;
+  }
+}
+
+async function listModerationPageFromKv(env, prefix, options = {}) {
+  const limit = clamp(Math.floor(Number(options.limit) || 50), 1, MAX_LIST_LIMIT);
+  const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+  const names = await collectKvKeys(env.BOT_KV, prefix);
+  const entries = await Promise.all(names.map((name) => getCachedJson(env, name, HOT_KV_JSON_CACHE_TTL_MS)));
+  const enriched = await Promise.all(entries.filter(Boolean).map(async (entry) => (
+    enrichModerationItem(entry, await getUserProfile(env, entry.userId))
+  )));
+  const sorted = enriched.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return buildOffsetPage(sorted.slice(offset, offset + limit), sorted.length, limit, offset, 'kv');
+}
+
+async function listBlacklistPage(env, options = {}) {
+  if (!env.BOT_KV) return buildOffsetPage([], 0, 50, 0, 'kv');
+  if (await isDirectoryIndexReady(env)) {
+    const d1Page = await listModerationIndexPageFromD1(env, 'blacklist', options);
+    if (d1Page) return d1Page;
+  }
+  return listModerationPageFromKv(env, 'blacklist:', options);
 }
 
 async function listBlacklist(env, requestedLimit = 50) {
-  if (!env.BOT_KV) return [];
-  const names = await collectKvKeys(env.BOT_KV, 'blacklist:', MAX_SCAN_KEYS);
-  const items = await Promise.all(names.map((name) => getCachedJson(env, name, HOT_KV_JSON_CACHE_TTL_MS)));
-  const enriched = await Promise.all(
-    items.filter(Boolean).map(async (item) => {
-      const profile = await getUserProfile(env, item.userId);
-      return {
-        ...item,
-        displayName: item.displayName || profile?.displayName || buildDisplayName(profile) || `用户 ${item.userId}`,
-        username: item.username || profile?.username || null,
-        firstName: profile?.firstName || null,
-        lastName: profile?.lastName || null,
-        hasAvatar: Boolean(profile?.hasAvatar),
-        avatarUrl: profile?.avatarUrl || null,
-        profileStatus: profile?.profileStatus || 'message-only',
-      };
-    }),
-  );
+  return (await listBlacklistPage(env, { limit: requestedLimit, offset: 0 })).items;
+}
 
-  return enriched
-    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
-    .slice(0, clamp(requestedLimit, 1, MAX_LIST_LIMIT));
+async function listTrustPage(env, options = {}) {
+  if (!env.BOT_KV) return buildOffsetPage([], 0, 50, 0, 'kv');
+  if (await isDirectoryIndexReady(env)) {
+    const d1Page = await listModerationIndexPageFromD1(env, 'trust', options);
+    if (d1Page) return d1Page;
+  }
+  return listModerationPageFromKv(env, 'trust:', options);
 }
 
 async function listTrust(env, requestedLimit = 50) {
-  if (!env.BOT_KV) return [];
-  const names = await collectKvKeys(env.BOT_KV, 'trust:', MAX_SCAN_KEYS);
-  const items = await Promise.all(names.map((name) => getCachedJson(env, name, HOT_KV_JSON_CACHE_TTL_MS)));
-  const enriched = await Promise.all(
-    items.filter(Boolean).map(async (item) => {
-      const profile = await getUserProfile(env, item.userId);
-      return {
-        ...item,
-        displayName: item.displayName || profile?.displayName || buildDisplayName(profile) || `用户 ${item.userId}`,
-        username: item.username || profile?.username || null,
-        firstName: profile?.firstName || null,
-        lastName: profile?.lastName || null,
-        hasAvatar: Boolean(profile?.hasAvatar),
-        avatarUrl: profile?.avatarUrl || null,
-        profileStatus: profile?.profileStatus || 'message-only',
-      };
-    }),
-  );
-
-  return enriched
-    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
-    .slice(0, clamp(requestedLimit, 1, MAX_LIST_LIMIT));
+  return (await listTrustPage(env, { limit: requestedLimit, offset: 0 })).items;
 }
 
 async function getTrustEntry(env, userId) {
@@ -4306,6 +2482,7 @@ async function setTrustEntry(env, userId, payload) {
   await putJsonIfChanged(env, trustKey(userId), entry, {
     ttlMs: HOT_KV_JSON_CACHE_TTL_MS,
   });
+  await writeD1ModerationIndex(env, 'trust', entry);
   return entry;
 }
 
@@ -4314,6 +2491,7 @@ async function deleteTrustEntry(env, userId) {
   const key = trustKey(userId);
   await env.BOT_KV.delete(key);
   noteKvJsonDelete(key);
+  await deleteD1DirectoryEntries(env, userId, 'trust');
 }
 
 async function setAuthorizedAdmin(env, userId, payload) {
@@ -4385,7 +2563,7 @@ async function listAuthorizedAdmins(env, requestedLimit = 50) {
     return [...rootEntries, ...groupEntries].slice(0, limit);
   }
 
-  const names = await collectKvKeys(env.BOT_KV, 'admin:', MAX_SCAN_KEYS);
+  const names = await collectKvKeys(env.BOT_KV, 'admin:');
   const kvEntries = (await Promise.all(names.map((name) => getCachedJson(env, name, AUTHORIZED_ADMIN_CACHE_TTL_MS))))
     .filter((item) => item && Number.isFinite(Number(item.userId)))
     .map((item) => ({
@@ -4460,14 +2638,6 @@ async function getDynamicGroupAdminEntries(env) {
   }
 }
 
-function getRootAdminIds(env) {
-  const ids = parseIdList(env.ADMIN_IDS || env.ADMIN_ID);
-  if (ids.length === 0 && env.ADMIN_CHAT_ID && !String(env.ADMIN_CHAT_ID).startsWith('-')) {
-    ids.push(Number(env.ADMIN_CHAT_ID));
-  }
-  return Array.from(new Set(ids));
-}
-
 function getCommandAdminChatIds(env) {
   const chatId = env.ADMIN_CHAT_ID ? Number(env.ADMIN_CHAT_ID) : 0;
   if (!Number.isFinite(chatId) || chatId === 0) return [];
@@ -4496,26 +2666,6 @@ async function getCommandAdminUserIds(env) {
   }
 
   return Array.from(new Set([...configuredIds, ...groupAdminIds]));
-}
-
-function isRootAdmin(env, userId) {
-  return getRootAdminIds(env).includes(Number(userId));
-}
-
-function getAdminMetaMode(env = {}) {
-  const raw = String(env.ADMIN_META_MODE || ADMIN_META_MODE_NEW_TOPIC).trim().toLowerCase();
-  if (['always', 'all', 'every', 'each'].includes(raw)) return ADMIN_META_MODE_ALWAYS;
-  if (['off', 'none', 'never', 'silent'].includes(raw)) return ADMIN_META_MODE_OFF;
-  return ADMIN_META_MODE_NEW_TOPIC;
-}
-
-function shouldSendUserMetaMessage(env, topicModeEnabled, topicRecord, topicModeActive) {
-  if (!topicModeEnabled || !topicModeActive) return true;
-  const mode = getAdminMetaMode(env);
-  if (mode === ADMIN_META_MODE_ALWAYS) return true;
-  if (mode === ADMIN_META_MODE_OFF) return false;
-  if (topicRecord?.adminMetaSentAt) return false;
-  return Boolean(topicRecord?._createdNow);
 }
 
 function formatUserActionCardText(userId, profile = null) {
@@ -4547,7 +2697,8 @@ async function markUserTopicMetaSent(env, topicRecord, sentMessage = null) {
   if (!env?.BOT_KV || !topicRecord?.userId || !topicRecord?.threadId) return;
   if (topicRecord.adminMetaSentAt) return;
 
-  const { _createdNow, ...persistedTopicRecord } = topicRecord;
+  const persistedTopicRecord = { ...topicRecord };
+  delete persistedTopicRecord._createdNow;
   const now = new Date().toISOString();
   const next = {
     ...persistedTopicRecord,
@@ -4624,14 +2775,6 @@ async function getUserIdByThread(env, threadId) {
   return record?.userId ? Number(record.userId) : null;
 }
 
-function buildTopicName(sender, chat) {
-  const base =
-    [sender.first_name, sender.last_name].filter(Boolean).join(' ').trim() ||
-    sender.username ||
-    `用户 ${chat.id}`;
-  return `${base} (${chat.id})`.slice(0, 120);
-}
-
 async function getUserVerificationState(env, userId) {
   if (!env.BOT_KV) return null;
   return getCachedJson(env, verifyKey(userId), VERIFY_STATE_CACHE_TTL_MS);
@@ -4639,78 +2782,29 @@ async function getUserVerificationState(env, userId) {
 
 async function createOrRefreshVerificationWebSession(env, userId, options = {}) {
   ensureKv(env);
-  const forceNew = Boolean(options.forceNew);
-  let existing = (await getUserVerificationState(env, userId)) || {};
-  const flowMode = getVerificationFlowMode(env);
-
-  if (existing?.verified) {
-    const profile = await getUserProfile(env, userId);
-    if (await isVerificationStateActive(env, userId, existing, profile)) {
-      if (!isProfileVerificationPassed(profile)) {
-        await markUserProfileVerificationPassed(env, userId, existing.verifiedAt || existing.answeredAt || existing.updatedAt);
-      }
-      return existing;
-    }
-    existing = await resetVerificationStateAfterProfileRevocation(env, userId, existing);
-  }
-
-  const profile = await getUserProfile(env, userId);
-  const repairedState = await repairVerificationStateFromProfile(env, userId, existing, profile);
-  if (repairedState?.verified) {
-    return repairedState;
-  }
-
-  const blockedUntilMs = existing?.blockedUntil ? new Date(existing.blockedUntil).getTime() : 0;
-  if (blockedUntilMs && blockedUntilMs > Date.now()) {
-    return existing;
-  }
-
-  const sessionExpiresAtMs = existing?.sessionExpiresAt ? new Date(existing.sessionExpiresAt).getTime() : 0;
-  const sessionValid = Boolean(
-    existing?.sessionToken &&
-      sessionExpiresAtMs > Date.now() &&
-      existing?.flowMode === flowMode &&
-      (flowMode === 'numeric-choice'
-        ? existing?.stage === 'choice' && existing?.choice
-        : (existing?.stage === 'slider' || existing?.stage === 'grid') && existing?.slider && existing?.grid),
+  return createOrRefreshVerificationWebSessionState(
+    { userId, forceNew: options.forceNew },
+    {
+      getState: (id) => getUserVerificationState(env, id),
+      getFlowMode: () => getVerificationFlowMode(env),
+      getProfile: (id) => getUserProfile(env, id),
+      isStateActive: (id, state, profile) => isVerificationStateActive(env, id, state, profile),
+      isProfilePassed: isProfileVerificationPassed,
+      markProfilePassed: (id, passedAt) => markUserProfileVerificationPassed(env, id, passedAt),
+      resetAfterRevocation: (id, state) => resetVerificationStateAfterProfileRevocation(env, id, state),
+      repairFromProfile: (id, state, profile) => repairVerificationStateFromProfile(env, id, state, profile),
+      nowMs: () => Date.now(),
+      ensureProof: (id, state) => ensureVerificationSliderProofState(env, id, state),
+      deletePrompt: (id, messageId) => deleteVerificationPromptMessage(env, id, messageId),
+      createSessionToken,
+      getSessionExpireMs: () => getVerifyWebSessionExpireMs(env),
+      createSliderChallenge: createSliderChallengeForWebVerification,
+      createGridChallenge: createGridChallengeForWebVerification,
+      createChoiceChallenge: createNumericChoiceChallenge,
+      saveState: (id, state, existing) => putVerificationState(env, id, state, { existing }),
+      persistLatest: (id, state) => persistLatestVerificationSession(env, id, state),
+    },
   );
-
-  if (sessionValid && !forceNew) {
-    return await ensureVerificationSliderProofState(env, userId, existing);
-  }
-
-  if (forceNew && existing?.promptMessageId) {
-    await deleteVerificationPromptMessage(env, userId, existing.promptMessageId);
-  }
-
-  const now = Date.now();
-  const nextState = {
-    ...(existing || {}),
-    userId: Number(userId),
-    verificationVersion: 'web-v2',
-    flowMode,
-    verified: false,
-    verifiedAt: null,
-    answeredAt: null,
-    promptMessageId: forceNew ? null : existing?.promptMessageId || null,
-    blockedUntil: null,
-    selectedAnswer: null,
-    correctAnswer: null,
-    challenge: null,
-    failureCount: 0,
-    stage: flowMode === 'numeric-choice' ? 'choice' : 'slider',
-    sessionToken: createSessionToken(),
-    sessionIssuedAt: new Date(now).toISOString(),
-    sessionExpiresAt: new Date(now + getVerifyWebSessionExpireMs(env)).toISOString(),
-    slider: flowMode === 'numeric-choice' ? null : createSliderChallengeForWebVerification(),
-    grid: flowMode === 'numeric-choice' ? null : createGridChallengeForWebVerification(),
-    choice: flowMode === 'numeric-choice' ? generateNumericChoiceChallenge() : null,
-    updatedAt: new Date(now).toISOString(),
-  };
-
-  await putVerificationState(env, userId, nextState, { existing });
-  await persistLatestVerificationSession(env, userId, nextState);
-  return nextState;
 }
 
 async function ensureVerificationSliderProofState(env, userId, state) {
@@ -4727,65 +2821,9 @@ async function ensureVerificationSliderProofState(env, userId, state) {
     },
     updatedAt: new Date().toISOString(),
   };
-  await putVerificationState(env, userId, nextState, { existing: current });
+  await putVerificationState(env, userId, nextState, { existing: state });
   await persistLatestVerificationSession(env, userId, nextState);
   return nextState;
-}
-
-function createSliderChallengeForWebVerification() {
-  const size = 240;
-  const maxAngle = 360;
-  const startAngle = randomInt(35, 325);
-  const targetAngle = normalizeRotationAngle(360 - startAngle);
-  const nonce = createChallengeToken();
-  return {
-    type: 'rotation',
-    size,
-    maxAngle,
-    startAngle,
-    targetAngle,
-    seed: createChallengeToken(),
-    submitNonce: nonce,
-    submitNonceIssuedAt: new Date().toISOString(),
-    attempts: 0,
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function createGridChallengeForWebVerification() {
-  const symbolPool = ['🍎', '🚗', '🌲', '🏀', '🎧', '📷', '⏰', '🎲', '🎯', '🛳', '🎸', '🧩', '🏷', '🎁', '🛰'];
-  const symbols = shuffleArray(symbolPool).slice(0, 9);
-  const targetIndices = shuffleArray([0, 1, 2, 3, 4, 5, 6, 7, 8]).slice(0, 2).sort((a, b) => a - b);
-  const targetSymbols = targetIndices.map((idx) => symbols[idx]);
-  const cells = symbols.map((symbol, index) => ({
-    index,
-    symbol,
-    token: createChallengeToken().slice(-8),
-  }));
-  return {
-    attempts: 0,
-    targetIndices,
-    targetSymbols,
-    cells,
-    createdAt: new Date().toISOString(),
-  };
-}
-
-function normalizeVerificationBaseUrl(raw) {
-  const text = String(raw || '').trim();
-  if (!text) return '';
-  const withProtocol = /^https?:\/\//i.test(text) ? text : `https://${text}`;
-  try {
-    const parsed = new URL(withProtocol);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return '';
-    }
-    parsed.search = '';
-    parsed.hash = '';
-    return parsed.toString().replace(/\/$/, '');
-  } catch (error) {
-    return '';
-  }
 }
 
 function getVerificationBaseUrl(env = null, fallbackBaseUrl = '') {
@@ -4794,446 +2832,48 @@ function getVerificationBaseUrl(env = null, fallbackBaseUrl = '') {
   return normalizeVerificationBaseUrl(fallbackBaseUrl || env?.PUBLIC_BASE_URL || '');
 }
 
-function buildVerificationWebUrl(state, userId, publicBaseUrl = '') {
-  const base = getVerificationBaseUrl(null, publicBaseUrl);
-  if (!base || !state?.sessionToken) return '';
-  const params = new URLSearchParams({
-    uid: String(userId),
-    token: String(state.sessionToken),
-  });
-  return `${base}${VERIFY_WEB_PATH}?${params.toString()}`;
-}
-
 async function buildVerificationSessionPayload(state, env, publicBaseUrl = '') {
-  if (state?.verified) {
-    return {
-      status: 'verified',
-      verifiedAt: state.verifiedAt || null,
-    };
-  }
-
-  const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
-  if (blockedUntilMs && blockedUntilMs > Date.now()) {
-    return {
-      status: 'blocked',
-      blockedUntil: state.blockedUntil,
-      retryAfterMs: Math.max(1000, blockedUntilMs - Date.now()),
-    };
-  }
-
-  const flowMode = state?.flowMode === 'numeric-choice' ? 'numeric-choice' : 'graphic-two-step';
-  const stage = flowMode === 'numeric-choice' ? 'choice' : state?.stage === 'grid' ? 'grid' : 'slider';
-  const maxAttempts = getVerifyStageMaxAttempts(env);
-  const payload = {
-    status: 'in_progress',
-    flowMode,
-    stage,
-    sessionExpiresAt: state?.sessionExpiresAt || null,
-    stageMaxAttempts: maxAttempts,
-  };
-
-  if (stage === 'choice') {
-    const choice = state?.choice || generateNumericChoiceChallenge();
-    payload.choiceAttemptsLeft = Math.max(0, maxAttempts - Number(choice?.attempts || 0));
-    payload.choice = {
-      question: String(choice?.question || '请选择图片中的数字验证码'),
-      image: buildVerificationImageUrl(
+  return buildVerificationSessionPayloadResponse(
+    { state, publicBaseUrl },
+    {
+      nowMs: () => Date.now(),
+      getMaxAttempts: () => getVerifyStageMaxAttempts(env),
+      createChoiceChallenge: createNumericChoiceChallenge,
+      buildChoiceImage: (choice, baseUrl) => buildVerificationImageUrl(
         choice,
-        getVerificationBaseUrl(env, publicBaseUrl || env?.PUBLIC_BASE_URL || ''),
+        getVerificationBaseUrl(env, baseUrl || env?.PUBLIC_BASE_URL || ''),
       ),
-      options: Array.isArray(choice?.options) ? choice.options.slice(0, 4).map((item) => String(item)) : [],
-      attemptsUsed: Number(choice?.attempts || 0),
-    };
-    return payload;
-  }
-
-  payload.sliderAttemptsLeft = Math.max(0, maxAttempts - Number(state?.slider?.attempts || 0));
-  payload.gridAttemptsLeft = Math.max(0, maxAttempts - Number(state?.grid?.attempts || 0));
-
-  if (stage === 'slider') {
-    const slider = state?.slider || createSliderChallengeForWebVerification();
-    const isRotation = slider?.type === 'rotation';
-    const proof = await buildSliderSubmitProof(env, state, slider);
-    payload.slider = isRotation
-      ? {
-          type: 'rotation',
-          size: Number(slider.size || 240),
-          maxAngle: Number(slider.maxAngle || 360),
-          image: buildRotationCaptchaDataUrl(slider),
-          nonce: proof.nonce,
-          signature: proof.signature,
-          attemptsUsed: Number(slider.attempts || 0),
-        }
-      : {
-          type: 'puzzle',
-          width: Number(slider.width || 320),
-          height: Number(slider.height || 180),
-          piece: Number(slider.piece || 46),
-          targetY: Number(slider.targetY || 52),
-          maxX: Number(slider.maxX || 250),
-          background: buildSliderBackgroundDataUrl(slider),
-          nonce: proof.nonce,
-          signature: proof.signature,
-          attemptsUsed: Number(slider.attempts || 0),
-        };
-    return payload;
-  }
-
-  const grid = state?.grid || createGridChallengeForWebVerification();
-  payload.grid = {
-    promptSymbols: Array.isArray(grid.targetSymbols) ? grid.targetSymbols.slice(0, 2) : [],
-    requiredCount: 2,
-    attemptsUsed: Number(grid.attempts || 0),
-    cells: Array.isArray(grid.cells)
-      ? grid.cells.slice(0, 9).map((item, index) => ({
-          index,
-          symbol: String(item?.symbol || ''),
-          token: String(item?.token || ''),
-        }))
-      : [],
-  };
-  return payload;
-}
-
-function normalizeRotationAngle(value) {
-  const angle = Number(value);
-  if (!Number.isFinite(angle)) return 0;
-  return ((angle % 360) + 360) % 360;
-}
-
-function getRotationAngleDelta(left, right) {
-  const diff = Math.abs(normalizeRotationAngle(left) - normalizeRotationAngle(right));
-  return Math.min(diff, 360 - diff);
-}
-
-function rotatePoint(x, y, angle) {
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  return {
-    x: x * cos - y * sin,
-    y: x * sin + y * cos,
-  };
-}
-
-function mixColor(left, right, amount) {
-  const ratio = clamp(Number(amount), 0, 1);
-  return [
-    Math.round(left[0] * (1 - ratio) + right[0] * ratio),
-    Math.round(left[1] * (1 - ratio) + right[1] * ratio),
-    Math.round(left[2] * (1 - ratio) + right[2] * ratio),
-  ];
-}
-
-function hslToRgb(hue, saturation, lightness) {
-  const h = ((((Number(hue) || 0) % 360) + 360) % 360) / 360;
-  const s = clamp(Number(saturation), 0, 1);
-  const l = clamp(Number(lightness), 0, 1);
-  if (s === 0) {
-    const value = Math.round(l * 255);
-    return [value, value, value];
-  }
-  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-  const p = 2 * l - q;
-  const channels = [h + 1 / 3, h, h - 1 / 3].map((t) => {
-    let value = t;
-    if (value < 0) value += 1;
-    if (value > 1) value -= 1;
-    if (value < 1 / 6) return p + (q - p) * 6 * value;
-    if (value < 1 / 2) return q;
-    if (value < 2 / 3) return p + (q - p) * (2 / 3 - value) * 6;
-    return p;
-  });
-  return channels.map((value) => Math.round(value * 255));
-}
-
-function distanceToSegment(px, py, ax, ay, bx, by) {
-  const vx = bx - ax;
-  const vy = by - ay;
-  const wx = px - ax;
-  const wy = py - ay;
-  const lenSq = vx * vx + vy * vy;
-  const t = lenSq > 0 ? clamp((wx * vx + wy * vy) / lenSq, 0, 1) : 0;
-  const x = ax + vx * t;
-  const y = ay + vy * t;
-  const dx = px - x;
-  const dy = py - y;
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-function distanceToArrow(x, y, radius) {
-  const shaft = distanceToSegment(x, y, 0, -radius + 68, 0, radius - 40);
-  const leftHead = distanceToSegment(x, y, 0, -radius + 30, -18, -radius + 74);
-  const rightHead = distanceToSegment(x, y, 0, -radius + 30, 18, -radius + 74);
-  return Math.min(shaft, leftHead, rightHead);
-}
-
-function nearestCompassMark(x, y, radius) {
-  const distance = Math.sqrt(x * x + y * y);
-  if (distance < radius - 22 || distance > radius - 6) return Infinity;
-  const angle = Math.atan2(y, x);
-  const step = (Math.PI * 2) / 24;
-  const nearest = Math.round(angle / step) * step;
-  const angular = Math.abs(Math.atan2(Math.sin(angle - nearest), Math.cos(angle - nearest)));
-  return angular * distance;
-}
-
-async function buildSliderSubmitProof(env, state, slider) {
-  const nonce = String(slider?.submitNonce || '').trim();
-  return {
-    nonce,
-    signature: await signSliderSubmitNonce(env, state, slider, nonce),
-  };
-}
-
-async function signSliderSubmitNonce(env, state, slider, nonce) {
-  const payload = [
-    Number(state?.userId || 0),
-    String(state?.sessionToken || ''),
-    String(slider?.type || 'slider'),
-    String(slider?.seed || ''),
-    String(slider?.createdAt || ''),
-    String(nonce || ''),
-  ].join(':');
-  return hmacSha256Hex(getVerificationProofSecret(env, state), payload);
-}
-
-async function validateSliderSubmitProof(env, state, slider, body) {
-  const nonce = String(body?.nonce || '').trim();
-  const signature = String(body?.signature || '').trim();
-  const expectedNonce = String(slider?.submitNonce || '').trim();
-  if (!nonce || !signature || !expectedNonce) {
-    return { ok: false, reason: 'proof_missing' };
-  }
-  if (!timingSafeEqualText(nonce, expectedNonce)) {
-    return { ok: false, reason: 'proof_nonce_mismatch' };
-  }
-
-  const issuedAtMs = slider?.submitNonceIssuedAt ? new Date(slider.submitNonceIssuedAt).getTime() : 0;
-  const maxAgeMs = Math.max(30 * 1000, Math.min(getVerifyWebSessionExpireMs(env), 10 * 60 * 1000));
-  if (!issuedAtMs || Date.now() - issuedAtMs > maxAgeMs) {
-    return { ok: false, reason: 'proof_expired' };
-  }
-
-  const expectedSignature = await signSliderSubmitNonce(env, state, slider, nonce);
-  if (!timingSafeEqualText(signature, expectedSignature)) {
-    return { ok: false, reason: 'proof_signature_mismatch' };
-  }
-
-  return { ok: true, reason: 'ok' };
-}
-
-function buildRotationCaptchaDataUrl(slider) {
-  const png = renderRotationCaptchaPng(slider);
-  return `data:image/png;base64,${base64EncodeBytes(png)}`;
-}
-
-function renderRotationCaptchaPng(slider) {
-  const size = clamp(Math.round(Number(slider?.size || 240)), 160, 360);
-  const center = size / 2;
-  const radius = Math.round(size * 0.42);
-  const seed = String(slider?.seed || createChallengeToken());
-  const rand = createSeededRandom(seed);
-  const startAngle = normalizeRotationAngle(slider?.startAngle || 0);
-  const pixels = new Uint8Array(size * size * 3);
-  const baseHue = 175 + Math.floor(rand() * 100);
-  const accentHue = 18 + Math.floor(rand() * 60);
-  const rotation = (startAngle * Math.PI) / 180;
-
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const dx = x - center;
-      const dy = y - center;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      let color = [232, 243, 251];
-
-      if (distance <= radius) {
-        const local = rotatePoint(dx, dy, -rotation);
-        const radial = Math.min(1, distance / radius);
-        const sweep = (Math.atan2(local.y, local.x) + Math.PI) / (Math.PI * 2);
-        const warm = hslToRgb(accentHue, 0.86, 0.72);
-        const cool = hslToRgb(baseHue + sweep * 28, 0.78, 0.68 + (1 - radial) * 0.16);
-        color = mixColor(cool, warm, Math.max(0, radial - 0.45) * 0.9);
-
-        const wave1 = Math.abs(local.y - Math.sin(local.x / 28) * 20 - 24);
-        if (wave1 < 10) color = mixColor(color, [255, 255, 255], 0.32 * (1 - wave1 / 10));
-
-        const wave2 = Math.abs(local.y + Math.cos(local.x / 34) * 17 + 24);
-        if (wave2 < 8) color = mixColor(color, [24, 76, 101], 0.15 * (1 - wave2 / 8));
-
-        const arrowDistance = distanceToArrow(local.x, local.y, radius);
-        if (arrowDistance < 5.2) color = mixColor([20, 50, 75], [255, 255, 255], arrowDistance / 8.5);
-
-        const centerDot = Math.sqrt(local.x * local.x + local.y * local.y);
-        if (centerDot < 16) color = mixColor(color, [255, 255, 255], 0.76 * (1 - centerDot / 16));
-
-        const mark = nearestCompassMark(local.x, local.y, radius);
-        if (mark < 3.2) color = mixColor(color, [24, 54, 82], 0.5 * (1 - mark / 3.2));
-
-        const grain = rand() * 10 - 5;
-        color = color.map((v) => clamp(Math.round(v + grain), 0, 255));
-      } else if (distance <= radius + 3) {
-        color = [64, 96, 120];
-      }
-
-      setPixel(pixels, size, size, x, y, color);
-    }
-  }
-
-  for (let i = 0; i < 34; i += 1) {
-    const angle = rand() * Math.PI * 2;
-    const distance = rand() * radius * 0.78;
-    const local = { x: Math.cos(angle) * distance, y: Math.sin(angle) * distance };
-    const rotated = rotatePoint(local.x, local.y, rotation);
-    drawFilledCircle(
-      pixels,
-      size,
-      size,
-      Math.round(center + rotated.x),
-      Math.round(center + rotated.y),
-      1 + Math.floor(rand() * 3),
-      [238 + Math.floor(rand() * 17), 244 + Math.floor(rand() * 10), 255],
-      0.34,
-    );
-  }
-
-  const north = rotatePoint(0, -radius + 25, rotation);
-  drawChar(pixels, size, size, 'N', Math.round(center + north.x - 10), Math.round(center + north.y - 13), 4, [24, 54, 82]);
-  drawCircleOutline(pixels, size, size, Math.round(center), Math.round(center), radius, [48, 84, 112]);
-  return encodePngRgb(size, size, pixels);
-}
-
-function buildSliderBackgroundDataUrl(slider) {
-  const width = Number(slider?.width || 320);
-  const height = Number(slider?.height || 180);
-  const piece = Number(slider?.piece || 46);
-  const targetX = Number(slider?.targetX || 120);
-  const targetY = Number(slider?.targetY || 64);
-  const rand = createSeededRandom(String(slider?.seed || createChallengeToken()));
-  const shapes = [];
-
-  for (let i = 0; i < 24; i += 1) {
-    const cx = Math.floor(rand() * width);
-    const cy = Math.floor(rand() * height);
-    const radius = 6 + Math.floor(rand() * 18);
-    const hue = 180 + Math.floor(rand() * 120);
-    const alpha = (0.14 + rand() * 0.18).toFixed(3);
-    shapes.push(`<circle cx="${cx}" cy="${cy}" r="${radius}" fill="hsla(${hue},78%,70%,${alpha})" />`);
-  }
-
-  for (let i = 0; i < 12; i += 1) {
-    const x = Math.floor(rand() * (width - 64));
-    const y = Math.floor(rand() * (height - 20));
-    const w = 24 + Math.floor(rand() * 66);
-    const h = 8 + Math.floor(rand() * 22);
-    const alpha = (0.08 + rand() * 0.15).toFixed(3);
-    shapes.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="8" fill="rgba(255,255,255,${alpha})" />`);
-  }
-
-  const path = [
-    `M ${targetX} ${targetY + piece * 0.2}`,
-    `Q ${targetX + piece * 0.1} ${targetY} ${targetX + piece * 0.25} ${targetY + piece * 0.12}`,
-    `Q ${targetX + piece * 0.5} ${targetY - piece * 0.18} ${targetX + piece * 0.74} ${targetY + piece * 0.12}`,
-    `Q ${targetX + piece * 0.9} ${targetY} ${targetX + piece} ${targetY + piece * 0.2}`,
-    `L ${targetX + piece} ${targetY + piece * 0.82}`,
-    `Q ${targetX + piece * 0.86} ${targetY + piece} ${targetX + piece * 0.68} ${targetY + piece * 0.92}`,
-    `Q ${targetX + piece * 0.5} ${targetY + piece * 1.1} ${targetX + piece * 0.32} ${targetY + piece * 0.92}`,
-    `Q ${targetX + piece * 0.14} ${targetY + piece} ${targetX} ${targetY + piece * 0.82}`,
-    'Z',
-  ].join(' ');
-
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-    <defs>
-      <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stop-color="#e3f4ff" />
-        <stop offset="50%" stop-color="#d5ffe8" />
-        <stop offset="100%" stop-color="#ffecc7" />
-      </linearGradient>
-      <filter id="softNoise" x="-20%" y="-20%" width="140%" height="140%">
-        <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="${Math.floor(rand() * 1000)}" />
-        <feColorMatrix type="saturate" values="0.05"/>
-        <feComponentTransfer>
-          <feFuncA type="table" tableValues="0 0.07"/>
-        </feComponentTransfer>
-      </filter>
-    </defs>
-    <rect width="${width}" height="${height}" fill="url(#bg)" />
-    ${shapes.join('')}
-    <rect width="${width}" height="${height}" filter="url(#softNoise)" />
-    <path d="${path}" fill="rgba(255,255,255,0.16)" stroke="rgba(25,35,50,0.65)" stroke-width="2" stroke-dasharray="3 2"/>
-  </svg>`;
-
-  return `data:image/svg+xml;base64,${base64Encode(svg)}`;
-}
-
-function base64Encode(input) {
-  const text = String(input || '');
-  const bytes = new TextEncoder().encode(text);
-  return base64EncodeBytes(bytes);
-}
-
-function base64EncodeBytes(bytes) {
-  let binary = '';
-  for (const byte of bytes || []) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
+      createSliderChallenge: createSliderChallengeForWebVerification,
+      buildSliderProof: (proofState, slider) => buildSliderSubmitProof(
+        proofState,
+        slider,
+        getVerificationProofSecret(env, proofState),
+      ),
+      buildRotationImage: (slider) => buildRotationCaptchaDataUrl(slider, { drawChar }),
+      buildPuzzleImage: buildSliderBackgroundDataUrl,
+      createGridChallenge: createGridChallengeForWebVerification,
+    },
+  );
 }
 
 async function sendVerificationWebPrompt(env, userId, state, publicBaseUrl = '', forceNewMessage = false) {
-  const verifyUrl = buildVerificationWebUrl(
-    state,
-    userId,
-    getVerificationBaseUrl(env, publicBaseUrl || env.PUBLIC_BASE_URL || ''),
+  return sendVerificationWebPromptRequest(
+    {
+      userId,
+      state,
+      publicBaseUrl: getVerificationBaseUrl(env, publicBaseUrl || env.PUBLIC_BASE_URL || ''),
+      verifyPath: VERIFY_WEB_PATH,
+      forceNewMessage,
+    },
+    {
+      getMaxAttempts: () => getVerifyStageMaxAttempts(env),
+      getRetryBlockMs: () => getVerifyRetryBlockMs(env),
+      persistLatest: (id, value) => persistLatestVerificationSession(env, id, value),
+      editMessage: (payload) => telegram(env, 'editMessageText', payload),
+      sendMessage: (payload) => telegram(env, 'sendMessage', payload),
+      setPromptMessageId: (id, messageId) => setVerificationPromptMessageId(env, id, messageId),
+    },
   );
-  const maxAttempts = getVerifyStageMaxAttempts(env);
-  const isNumericChoice = state?.flowMode === 'numeric-choice';
-  const lines = isNumericChoice
-    ? [
-        '🔐 首次私聊验证（数字图片验证）',
-        `打开验证页后识别图片中的 4 位数字，并从四个选项中选择正确答案。`,
-        `最多 ${maxAttempts} 次，失败超过次数后会锁定 ${Math.round(getVerifyRetryBlockMs(env) / 60000)} 分钟`,
-      ]
-    : [
-        '🔐 首次私聊验证（图形双重挑战）',
-        `1) 旋转验证：最多 ${maxAttempts} 次`,
-        `2) 九宫格点选（九选二）：最多 ${maxAttempts} 次`,
-        `失败超过次数后会锁定 ${Math.round(getVerifyRetryBlockMs(env) / 60000)} 分钟`,
-      ];
-
-  if (!verifyUrl) {
-    lines.push('未找到可用验证链接，请联系管理员配置 VERIFY_PUBLIC_BASE_URL 或 PUBLIC_BASE_URL。');
-  } else {
-    lines.push('点击下方按钮打开验证页面。本链接一次一码，新消息会使旧链接立即失效。');
-    await persistLatestVerificationSession(env, userId, state);
-  }
-
-  const payload = {
-    chat_id: userId,
-    text: lines.join('\n'),
-    reply_markup: verifyUrl
-      ? {
-          inline_keyboard: [[{ text: '打开验证页面', url: verifyUrl }]],
-        }
-      : undefined,
-  };
-
-  const promptMessageId = forceNewMessage ? 0 : Number(state?.promptMessageId || 0);
-  if (promptMessageId) {
-    try {
-      await telegram(env, 'editMessageText', {
-        ...payload,
-        message_id: promptMessageId,
-      });
-      return;
-    } catch (error) {
-      // fall through and send a new message
-    }
-  }
-
-  const sent = await telegram(env, 'sendMessage', payload);
-  if (sent?.message_id) {
-    await setVerificationPromptMessageId(env, userId, sent.message_id);
-  }
 }
 
 async function handleVerificationApiRequest(request, url, env, publicBaseUrl = '') {
@@ -5248,25 +2888,22 @@ async function handleVerificationApiRequest(request, url, env, publicBaseUrl = '
   };
 
   const body = await readJsonBody(request);
-  const pathname = url.pathname;
-
-  if (pathname === `${VERIFY_API_PREFIX}/session`) {
-    const result = await handleVerificationSessionApi(env, body, publicBaseUrl);
-    return json({ ok: true, ...result }, 200, noCacheHeaders, request);
-  }
-
-  if (pathname === `${VERIFY_API_PREFIX}/slider`) {
-    const result = await handleVerificationSliderApi(env, body, publicBaseUrl);
-    return json({ ok: true, ...result }, 200, noCacheHeaders, request);
-  }
-
-  if (pathname === `${VERIFY_API_PREFIX}/grid`) {
-    const result = await handleVerificationGridApi(env, body, publicBaseUrl);
-    return json({ ok: true, ...result }, 200, noCacheHeaders, request);
-  }
-
-  if (pathname === `${VERIFY_API_PREFIX}/choice`) {
-    const result = await handleVerificationChoiceApi(env, body, publicBaseUrl);
+  const result = await dispatchVerificationApiRoute(
+    {
+      pathname: url.pathname,
+      prefix: VERIFY_API_PREFIX,
+      env,
+      body,
+      publicBaseUrl,
+    },
+    {
+      session: handleVerificationSessionApi,
+      slider: handleVerificationSliderApi,
+      grid: handleVerificationGridApi,
+      choice: handleVerificationChoiceApi,
+    },
+  );
+  if (result) {
     return json({ ok: true, ...result }, 200, noCacheHeaders, request);
   }
 
@@ -5285,922 +2922,184 @@ function parseVerificationApiIdentity(body) {
   return { userId, token };
 }
 
-function isVerificationSessionExpired(state) {
-  const expiresMs = state?.sessionExpiresAt ? new Date(state.sessionExpiresAt).getTime() : 0;
-  return !expiresMs || expiresMs <= Date.now();
+async function loadVerificationSubmissionContext(env, body) {
+  return loadVerificationApiContext(
+    { body },
+    {
+      parseIdentity: parseVerificationApiIdentity,
+      getState: (userId) => getUserVerificationState(env, userId),
+      getLatestSession: (userId, token) => getLatestVerificationSessionState(env, userId, token),
+      putState: (userId, state, existing) => putVerificationState(env, userId, state, { existing }),
+      tokensEqual: timingSafeEqualText,
+      isExpired: isVerificationSessionExpired,
+      error: (status, message) => new AppError(status, message),
+    },
+  );
 }
 
 async function handleVerificationSessionApi(env, body, publicBaseUrl = '') {
-  const { userId, token } = parseVerificationApiIdentity(body);
-  let state = await getUserVerificationState(env, userId);
-  const latestState = await getLatestVerificationSessionState(env, userId, token);
-  if (latestState && (!state?.sessionToken || !timingSafeEqualText(token, state.sessionToken))) {
-    await putVerificationState(env, userId, latestState, { existing: state || null });
-    state = latestState;
-  }
-  if (!state) {
-    throw new AppError(401, '验证会话不存在');
-  }
-  if (state?.verified) {
-    throw new AppError(410, '验证链接已失效，请返回 Telegram 点击最新验证按钮。');
-  }
-  if (!state?.sessionToken) {
-    throw new AppError(401, '验证会话不存在');
-  }
-  if (!timingSafeEqualText(token, state.sessionToken)) {
-    throw new AppError(401, '验证会话不匹配');
-  }
-
-  const blockedUntilMs = state?.blockedUntil ? new Date(state.blockedUntil).getTime() : 0;
-  if (blockedUntilMs && blockedUntilMs > Date.now()) {
-    return await buildVerificationSessionPayload(state, env, publicBaseUrl);
-  }
-
-  if (isVerificationSessionExpired(state)) {
-    throw new AppError(410, '验证会话已过期，请返回 Telegram 重新获取最新验证按钮。');
-  }
-
-  state = await ensureVerificationSliderProofState(env, userId, state);
-  return await buildVerificationSessionPayload(state, env, publicBaseUrl);
+  return handleVerificationSessionApiRequest(
+    { body, publicBaseUrl },
+    {
+      parseIdentity: parseVerificationApiIdentity,
+      getState: (userId) => getUserVerificationState(env, userId),
+      getLatestSession: (userId, token) => getLatestVerificationSessionState(env, userId, token),
+      putState: (userId, state, existing) => putVerificationState(env, userId, state, { existing }),
+      tokensEqual: timingSafeEqualText,
+      now: () => Date.now(),
+      isExpired: isVerificationSessionExpired,
+      ensureProof: (userId, state) => ensureVerificationSliderProofState(env, userId, state),
+      buildPayload: (state, baseUrl) => buildVerificationSessionPayload(state, env, baseUrl),
+      error: (status, message) => new AppError(status, message),
+    },
+  );
 }
 
 async function handleVerificationSliderApi(env, body, publicBaseUrl = '') {
-  const { userId, token } = parseVerificationApiIdentity(body);
-  let current = await getUserVerificationState(env, userId);
-  const latestState = await getLatestVerificationSessionState(env, userId, token);
-  if (latestState && (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken))) {
-    await putVerificationState(env, userId, latestState, { existing: current || null });
-    current = latestState;
-  }
-  if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
-    throw new AppError(401, '验证会话不匹配');
-  }
-
-  if (current?.verified) {
-    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
-  }
-
-  if (isVerificationSessionExpired(current)) {
-    throw new AppError(410, '验证会话已过期');
-  }
-
-  if (current?.stage !== 'slider') {
-    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
-  }
-
-  const hadSubmitProof = Boolean(current?.slider?.submitNonce);
-  current = await ensureVerificationSliderProofState(env, userId, current);
-  if (!hadSubmitProof && (!body?.nonce || !body?.signature)) {
-    return {
-      ...(await buildVerificationSessionPayload(current, env, publicBaseUrl)),
-      status: 'slider_failed',
-      reason: 'proof_missing',
-    };
-  }
-
-  const validation = await validateSliderAttemptHuman(current, body, env);
-  if (validation.ok) {
-    const nextState = {
-      ...current,
-      stage: 'grid',
-      slider: {
-        ...(current?.slider || {}),
-        submitNonce: null,
-        submitNonceIssuedAt: null,
-      },
-      sessionExpiresAt: new Date(Date.now() + getVerifyWebSessionExpireMs(env)).toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    await putVerificationState(env, userId, nextState, { existing: current });
-    await persistLatestVerificationSession(env, userId, nextState);
-    return await buildVerificationSessionPayload(nextState, env, publicBaseUrl);
-  }
-
-  const maxAttempts = getVerifyStageMaxAttempts(env);
-  const nextAttempts = Number(current?.slider?.attempts || 0) + 1;
-  const nextState = {
-    ...current,
-    slider: {
-      ...(current?.slider || {}),
-      attempts: nextAttempts,
-      submitNonce: createChallengeToken(),
-      submitNonceIssuedAt: new Date().toISOString(),
-      lastReason: validation.reason,
-      lastFailedAt: new Date().toISOString(),
+  return handleVerificationSliderApiRequest(
+    { body, publicBaseUrl },
+    {
+      loadContext: (value) => loadVerificationSubmissionContext(env, value),
+      buildPayload: (state, baseUrl) => buildVerificationSessionPayload(state, env, baseUrl),
+      ensureProof: (userId, state) => ensureVerificationSliderProofState(env, userId, state),
+      validateAttempt: (state, value) => validateSliderAttemptHuman(
+        {
+          state,
+          body: value,
+          minSliderTimeMs: getVerifyMinSliderTimeMs(env),
+          sliderTolerance: getVerifySliderTolerance(env),
+          rotationTolerance: getVerifyRotationTolerance(env),
+        },
+        {
+          validateProof: (proofState, slider, proofBody) => validateSliderSubmitProof({
+            state: proofState,
+            slider,
+            body: proofBody,
+            secret: getVerificationProofSecret(env, proofState),
+            nowMs: Date.now(),
+            sessionExpireMs: getVerifyWebSessionExpireMs(env),
+          }),
+        },
+      ),
+      nowMs: () => Date.now(),
+      getSessionExpireMs: () => getVerifyWebSessionExpireMs(env),
+      nowIso: () => new Date().toISOString(),
+      createNonce: createChallengeToken,
+      getMaxAttempts: () => getVerifyStageMaxAttempts(env),
+      lock: (userId, state, details) => lockVerificationAndReport(env, userId, state, details),
+      saveState: (userId, state, existing) => putVerificationState(env, userId, state, { existing }),
+      persistLatest: (userId, state) => persistLatestVerificationSession(env, userId, state),
     },
-    updatedAt: new Date().toISOString(),
-  };
-
-  if (nextAttempts >= maxAttempts) {
-    const locked = await lockVerificationAndReport(env, userId, nextState, {
-      stage: 'slider',
-      reason: validation.reason,
-    });
-    return await buildVerificationSessionPayload(locked, env, publicBaseUrl);
-  }
-
-  await putVerificationState(env, userId, nextState, { existing: current });
-  await persistLatestVerificationSession(env, userId, nextState);
-  return {
-    ...(await buildVerificationSessionPayload(nextState, env, publicBaseUrl)),
-    status: 'slider_failed',
-    reason: validation.reason,
-  };
+  );
 }
 
 async function handleVerificationGridApi(env, body, publicBaseUrl = '') {
-  const { userId, token } = parseVerificationApiIdentity(body);
-  let current = await getUserVerificationState(env, userId);
-  const latestState = await getLatestVerificationSessionState(env, userId, token);
-  if (latestState && (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken))) {
-    await putVerificationState(env, userId, latestState, { existing: current || null });
-    current = latestState;
-  }
-  if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
-    throw new AppError(401, '验证会话不匹配');
-  }
-
-  if (current?.verified) {
-    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
-  }
-
-  if (isVerificationSessionExpired(current)) {
-    throw new AppError(410, '验证会话已过期');
-  }
-
-  if (current?.stage !== 'grid') {
-    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
-  }
-
-  const selections = Array.isArray(body?.selections)
-    ? Array.from(new Set(body.selections.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item >= 0 && item <= 8)))
-    : [];
-  const expected = Array.isArray(current?.grid?.targetIndices)
-    ? current.grid.targetIndices.map((item) => Number(item)).filter((item) => Number.isInteger(item))
-    : [];
-
-  const passed = compareIndexSets(selections, expected);
-  if (passed) {
-    const nextState = await adminApproveUserVerification(env, userId, 'web-verification', {
-      notifyUser: true,
-      keepSession: false,
-    });
-    return await buildVerificationSessionPayload(nextState, env, publicBaseUrl);
-  }
-
-  const maxAttempts = getVerifyStageMaxAttempts(env);
-  const nextAttempts = Number(current?.grid?.attempts || 0) + 1;
-  const nextState = {
-    ...current,
-    grid: {
-      ...(current?.grid || {}),
-      attempts: nextAttempts,
-      lastFailedAt: new Date().toISOString(),
+  return handleVerificationGridApiRequest(
+    { body, publicBaseUrl },
+    {
+      loadContext: (value) => loadVerificationSubmissionContext(env, value),
+      buildPayload: (state, baseUrl) => buildVerificationSessionPayload(state, env, baseUrl),
+      approve: (userId, source, options) => adminApproveUserVerification(env, userId, source, options),
+      getMaxAttempts: () => getVerifyStageMaxAttempts(env),
+      nowIso: () => new Date().toISOString(),
+      lock: (userId, state, details) => lockVerificationAndReport(env, userId, state, details),
+      saveState: (userId, state, existing) => putVerificationState(env, userId, state, { existing }),
+      persistLatest: (userId, state) => persistLatestVerificationSession(env, userId, state),
     },
-    updatedAt: new Date().toISOString(),
-  };
-
-  if (nextAttempts >= maxAttempts) {
-    const locked = await lockVerificationAndReport(env, userId, nextState, {
-      stage: 'grid',
-      reason: 'grid_selection_mismatch',
-      selections,
-    });
-    return await buildVerificationSessionPayload(locked, env, publicBaseUrl);
-  }
-
-  await putVerificationState(env, userId, nextState, { existing: current });
-  await persistLatestVerificationSession(env, userId, nextState);
-  return {
-    ...(await buildVerificationSessionPayload(nextState, env, publicBaseUrl)),
-    status: 'grid_failed',
-    reason: 'grid_selection_mismatch',
-  };
+  );
 }
 
 async function handleVerificationChoiceApi(env, body, publicBaseUrl = '') {
-  const { userId, token } = parseVerificationApiIdentity(body);
-  let current = await getUserVerificationState(env, userId);
-  const latestState = await getLatestVerificationSessionState(env, userId, token);
-  if (latestState && (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken))) {
-    await putVerificationState(env, userId, latestState, { existing: current || null });
-    current = latestState;
-  }
-  if (!current?.sessionToken || !timingSafeEqualText(token, current.sessionToken)) {
-    throw new AppError(401, '验证会话不匹配');
-  }
-
-  if (current?.verified) {
-    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
-  }
-
-  if (isVerificationSessionExpired(current)) {
-    throw new AppError(410, '验证会话已过期');
-  }
-
-  if (current?.stage !== 'choice') {
-    return await buildVerificationSessionPayload(current, env, publicBaseUrl);
-  }
-
-  const answer = String(body?.answer ?? '').trim();
-  const expected = String(current?.choice?.correct ?? '').trim();
-  if (answer && expected && timingSafeEqualText(answer, expected)) {
-    const nextState = await adminApproveUserVerification(env, userId, 'web-verification', {
-      notifyUser: true,
-      keepSession: false,
-    });
-    return await buildVerificationSessionPayload(nextState, env, publicBaseUrl);
-  }
-
-  const maxAttempts = getVerifyStageMaxAttempts(env);
-  const nextAttempts = Number(current?.choice?.attempts || 0) + 1;
-  const nextState = {
-    ...current,
-    selectedAnswer: answer,
-    correctAnswer: expected,
-    choice: {
-      ...(current?.choice || {}),
-      attempts: nextAttempts,
-      lastFailedAt: new Date().toISOString(),
+  return handleVerificationChoiceApiRequest(
+    { body, publicBaseUrl },
+    {
+      loadContext: (value) => loadVerificationSubmissionContext(env, value),
+      buildPayload: (state, baseUrl) => buildVerificationSessionPayload(state, env, baseUrl),
+      answersEqual: timingSafeEqualText,
+      approve: (userId, source, options) => adminApproveUserVerification(env, userId, source, options),
+      getMaxAttempts: () => getVerifyStageMaxAttempts(env),
+      nowIso: () => new Date().toISOString(),
+      lock: (userId, state, details) => lockVerificationAndReport(env, userId, state, details),
+      saveState: (userId, state, existing) => putVerificationState(env, userId, state, { existing }),
+      persistLatest: (userId, state) => persistLatestVerificationSession(env, userId, state),
     },
-    updatedAt: new Date().toISOString(),
-  };
-
-  if (nextAttempts >= maxAttempts) {
-    const locked = await lockVerificationAndReport(env, userId, nextState, {
-      stage: 'choice',
-      reason: 'choice_selection_mismatch',
-      selectedAnswer: answer,
-    });
-    return await buildVerificationSessionPayload(locked, env, publicBaseUrl);
-  }
-
-  await putVerificationState(env, userId, nextState, { existing: current });
-  await persistLatestVerificationSession(env, userId, nextState);
-  return {
-    ...(await buildVerificationSessionPayload(nextState, env, publicBaseUrl)),
-    status: 'choice_failed',
-    reason: 'choice_selection_mismatch',
-  };
-}
-
-async function validateSliderAttemptHuman(state, body, env) {
-  const slider = state?.slider;
-  if (!slider) {
-    return { ok: false, reason: 'slider_missing' };
-  }
-
-  const proof = await validateSliderSubmitProof(env, state, slider, body);
-  if (!proof.ok) {
-    return proof;
-  }
-
-  if (slider?.type === 'rotation') {
-    return validateRotationAttemptHuman(slider, body, env);
-  }
-
-  const value = Number(body?.value);
-  if (!Number.isFinite(value)) {
-    return { ok: false, reason: 'slider_value_invalid' };
-  }
-
-  const tolerance = getVerifySliderTolerance(env);
-  const targetX = Number(slider.targetX || 0);
-  if (Math.abs(value - targetX) > tolerance) {
-    return { ok: false, reason: 'slider_position_mismatch' };
-  }
-
-  const trace = normalizeSliderTrace(body?.trace);
-  if (trace.length < 5) {
-    return { ok: false, reason: 'trace_too_short' };
-  }
-
-  const durationMs = trace[trace.length - 1].t - trace[0].t;
-  if (durationMs < getVerifyMinSliderTimeMs(env)) {
-    return { ok: false, reason: 'trace_too_fast' };
-  }
-
-  let forwardMoves = 0;
-  let backwardMoves = 0;
-  let totalDistance = 0;
-  for (let i = 1; i < trace.length; i += 1) {
-    const dx = trace[i].x - trace[i - 1].x;
-    const dt = trace[i].t - trace[i - 1].t;
-    if (dt <= 0) continue;
-    if (dx >= 0) {
-      forwardMoves += 1;
-    } else {
-      backwardMoves += 1;
-    }
-    totalDistance += Math.abs(dx);
-  }
-
-  const totalMoves = forwardMoves + backwardMoves;
-  if (totalMoves < 4) {
-    return { ok: false, reason: 'trace_not_enough_segments' };
-  }
-  if (forwardMoves / totalMoves < 0.55) {
-    return { ok: false, reason: 'trace_direction_invalid' };
-  }
-
-  const expectedDistance = Math.max(20, Math.abs(value - trace[0].x));
-  if (totalDistance < expectedDistance * 0.55) {
-    return { ok: false, reason: 'trace_distance_invalid' };
-  }
-
-  const shape = scoreTraceShapeRisk(trace, value, { allowSingleDirection: false });
-  if (!shape.ok) {
-    return { ok: false, reason: shape.reason };
-  }
-
-  const risk = scoreSliderInteractionRisk(trace, body?.interaction, value);
-  if (!risk.ok) {
-    return { ok: false, reason: risk.reason };
-  }
-
-  return { ok: true, reason: 'ok' };
-}
-
-function validateRotationAttemptHuman(slider, body, env) {
-  const value = Number(body?.value);
-  if (!Number.isFinite(value)) {
-    return { ok: false, reason: 'rotation_value_invalid' };
-  }
-
-  const targetAngle = normalizeRotationAngle(slider?.targetAngle || 0);
-  const delta = getRotationAngleDelta(value, targetAngle);
-  if (delta > getVerifyRotationTolerance(env)) {
-    return { ok: false, reason: 'rotation_angle_mismatch', delta: Math.round(delta) };
-  }
-
-  const trace = normalizeSliderTrace(body?.trace);
-  if (trace.length < 6) {
-    return { ok: false, reason: 'trace_too_short' };
-  }
-
-  const durationMs = trace[trace.length - 1].t - trace[0].t;
-  if (durationMs < getVerifyMinSliderTimeMs(env)) {
-    return { ok: false, reason: 'trace_too_fast' };
-  }
-
-  const shape = scoreTraceShapeRisk(trace, value, {
-    allowSingleDirection: true,
-    stationaryRatioLimit: 0.88,
-    stationaryDelta: 0.35,
-  });
-  if (!shape.ok) {
-    return { ok: false, reason: shape.reason };
-  }
-
-  const risk = scoreRotationInteractionRisk(trace, body?.interaction, value);
-  if (!risk.ok) {
-    return { ok: false, reason: risk.reason };
-  }
-
-  return { ok: true, reason: 'ok' };
-}
-
-function scoreRotationInteractionRisk(trace, interaction, value) {
-  const eventCount = Number(interaction?.eventCount || trace.length || 0);
-  const pointerType = String(interaction?.pointerType || '').toLowerCase();
-  const durationMs = Number(interaction?.durationMs || (trace[trace.length - 1]?.t - trace[0]?.t) || 0);
-  const endX = Number(interaction?.endX ?? value);
-  const averageIntervalMs = Number(interaction?.averageIntervalMs || 0);
-  const dragStarted = interaction?.dragStarted === true;
-  let risk = 0;
-
-  if (!dragStarted) risk += 3;
-  if (eventCount < 5) risk += 3;
-  else if (eventCount < 8) risk += 1;
-  if (durationMs < 260) risk += 4;
-  else if (durationMs < 420) risk += 1;
-  if (getRotationAngleDelta(endX, value) > 2) risk += 2;
-  if (averageIntervalMs > 0 && averageIntervalMs < 8 && eventCount > 10) risk += 1;
-  if (averageIntervalMs > 180 && eventCount < 8) risk += 1;
-  if (pointerType && !['mouse', 'touch', 'pen'].includes(pointerType)) risk += 1;
-
-  if (risk >= 5) {
-    return { ok: false, reason: 'interaction_risk_high', risk };
-  }
-  return { ok: true, reason: 'ok', risk };
-}
-
-function scoreSliderInteractionRisk(trace, interaction, value) {
-  const eventCount = Number(interaction?.eventCount || trace.length || 0);
-  const dragStarted = interaction?.dragStarted === true;
-  const pointerType = String(interaction?.pointerType || '').toLowerCase();
-  const durationMs = Number(interaction?.durationMs || (trace[trace.length - 1]?.t - trace[0]?.t) || 0);
-  const startX = Number(interaction?.startX ?? trace[0]?.x ?? 0);
-  const endX = Number(interaction?.endX ?? value);
-  const averageIntervalMs = Number(interaction?.averageIntervalMs || 0);
-  let risk = 0;
-
-  if (!dragStarted) risk += 4;
-  if (eventCount < 5) risk += 3;
-  else if (eventCount < 8) risk += 1;
-  if (durationMs < 320) risk += 4;
-  else if (durationMs < 480) risk += 1;
-  if (Math.abs(startX) > 18) risk += 1;
-  if (Math.abs(endX - value) > 2) risk += 2;
-  if (averageIntervalMs > 0 && averageIntervalMs < 10 && eventCount > 8) risk += 1;
-  if (averageIntervalMs > 180 && eventCount < 8) risk += 1;
-  if (pointerType && !['mouse', 'touch', 'pen'].includes(pointerType)) risk += 1;
-
-  if (risk >= 5) {
-    return { ok: false, reason: 'interaction_risk_high', risk };
-  }
-  return { ok: true, reason: 'ok', risk };
-}
-
-function scoreTraceShapeRisk(trace, value, options = {}) {
-  if (!Array.isArray(trace) || trace.length < 5) {
-    return { ok: false, reason: 'trace_too_short' };
-  }
-
-  const allowSingleDirection = options?.allowSingleDirection !== false;
-  const stationaryDelta = Number.isFinite(Number(options?.stationaryDelta)) ? Number(options.stationaryDelta) : 0.8;
-  const stationaryRatioLimit = Number.isFinite(Number(options?.stationaryRatioLimit))
-    ? Number(options.stationaryRatioLimit)
-    : 0.72;
-  const maxValue = Math.max(Number(value || 0), ...trace.map((item) => Number(item.x || 0)), 1);
-  const deltas = [];
-  const intervals = [];
-  const speeds = [];
-  let reversals = 0;
-  let stationary = 0;
-  let previousDirection = 0;
-  let maxStep = 0;
-
-  for (let i = 1; i < trace.length; i += 1) {
-    const dx = Number(trace[i].x - trace[i - 1].x);
-    const dt = Number(trace[i].t - trace[i - 1].t);
-    if (dt <= 0) {
-      return { ok: false, reason: 'trace_time_invalid' };
-    }
-    if (trace[i].x < -2 || trace[i].x > maxValue + 12) {
-      return { ok: false, reason: 'trace_range_invalid' };
-    }
-    const absDx = Math.abs(dx);
-    if (absDx < stationaryDelta) stationary += 1;
-    maxStep = Math.max(maxStep, absDx);
-    deltas.push(dx);
-    intervals.push(dt);
-    speeds.push(absDx / dt);
-    const direction = dx > 0 ? 1 : dx < 0 ? -1 : 0;
-    if (direction && previousDirection && direction !== previousDirection) {
-      reversals += 1;
-    }
-    if (direction) previousDirection = direction;
-  }
-
-  if (stationary / Math.max(1, deltas.length) > stationaryRatioLimit) {
-    return { ok: false, reason: 'trace_distance_invalid' };
-  }
-  if (maxStep > Math.max(42, maxValue * 0.45)) {
-    return { ok: false, reason: 'trace_jump_invalid' };
-  }
-
-  const intervalVariance = computeVariance(intervals);
-  const speedVariance = computeVariance(speeds);
-  const deltaVariance = computeVariance(deltas.map((item) => Math.abs(item)));
-  const mostlySyntheticCadence = intervalVariance < 9 && trace.length >= 8;
-  const mostlySyntheticMotion = speedVariance < 0.00012 && deltaVariance < 4 && trace.length >= 8;
-  if (mostlySyntheticCadence && mostlySyntheticMotion) {
-    return { ok: false, reason: 'trace_too_linear' };
-  }
-
-  if (!allowSingleDirection && reversals === 0 && trace.length >= 9 && deltaVariance < 7) {
-    return { ok: false, reason: 'trace_variance_too_low' };
-  }
-
-  const durationMs = trace[trace.length - 1].t - trace[0].t;
-  if (durationMs > 0 && Math.abs(value - trace[trace.length - 1].x) > Math.max(3, maxValue * 0.015)) {
-    return { ok: false, reason: 'trace_end_mismatch' };
-  }
-
-  return { ok: true, reason: 'ok' };
-}
-
-function normalizeSliderTrace(trace) {
-  if (!Array.isArray(trace)) return [];
-  const normalized = trace
-    .map((item) => ({
-      x: Number(item?.x),
-      t: Number(item?.t),
-    }))
-    .filter((item) => Number.isFinite(item.x) && Number.isFinite(item.t))
-    .sort((a, b) => a.t - b.t);
-
-  if (normalized.length === 0) return [];
-  const baseT = normalized[0].t;
-  return normalized.map((item) => ({
-    x: item.x,
-    t: Math.max(0, item.t - baseT),
-  }));
-}
-
-function computeVariance(values) {
-  if (!Array.isArray(values) || values.length === 0) return 0;
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const sq = values.reduce((sum, value) => sum + (value - mean) * (value - mean), 0);
-  return sq / values.length;
-}
-
-function compareIndexSets(left, right) {
-  if (!Array.isArray(left) || !Array.isArray(right)) return false;
-  if (left.length !== right.length) return false;
-  const a = [...left].sort((x, y) => x - y);
-  const b = [...right].sort((x, y) => x - y);
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
+  );
 }
 
 async function lockVerificationAndReport(env, userId, state, detail = {}) {
-  const blockedUntil = new Date(Date.now() + getVerifyRetryBlockMs(env)).toISOString();
-  const nextState = {
-    ...(state || {}),
-    userId: Number(userId),
-    verified: false,
-    verifiedAt: null,
-    blockedUntil,
-    stage: 'blocked',
-    sessionExpiresAt: null,
-    lastLockReason: detail?.reason || 'verification_failed',
-    lastLockStage: detail?.stage || null,
-    lastLockAt: new Date().toISOString(),
-    lastLockDetail: detail || {},
-    updatedAt: new Date().toISOString(),
-  };
-
-  await putVerificationState(env, userId, nextState, { existing: state || null });
-  await clearLatestVerificationSession(env, userId);
-
-  try {
-    await telegram(env, 'sendMessage', {
-      chat_id: userId,
-      text: `验证失败次数超过限制，已锁定。请在 ${blockedUntil} 后重试。`,
-    });
-  } catch (error) {
-    // ignore notification failure
-  }
-
-  await reportVerificationFailureToTopic(env, userId, nextState);
-  return nextState;
+  return lockVerificationAndReportState(
+    { userId, state, detail },
+    {
+      nowMs: () => Date.now(),
+      getRetryBlockMs: () => getVerifyRetryBlockMs(env),
+      saveState: (id, value, existing) => putVerificationState(env, id, value, { existing }),
+      clearLatest: (id) => clearLatestVerificationSession(env, id),
+      notifyUser: (id, blockedUntil) => telegram(env, 'sendMessage', {
+        chat_id: id,
+        text: `验证失败次数超过限制，已锁定。请在 ${blockedUntil} 后重试。`,
+      }),
+      reportFailure: (id, value) => reportVerificationFailureToTopic(env, id, value),
+    },
+  );
 }
 
 async function reportVerificationFailureToTopic(env, userId, state) {
-  try {
-    const adminChatId = toChatId(env.ADMIN_CHAT_ID);
-    const profile = await getUserProfile(env, userId);
-    const topicId = getVerifyFailTopicId(env);
-    const stage = String(state?.lastLockStage || state?.stage || 'unknown');
-    const reason = String(state?.lastLockReason || 'verification_failed');
-    const stageText = formatVerificationStageText(stage);
-    const reasonText = formatVerificationReasonText(reason);
-    const text = [
-      '🚨 验证失败并已锁定',
-      `用户：${profile?.displayName || '未知用户'}${profile?.username ? ` @${profile.username}` : ''}`,
-      `用户ID：${userId}`,
-      `阶段：${stageText} (${stage})`,
-      `原因：${reasonText} (${reason})`,
-      `锁定至：${state?.blockedUntil || '未知'}`,
-      `旋转尝试：${Number(state?.slider?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
-      `九宫格尝试：${Number(state?.grid?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
-      `数字选择尝试：${Number(state?.choice?.attempts || 0)}/${getVerifyStageMaxAttempts(env)}`,
-    ].join('\n');
-
-    await telegramWithThreadFallback(env, 'sendMessage', {
-      chat_id: adminChatId,
-      message_thread_id: topicId || undefined,
-      text,
-      reply_markup: buildVerificationFailureAdminKeyboard(userId),
-    });
-  } catch (error) {
-    // keep locked state even if report fails
-  }
-}
-
-function formatVerificationStageText(stage) {
-  const normalized = String(stage || '').toLowerCase();
-  if (normalized === 'slider') return '旋转验证';
-  if (normalized === 'grid') return '九宫格点选';
-  if (normalized === 'choice') return '数字四选一';
-  if (normalized === 'blocked') return '锁定状态';
-  return '未知阶段';
-}
-
-function formatVerificationReasonText(reason) {
-  const normalized = String(reason || '').toLowerCase();
-  if (normalized === 'slider_position_mismatch') return '滑块位置不匹配';
-  if (normalized === 'slider_value_invalid') return '滑块值无效';
-  if (normalized === 'slider_missing') return '滑块题目缺失';
-  if (normalized === 'rotation_angle_mismatch') return '旋转角度未对齐';
-  if (normalized === 'rotation_value_invalid') return '旋转角度无效';
-  if (normalized === 'trace_too_short') return '滑动轨迹过短';
-  if (normalized === 'trace_too_fast') return '滑动速度过快';
-  if (normalized === 'trace_not_enough_segments') return '滑动轨迹分段不足';
-  if (normalized === 'trace_direction_invalid') return '轨迹方向异常';
-  if (normalized === 'trace_distance_invalid') return '轨迹位移异常';
-  if (normalized === 'interaction_risk_high') return '交互行为风险较高';
-  if (normalized === 'trace_too_linear') return '轨迹过于线性';
-  if (normalized === 'trace_variance_too_low') return '轨迹波动不足';
-  if (normalized === 'trace_time_invalid') return 'trace timestamp invalid';
-  if (normalized === 'trace_range_invalid') return 'trace range invalid';
-  if (normalized === 'trace_jump_invalid') return 'trace jump invalid';
-  if (normalized === 'trace_end_mismatch') return 'trace endpoint mismatch';
-  if (normalized === 'proof_missing') return 'proof missing';
-  if (normalized === 'proof_nonce_mismatch') return 'proof nonce mismatch';
-  if (normalized === 'proof_signature_mismatch') return 'proof signature mismatch';
-  if (normalized === 'proof_expired') return 'proof expired';
-  if (normalized === 'grid_selection_mismatch') return '九宫格选择错误';
-  if (normalized === 'choice_selection_mismatch') return '数字选择错误';
-  if (normalized === 'verification_failed') return '验证失败';
-  return '未知原因';
-}
-
-function buildVerificationFailureAdminKeyboard(userId) {
-  return {
-    inline_keyboard: [
-      [{ text: '✅ 验证放行', callback_data: `adm:verifypass:${userId}` }],
-      [
-        { text: '💔 重置验证', callback_data: `adm:restart:${userId}` },
-        { text: '🚫 拉黑', callback_data: `adm:ban:${userId}` },
-      ],
-      [{ text: '👁 用户资料', callback_data: `adm:user:${userId}` }],
-    ],
-  };
+  return reportVerificationFailureToAdmin(
+    { userId, state },
+    {
+      getProfile: (id) => getUserProfile(env, id),
+      getAdminChatId: () => toChatId(env.ADMIN_CHAT_ID),
+      getTopicId: () => getVerifyFailTopicId(env),
+      getMaxAttempts: () => getVerifyStageMaxAttempts(env),
+      sendMessage: (payload) => telegramWithThreadFallback(env, 'sendMessage', payload),
+    },
+  );
 }
 
 async function adminApproveUserVerification(env, userId, operator = 'unknown', options = {}) {
   ensureKv(env);
-  const notifyUser = options.notifyUser !== false;
-  const keepSession = Boolean(options.keepSession);
-  const existing = (await getUserVerificationState(env, userId)) || {};
-  const nowIso = new Date().toISOString();
-  await markUserProfileVerificationPassed(env, userId, nowIso);
-  const nextState = {
-    ...(existing || {}),
-    userId: Number(userId),
-    verificationVersion: 'web-v2',
-    verified: true,
-    verifiedAt: nowIso,
-    answeredAt: nowIso,
-    blockedUntil: null,
-    stage: keepSession ? existing?.stage || 'grid' : 'passed',
-    sessionToken: keepSession ? existing?.sessionToken || null : null,
-    sessionExpiresAt: keepSession ? existing?.sessionExpiresAt || null : null,
-    sessionIssuedAt: keepSession ? existing?.sessionIssuedAt || null : null,
-    challenge: null,
-    choice: keepSession ? existing?.choice || null : null,
-    failureCount: 0,
-    selectedAnswer: null,
-    correctAnswer: null,
-    postVerifyRemaining: getVerifyObserveMessageCount(env),
-    approvedBy: operator,
-    approvedAt: nowIso,
-    updatedAt: nowIso,
-  };
-
-  await putVerificationState(env, userId, nextState, { existing });
-  await clearLatestVerificationSession(env, userId);
-
-  const promptMessageId = Number(nextState?.promptMessageId || 0);
-  if (promptMessageId) {
-    await clearVerificationPromptMessage(env, userId, promptMessageId, '✅ 验证通过，已解除发送限制。');
-  }
-
-  if (notifyUser) {
-    try {
-      await sendWelcomeMessage(env, userId, {
-        extraText: '✅ 验证通过，现在可以正常发消息。',
-      });
-    } catch (error) {
-      // ignore user notification failure
-    }
-  }
-
-  return nextState;
-}
-
-async function createOrRefreshUserVerification(env, userId, forceNew = false) {
-  ensureKv(env);
-  let existing = await getUserVerificationState(env, userId);
-  if (existing?.verified) {
-    const profile = await getUserProfile(env, userId);
-    if (await isVerificationStateActive(env, userId, existing, profile)) {
-      if (!isProfileVerificationPassed(profile)) {
-        await markUserProfileVerificationPassed(env, userId, existing.verifiedAt || existing.answeredAt || existing.updatedAt);
-      }
-      return existing;
-    }
-    existing = await resetVerificationStateAfterProfileRevocation(env, userId, existing);
-  }
-
-  const profile = await getUserProfile(env, userId);
-  const repairedState = await repairVerificationStateFromProfile(env, userId, existing, profile);
-  if (repairedState?.verified) {
-    return repairedState;
-  }
-  if (existing?.challenge && !forceNew && !isVerificationExpired(existing.challenge, env)) {
-    return existing;
-  }
-
-  const state = {
-    userId: Number(userId),
-    verified: false,
-    verifiedAt: null,
-    answeredAt: null,
-    promptMessageId: existing?.promptMessageId || null,
-    blockedUntil: null,
-    selectedAnswer: null,
-    correctAnswer: null,
-    failureCount: Number(existing?.failureCount || 0),
-    challenge: generateVerificationChallenge(env),
-    updatedAt: new Date().toISOString(),
-  };
-
-  await putVerificationState(env, userId, state, { existing });
-  await clearLatestVerificationSession(env, userId);
-  return state;
+  return approveUserVerificationState({ userId, operator, options }, {
+    getState: (id) => getUserVerificationState(env, id),
+    nowIso: () => new Date().toISOString(),
+    markProfilePassed: (id, timestamp) => markUserProfileVerificationPassed(env, id, timestamp),
+    getObserveMessageCount: () => getVerifyObserveMessageCount(env),
+    saveState: (id, state, existing) => putVerificationState(env, id, state, { existing }),
+    clearLatest: (id) => clearLatestVerificationSession(env, id),
+    clearPrompt: (id, promptMessageId) => clearVerificationPromptMessage(env, id, promptMessageId, '✅ 验证通过，已解除发送限制。'),
+    notifyUser: (id) => sendWelcomeMessage(env, id, {
+      extraText: '✅ 验证通过，现在可以正常发消息。',
+    }),
+  });
 }
 
 async function setVerificationPromptMessageId(env, userId, messageId) {
   if (!env.BOT_KV) return;
-  let state = (await getUserVerificationState(env, userId)) || {
-    userId: Number(userId),
-    verified: false,
-    challenge: null,
-  };
-  const profile = await getUserProfile(env, userId);
-  if (state?.verified) {
-    if (await isVerificationStateActive(env, userId, state, profile)) {
-      if (!isProfileVerificationPassed(profile)) {
-        await markUserProfileVerificationPassed(env, userId, state.verifiedAt || state.answeredAt || state.updatedAt);
-      }
-      return;
-    }
-
-    state = await resetVerificationStateAfterProfileRevocation(env, userId, state);
-  }
-
-  const repairedState = await repairVerificationStateFromProfile(env, userId, state, profile);
-  if (repairedState?.verified) {
-    await clearVerificationPromptMessage(env, userId, messageId, '✅ 验证已通过，当前验证入口已自动失效。');
-    return;
-  }
-
-  const previousState = state;
-  state = {
-    ...state,
-    promptMessageId: Number(messageId),
-    updatedAt: new Date().toISOString(),
-  };
-  await putVerificationState(env, userId, state, { existing: previousState });
-}
-
-async function markUserVerified(env, userId) {
-  ensureKv(env);
-  const existing = await getUserVerificationState(env, userId);
-  const nowIso = new Date().toISOString();
-  await markUserProfileVerificationPassed(env, userId, nowIso);
-  const state = {
-    ...(existing || {}),
-    userId: Number(userId),
-    verificationVersion: 'web-v2',
-    verified: true,
-    verifiedAt: nowIso,
-    answeredAt: nowIso,
-    blockedUntil: null,
-    stage: 'passed',
-    sessionToken: null,
-    sessionIssuedAt: null,
-    sessionExpiresAt: null,
-    slider: null,
-    grid: null,
-    choice: null,
-    selectedAnswer: null,
-    correctAnswer: null,
-    challenge: null,
-    failureCount: 0,
-    postVerifyRemaining: getVerifyObserveMessageCount(env),
-    updatedAt: nowIso,
-  };
-  await putVerificationState(env, userId, state, { existing });
-  await clearLatestVerificationSession(env, userId);
-  return state;
-}
-
-async function markUserVerificationFailed(env, userId, payload) {
-  ensureKv(env);
-  const existing = await getUserVerificationState(env, userId);
-  const blockMs = Number(payload?.blockMs || VERIFY_FAIL_BLOCK_MS);
-  const now = Date.now();
-  const blockedUntil = new Date(now + blockMs).toISOString();
-  const countForBan = payload?.countForBan !== false;
-  const failureCount = countForBan ? Number(existing?.failureCount || 0) + 1 : Number(existing?.failureCount || 0);
-  const state = {
-    ...(existing || {}),
-    userId: Number(userId),
-    verified: false,
-    verifiedAt: null,
-    answeredAt: new Date(now).toISOString(),
-    blockedUntil,
-    selectedAnswer: String(payload?.selectedAnswer || ''),
-    correctAnswer: String(payload?.correctAnswer || ''),
-    challenge: null,
-    failureCount,
-    lastFailureAt: new Date(now).toISOString(),
-    updatedAt: new Date(now).toISOString(),
-  };
-  await putVerificationState(env, userId, state, { existing });
-  await clearLatestVerificationSession(env, userId);
-  return state;
-}
-
-async function banUserForVerificationFailures(env, userId, failedState, maxFailures) {
-  const entry = await setBlacklistEntry(env, userId, {
-    reason: `首次私聊验证连续失败 ${failedState.failureCount}/${maxFailures} 次，系统自动拉黑`,
-    createdAt: new Date().toISOString(),
-    createdBy: 'verification-guard',
-  });
-  await reportVerificationAutoBan(env, userId, failedState, maxFailures, entry);
-  return entry;
-}
-
-async function reportVerificationAutoBan(env, userId, failedState, maxFailures, entry) {
-  try {
-    const adminChatId = toChatId(env.ADMIN_CHAT_ID);
-    const profile = await getUserProfile(env, userId);
-    await telegram(env, 'sendMessage', {
-      chat_id: adminChatId,
-      text: [
-        '🚫 用户验证失败次数过多，已自动拉黑',
-        `用户：${profile?.displayName || '未知'}${profile?.username ? ` @${profile.username}` : ''}`,
-        `ID：${userId}`,
-        `失败次数：${failedState.failureCount}/${maxFailures}`,
-        `最后选择：${failedState.selectedAnswer || '无'}`,
-        `正确答案：${failedState.correctAnswer || '未知'}`,
-        `原因：${entry.reason}`,
-      ].join('\n'),
-    });
-  } catch (error) {
-    // 自动拉黑已完成，管理员通知失败不应影响 webhook。
-  }
+  return setVerificationPromptMessageIdState(
+    { userId, messageId },
+    {
+      getState: (id) => getUserVerificationState(env, id),
+      getProfile: (id) => getUserProfile(env, id),
+      isStateActive: (id, state, profile) => isVerificationStateActive(env, id, state, profile),
+      isProfilePassed: isProfileVerificationPassed,
+      markProfilePassed: (id, passedAt) => markUserProfileVerificationPassed(env, id, passedAt),
+      resetAfterRevocation: (id, state) => resetVerificationStateAfterProfileRevocation(env, id, state),
+      repairFromProfile: (id, state, profile) => repairVerificationStateFromProfile(env, id, state, profile),
+      clearPrompt: (id, promptId, text) => clearVerificationPromptMessage(env, id, promptId, text),
+      nowIso: () => new Date().toISOString(),
+      saveState: (id, state, existing) => putVerificationState(env, id, state, { existing }),
+    },
+  );
 }
 
 async function restartUserVerification(env, userId, operator = 'unknown') {
   ensureKv(env);
-  const existing = await getUserVerificationState(env, userId);
-  if (existing?.promptMessageId) {
-    await deleteVerificationPromptMessage(env, userId, existing.promptMessageId);
-  }
-  await clearUserProfileVerificationPassed(env, userId);
-  const state = {
-    ...(existing || {}),
-    userId: Number(userId),
-    verificationVersion: 'web-v2',
-    flowMode: null,
-    verified: false,
-    verifiedAt: null,
-    answeredAt: null,
-    promptMessageId: null,
-    blockedUntil: null,
-    stage: null,
-    sessionToken: null,
-    sessionIssuedAt: null,
-    sessionExpiresAt: null,
-    slider: null,
-    grid: null,
-    choice: null,
-    selectedAnswer: null,
-    correctAnswer: null,
-    challenge: null,
-    failureCount: 0,
-    postVerifyRemaining: 0,
-    updatedAt: new Date().toISOString(),
-    restartedBy: operator,
-  };
-
-  await putVerificationState(env, userId, state, { existing });
-  return state;
-}
-
-async function collectKvKeys(kv, prefix, maxKeys) {
-  const names = [];
-  let cursor = undefined;
-
-  while (names.length < maxKeys) {
-    const result = await kv.list({ prefix, cursor, limit: 1000 });
-    names.push(...result.keys.map((item) => item.name));
-    if (result.list_complete || !result.cursor) {
-      break;
-    }
-    cursor = result.cursor;
-  }
-
-  return names.slice(0, maxKeys);
+  return restartUserVerificationState({ userId, operator }, {
+    getState: (id) => getUserVerificationState(env, id),
+    deletePrompt: (id, promptMessageId) => deleteVerificationPromptMessage(env, id, promptMessageId),
+    clearProfilePassed: (id) => clearUserProfileVerificationPassed(env, id),
+    nowIso: () => new Date().toISOString(),
+    saveState: (id, state, existing) => putVerificationState(env, id, state, { existing }),
+  });
 }
 
 async function runDataCleanupIfDue(env) {
@@ -6241,157 +3140,37 @@ async function runDataCleanup(env, options = {}) {
     DATA_CLEANUP_MIN_BATCH,
     DATA_CLEANUP_MAX_BATCH,
   );
-  const cutoffTime = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-  const cutoffIso = new Date(cutoffTime).toISOString();
-  const startedAt = new Date().toISOString();
-  const rootAdminIds = new Set(getRootAdminIds(env).map((id) => Number(id)));
-  const metrics = {
-    ok: true,
-    source: String(options.source || 'manual'),
-    startedAt,
-    finishedAt: null,
+  return executeDataCleanup({
+    source: options.source,
     retentionDays,
-    cutoffIso,
     batchSize,
-    kv: {
-      scannedUsers: 0,
-      staleUsers: 0,
-      deletedUsers: 0,
-      deletedVerifyStates: 0,
-      deletedTopicMappings: 0,
-      skippedNoTimestamp: 0,
-      protectedUsers: 0,
-      errors: 0,
-    },
-    d1: {
-      deletedMessages: 0,
-      deletedConversations: 0,
-      deletedVerificationStatuses: 0,
-      deletedVerificationSessions: 0,
-      errors: 0,
-    },
-  };
-
-  let staleTargets = [];
-  try {
-    const userNames = await collectKvKeys(env.BOT_KV, 'user:', Math.max(batchSize * 3, batchSize));
-    metrics.kv.scannedUsers = userNames.length;
-    for (const keyName of userNames) {
-      if (staleTargets.length >= batchSize) break;
-      const profile = await getJson(env.BOT_KV, keyName);
-      if (!profile || typeof profile !== 'object') continue;
-      const userId = Number(profile.userId);
-      if (!(Number.isFinite(userId) && userId > 0)) continue;
-      const seenMs = Date.parse(String(profile.lastSeenAt || profile.firstSeenAt || ''));
-      if (!Number.isFinite(seenMs)) {
-        metrics.kv.skippedNoTimestamp += 1;
-        continue;
-      }
-      if (seenMs >= cutoffTime) continue;
-      if (rootAdminIds.has(userId)) {
-        metrics.kv.protectedUsers += 1;
-        continue;
-      }
-      const [blacklistEntry, trustEntry, adminEntry] = await Promise.all([
+    rootAdminIds: getRootAdminIds(env),
+    listUserKeys: (limit) => collectKvKeys(env.BOT_KV, 'user:', limit),
+    readUserProfile: (keyName) => getJson(env.BOT_KV, keyName),
+    isProtectedUser: async (userId) => {
+      const entries = await Promise.all([
         getBlacklistEntry(env, userId),
         getTrustEntry(env, userId),
         getAuthorizedAdminEntry(env, userId),
       ]);
-      if (blacklistEntry || trustEntry || adminEntry) {
-        metrics.kv.protectedUsers += 1;
-        continue;
-      }
-      staleTargets.push({ userId });
-    }
-    metrics.kv.staleUsers = staleTargets.length;
-
-    for (const item of staleTargets) {
-      const userId = Number(item.userId);
-      const topicRecord = await getTopicByUser(env, userId);
-      try {
-        const key = userKey(userId);
-        await env.BOT_KV.delete(key);
-        noteKvJsonDelete(key);
-        metrics.kv.deletedUsers += 1;
-      } catch (error) {
-        metrics.kv.errors += 1;
-      }
-
-      try {
-        const key = verifyKey(userId);
-        await env.BOT_KV.delete(key);
-        noteKvJsonDelete(key);
-        metrics.kv.deletedVerifyStates += 1;
-      } catch (error) {
-        metrics.kv.errors += 1;
-      }
-
-      try {
-        const key = topicUserKey(userId);
-        await env.BOT_KV.delete(key);
-        noteKvJsonDelete(key);
-        if (Number.isFinite(Number(topicRecord?.threadId))) {
-          const threadKey = topicThreadKey(Number(topicRecord.threadId));
-          await env.BOT_KV.delete(threadKey);
-          noteKvJsonDelete(threadKey);
-          metrics.kv.deletedTopicMappings += 1;
-        }
-      } catch (error) {
-        metrics.kv.errors += 1;
-      }
-    }
-  } catch (error) {
-    metrics.kv.errors += 1;
-  }
-
-  if (env.DB) {
-    try {
-      const deletedMessages = await env.DB.prepare(
-        `DELETE FROM messages
-         WHERE id IN (
-           SELECT id FROM messages
-           WHERE created_at < ?1
-           ORDER BY created_at ASC
-           LIMIT ?2
-         )`,
-      )
-        .bind(cutoffIso, batchSize * 20)
-        .run();
-      metrics.d1.deletedMessages = Number(deletedMessages?.meta?.changes || 0);
-    } catch (error) {
-      metrics.d1.errors += 1;
-    }
-
-    try {
-      const deletedConversations = await env.DB.prepare(
-        `DELETE FROM conversations
-         WHERE id IN (
-           SELECT c.id
-           FROM conversations c
-           LEFT JOIN messages m ON m.conversation_id = c.id
-           WHERE m.id IS NULL
-             AND (c.last_message_at IS NULL OR c.last_message_at < ?1)
-           LIMIT ?2
-         )`,
-      )
-        .bind(cutoffIso, batchSize * 2)
-        .run();
-      metrics.d1.deletedConversations = Number(deletedConversations?.meta?.changes || 0);
-      if (metrics.d1.deletedConversations > 0) {
-        messageHistoryConversationCache.clear();
-      }
-    } catch (error) {
-      metrics.d1.errors += 1;
-    }
-  }
-
-  metrics.finishedAt = new Date().toISOString();
-  try {
-    await env.BOT_KV.put(LAST_DATA_CLEANUP_KEY, JSON.stringify(metrics));
-  } catch (error) {
-    // ignore cleanup state write failure
-  }
-  return metrics;
+      return entries.some(Boolean);
+    },
+    readTopic: (userId) => getTopicByUser(env, userId),
+    buildUserKeys: (userId, topicRecord) => ({
+      user: userKey(userId),
+      verify: verifyKey(userId),
+      topicUser: topicUserKey(userId),
+      topicThread: Number.isFinite(Number(topicRecord?.threadId))
+        ? topicThreadKey(Number(topicRecord.threadId))
+        : '',
+    }),
+    deleteKv: (key) => env.BOT_KV.delete(key),
+    onKvDeleted: noteKvJsonDelete,
+    db: env.DB || null,
+    deleteDirectory: (userId) => deleteD1DirectoryEntries(env, userId),
+    onConversationsDeleted: () => messageHistoryConversationCache.clear(),
+    persistState: (metrics) => env.BOT_KV.put(LAST_DATA_CLEANUP_KEY, JSON.stringify(metrics)),
+  });
 }
 
 async function runDeletedAccountSweep(env, options = {}) {
@@ -6399,291 +3178,70 @@ async function runDeletedAccountSweep(env, options = {}) {
   if (!env.BOT_TOKEN) {
     return { ok: false, skipped: 'missing_bot_token' };
   }
-
   const batchSize = clamp(
     parsePositiveInt(options.batchSize ?? env.DELETED_ACCOUNT_SWEEP_BATCH_SIZE, getDeletedAccountSweepBatchSize(env)),
     DELETED_ACCOUNT_SWEEP_MIN_BATCH,
     DELETED_ACCOUNT_SWEEP_MAX_BATCH,
   );
-  const startedAt = new Date().toISOString();
-  const metrics = {
-    ok: true,
-    source: String(options.source || 'manual'),
-    startedAt,
-    finishedAt: null,
+  const scanLimit = Math.min(8000, Math.max(batchSize * 6, MAX_SCAN_KEYS));
+  return executeDeletedAccountSweep({
+    source: options.source,
     batchSize,
-    kv: {
-      scannedUsers: 0,
-      candidates: 0,
-      probedUsers: 0,
-      deletedUsers: 0,
-      deletedVerifyStates: 0,
-      deletedTopicMappings: 0,
-      deletedBlacklistEntries: 0,
-      deletedTrustEntries: 0,
-      deletedAdminEntries: 0,
-      skippedNoTimestamp: 0,
-      protectedUsers: 0,
-      notDeleted: 0,
-      probeErrors: 0,
-      errors: 0,
-    },
-    d1: {
-      deletedMessages: 0,
-      deletedConversations: 0,
-      errors: 0,
-    },
-    detections: [],
-  };
-
-  try {
-    const scanLimit = Math.min(8000, Math.max(batchSize * 6, MAX_SCAN_KEYS));
-    const userNames = await collectKvKeys(env.BOT_KV, 'user:', scanLimit);
-    metrics.kv.scannedUsers = userNames.length;
-    const rootAdminIdSet = new Set(getRootAdminIds(env).map((id) => Number(id)));
-
-    const profiles = (
-      await Promise.all(
-        userNames.map(async (keyName) => {
-          const profile = await getJson(env.BOT_KV, keyName);
-          if (!profile || typeof profile !== 'object') return null;
-          const userId = Number(profile.userId);
-          if (!(Number.isFinite(userId) && userId > 0)) return null;
-          const seenMs = Date.parse(String(profile.lastSeenAt || profile.firstSeenAt || ''));
-          if (!Number.isFinite(seenMs)) {
-            metrics.kv.skippedNoTimestamp += 1;
-            return null;
-          }
-          return {
-            profile,
-            userId,
-            seenMs,
-          };
-        }),
-      )
-    )
-      .filter(Boolean)
-      .sort((a, b) => a.seenMs - b.seenMs);
-
-    const candidates = profiles.slice(0, batchSize);
-    metrics.kv.candidates = candidates.length;
-
-    for (const item of candidates) {
-      const userId = Number(item.userId);
-      if (!(Number.isFinite(userId) && userId > 0)) continue;
-
-      if (rootAdminIdSet.has(userId)) {
-        metrics.kv.protectedUsers += 1;
-        continue;
-      }
-
-      metrics.kv.probedUsers += 1;
-      const probe = await probeDeletedTelegramUser(env, userId);
-      if (!probe.deleted) {
-        metrics.kv.notDeleted += 1;
-        if (probe.error) {
-          metrics.kv.probeErrors += 1;
-        }
-        continue;
-      }
-
-      const deletion = await purgeDeletedUserData(env, userId, {
-        profile: item.profile,
-      });
-      metrics.kv.deletedUsers += deletion.kv.deletedUsers;
-      metrics.kv.deletedVerifyStates += deletion.kv.deletedVerifyStates;
-      metrics.kv.deletedTopicMappings += deletion.kv.deletedTopicMappings;
-      metrics.kv.deletedBlacklistEntries += deletion.kv.deletedBlacklistEntries;
-      metrics.kv.deletedTrustEntries += deletion.kv.deletedTrustEntries;
-      metrics.kv.deletedAdminEntries += deletion.kv.deletedAdminEntries;
-      metrics.d1.deletedMessages += deletion.d1.deletedMessages;
-      metrics.d1.deletedConversations += deletion.d1.deletedConversations;
-      metrics.d1.deletedVerificationStatuses += Number(deletion.d1.deletedVerificationStatuses || 0);
-      metrics.d1.deletedVerificationSessions += Number(deletion.d1.deletedVerificationSessions || 0);
-      metrics.kv.errors += deletion.kv.errors;
-      metrics.d1.errors += deletion.d1.errors;
-      metrics.detections.push({
-        userId,
-        reason: probe.reason,
-      });
-    }
-  } catch (error) {
-    metrics.kv.errors += 1;
-  }
-
-  metrics.finishedAt = new Date().toISOString();
-  try {
-    await env.BOT_KV.put(LAST_DELETED_ACCOUNT_SWEEP_KEY, JSON.stringify(metrics));
-  } catch (error) {
-    // ignore sweep state write failure
-  }
-
-  if ((metrics.kv.deletedUsers > 0 || metrics.d1.deletedMessages > 0) && env.ADMIN_CHAT_ID) {
-    try {
+    scanLimit,
+    rootAdminIds: getRootAdminIds(env),
+    listUserKeys: (limit) => collectKvKeys(env.BOT_KV, 'user:', limit),
+    readUserProfile: (keyName) => getJson(env.BOT_KV, keyName),
+    probeDeletedUser: (userId) => probeDeletedTelegramUser(env, userId),
+    purgeDeletedUser: (userId, profile) => purgeDeletedUserData(env, userId, { profile }),
+    persistState: (metrics) => env.BOT_KV.put(LAST_DELETED_ACCOUNT_SWEEP_KEY, JSON.stringify(metrics)),
+    notify: async (metrics) => {
+      if ((metrics.kv.deletedUsers <= 0 && metrics.d1.deletedMessages <= 0) || !env.ADMIN_CHAT_ID) return;
       const adminChatId = toChatId(env.ADMIN_CHAT_ID);
       const summary = [
-        '🧹 注销账户巡检完成',
+        '注销账户巡检完成',
         `扫描用户：${metrics.kv.scannedUsers}`,
         `命中：${metrics.detections.length}`,
         `删除档案：${metrics.kv.deletedUsers}`,
         `删除消息：${metrics.d1.deletedMessages}`,
         `删除会话：${metrics.d1.deletedConversations}`,
       ].join('\n');
-      await telegram(env, 'sendMessage', {
-        chat_id: adminChatId,
-        text: summary,
-      });
-    } catch (error) {
-      // ignore notification failure
-    }
-  }
-
-  return metrics;
-}
-
-async function probeDeletedTelegramUser(env, userId) {
-  try {
-    const chat = await telegram(env, 'getChat', {
-      chat_id: userId,
-    });
-
-    const marker = normalizeDeletedAccountMarker(chat?.first_name || chat?.title || chat?.description || '');
-    const deletedByMarker = marker.includes('deleted account') || marker === 'deleted';
-
-    return {
-      deleted: deletedByMarker,
-      reason: deletedByMarker ? 'deleted_marker' : 'active',
-      chat,
-    };
-  } catch (error) {
-    const raw = formatErrorMessage(error).toLowerCase();
-    if (raw.includes('deactivated')) {
-      return {
-        deleted: true,
-        reason: 'deactivated_error',
-        error: formatErrorMessage(error),
-      };
-    }
-
-    return {
-      deleted: false,
-      reason: 'probe_failed',
-      error: formatErrorMessage(error),
-    };
-  }
-}
-
-function normalizeDeletedAccountMarker(value) {
-  return String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, ' ');
+      await telegram(env, 'sendMessage', { chat_id: adminChatId, text: summary });
+    },
+  });
 }
 
 async function purgeDeletedUserData(env, userId, options = {}) {
   ensureKv(env);
   const topicRecord = options.topicRecord || (await getTopicByUser(env, userId));
   const verifyState = await getUserVerificationState(env, userId);
-  const kv = {
-    deletedUsers: 0,
-    deletedVerifyStates: 0,
-    deletedTopicMappings: 0,
-    deletedBlacklistEntries: 0,
-    deletedTrustEntries: 0,
-    deletedAdminEntries: 0,
-    errors: 0,
-  };
-  const d1 = {
-    deletedMessages: 0,
-    deletedConversations: 0,
-    deletedVerificationStatuses: 0,
-    deletedVerificationSessions: 0,
-    errors: 0,
-  };
-
-  const deletions = [
-    ['user', userKey(userId)],
-    ['verify', verifyKey(userId)],
-    ['topicUser', topicUserKey(userId)],
-    ['blacklist', blacklistKey(userId)],
-    ['trust', trustKey(userId)],
-    ['admin', adminKey(userId)],
-  ];
 
   if (verifyState?.promptMessageId) {
     await deleteVerificationPromptMessage(env, userId, verifyState.promptMessageId);
   }
   writeLocalVerificationCleared(userId, new Date().toISOString());
 
-  for (const [kind, key] of deletions) {
-    try {
-      await env.BOT_KV.delete(key);
-      noteKvJsonDelete(key);
-      if (kind === 'user') kv.deletedUsers += 1;
-      if (kind === 'verify') kv.deletedVerifyStates += 1;
-      if (kind === 'topicUser') kv.deletedTopicMappings += 1;
-      if (kind === 'blacklist') kv.deletedBlacklistEntries += 1;
-      if (kind === 'trust') kv.deletedTrustEntries += 1;
-      if (kind === 'admin') kv.deletedAdminEntries += 1;
-    } catch (error) {
-      kv.errors += 1;
-    }
-  }
-
-  try {
-    if (Number.isFinite(Number(topicRecord?.threadId))) {
-      const key = topicThreadKey(Number(topicRecord.threadId));
-      await env.BOT_KV.delete(key);
-      noteKvJsonDelete(key);
-      kv.deletedTopicMappings += 1;
-    }
-  } catch (error) {
-    kv.errors += 1;
-  }
-
-  if (env.DB) {
-    try {
-      if (await ensureVerificationStatusD1Schema(env)) {
-        const deletedVerificationStatus = await env.DB.prepare('DELETE FROM user_verification_status WHERE user_id = ?1')
-          .bind(userId)
-          .run();
-        d1.deletedVerificationStatuses = Number(deletedVerificationStatus?.meta?.changes || 0);
-        invalidateD1VerificationStatusCache(userId);
-      }
-    } catch (error) {
-      d1.errors += 1;
-    }
-
-    try {
-      if (await ensureVerificationSessionD1Schema(env)) {
-        const deletedVerificationSession = await env.DB.prepare('DELETE FROM user_verification_sessions WHERE user_id = ?1')
-          .bind(userId)
-          .run();
-        d1.deletedVerificationSessions = Number(deletedVerificationSession?.meta?.changes || 0);
-      }
-    } catch (error) {
-      d1.errors += 1;
-    }
-
-    try {
-      const deletedMessages = await env.DB.prepare('DELETE FROM messages WHERE user_id = ?1').bind(userId).run();
-      d1.deletedMessages = Number(deletedMessages?.meta?.changes || 0);
-    } catch (error) {
-      d1.errors += 1;
-    }
-
-    try {
-      const deletedConversations = await env.DB.prepare('DELETE FROM conversations WHERE user_id = ?1')
-        .bind(userId)
-        .run();
-      d1.deletedConversations = Number(deletedConversations?.meta?.changes || 0);
-      clearMessageHistoryConversationId(userId);
-    } catch (error) {
-      d1.errors += 1;
-    }
-  }
-
-  return { kv, d1 };
+  return purgeDeletedUserRecords({
+    userId,
+    kvDeletions: [
+      { kind: 'user', key: userKey(userId) },
+      { kind: 'verify', key: verifyKey(userId) },
+      { kind: 'topicUser', key: topicUserKey(userId) },
+      { kind: 'blacklist', key: blacklistKey(userId) },
+      { kind: 'trust', key: trustKey(userId) },
+      { kind: 'admin', key: adminKey(userId) },
+    ],
+    topicThreadKey: Number.isFinite(Number(topicRecord?.threadId))
+      ? topicThreadKey(Number(topicRecord.threadId))
+      : '',
+    deleteKv: (key) => env.BOT_KV.delete(key),
+    onKvDeleted: noteKvJsonDelete,
+    db: env.DB || null,
+    deleteDirectory: () => deleteD1DirectoryEntries(env, userId),
+    deleteVerificationStatus: () => verificationD1Repository.deleteStatus(env.DB, userId),
+    deleteVerificationSession: () => verificationD1Repository.deleteSession(env.DB, userId),
+    onVerificationStatusDeleted: () => invalidateD1VerificationStatusCache(userId),
+    onConversationsDeleted: () => clearMessageHistoryConversationId(userId),
+  });
 }
 
 async function getJson(kv, key) {
@@ -6700,120 +3258,6 @@ function ensureKv(env) {
   if (!env.BOT_KV) {
     throw new AppError(500, '请先在 wrangler.toml / Cloudflare 中绑定 KV：BOT_KV');
   }
-}
-
-function userKey(userId) {
-  return `user:${userId}`;
-}
-
-function blacklistKey(userId) {
-  return `blacklist:${userId}`;
-}
-
-function adminKey(userId) {
-  return `admin:${userId}`;
-}
-
-function topicUserKey(userId) {
-  return `topic:user:${userId}`;
-}
-
-function topicThreadKey(threadId) {
-  return `topic:thread:${threadId}`;
-}
-
-function trustKey(userId) {
-  return `trust:${userId}`;
-}
-
-function verifyKey(userId) {
-  return `verify:${userId}`;
-}
-
-function detectMessageType(message) {
-  if (typeof message?.text === 'string') return 'text';
-  if (message?.photo?.length) return 'photo';
-  if (message?.document) return 'document';
-  if (message?.video) return 'video';
-  if (message?.animation) return 'animation';
-  if (message?.audio) return 'audio';
-  if (message?.voice) return 'voice';
-  if (message?.video_note) return 'video_note';
-  if (message?.sticker) return 'sticker';
-  if (message?.contact) return 'contact';
-  if (message?.location) return 'location';
-  return 'unknown';
-}
-
-function isIgnoredAdminServiceMessage(message) {
-  return Boolean(
-    message.forum_topic_created ||
-      message.forum_topic_closed ||
-      message.forum_topic_reopened ||
-      message.general_forum_topic_hidden ||
-      message.general_forum_topic_unhidden ||
-      message.new_chat_members ||
-      message.left_chat_member,
-  );
-}
-
-function isTopicModeEnabled(env) {
-  const raw = String(env.TOPIC_MODE ?? 'true').trim().toLowerCase();
-  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
-}
-
-function parsePositiveInt(value, fallback) {
-  const num = Number(value);
-  if (!Number.isFinite(num) || num <= 0) return fallback;
-  return Math.floor(num);
-}
-
-function getDataRetentionDays(env) {
-  return clamp(
-    parsePositiveInt(env.DATA_RETENTION_DAYS, DEFAULT_DATA_RETENTION_DAYS),
-    DATA_RETENTION_MIN_DAYS,
-    DATA_RETENTION_MAX_DAYS,
-  );
-}
-
-function getDataCleanupBatchSize(env) {
-  return clamp(
-    parsePositiveInt(env.DATA_CLEANUP_BATCH_SIZE, DEFAULT_DATA_CLEANUP_BATCH_SIZE),
-    DATA_CLEANUP_MIN_BATCH,
-    DATA_CLEANUP_MAX_BATCH,
-  );
-}
-
-function isDataCleanupAutoEnabled(env) {
-  return String(env.DATA_CLEANUP_AUTO ?? 'true').trim().toLowerCase() !== 'false';
-}
-
-function getDeletedAccountSweepBatchSize(env) {
-  return clamp(
-    parsePositiveInt(env.DELETED_ACCOUNT_SWEEP_BATCH_SIZE, DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE),
-    DELETED_ACCOUNT_SWEEP_MIN_BATCH,
-    DELETED_ACCOUNT_SWEEP_MAX_BATCH,
-  );
-}
-
-function isDeletedAccountSweepAutoEnabled(env) {
-  return String(env.DELETED_ACCOUNT_SWEEP_AUTO ?? 'true').trim().toLowerCase() !== 'false';
-}
-
-function getVerificationExpireMs(env) {
-  return parsePositiveInt(env.VERIFY_EXPIRE_MS, VERIFY_EXPIRE_MS);
-}
-
-function getVerificationFailBlockMs(env) {
-  return parsePositiveInt(env.VERIFY_FAIL_BLOCK_MS, VERIFY_FAIL_BLOCK_MS);
-}
-
-function getVerificationTimeoutBlockMs(env) {
-  return parsePositiveInt(env.VERIFY_TIMEOUT_BLOCK_MS, VERIFY_TIMEOUT_BLOCK_MS);
-}
-
-function getVerificationMaxFailures(env) {
-  return parsePositiveInt(env.VERIFY_MAX_FAILURES, VERIFY_MAX_FAILURES);
 }
 
 function getVerificationMathEnabled(env) {
@@ -6864,31 +3308,6 @@ function getVerifyFailTopicId(env) {
   const raw = Number(env.VERIFY_FAIL_TOPIC_ID);
   if (!Number.isFinite(raw) || raw <= 0) return null;
   return Math.floor(raw);
-}
-
-function isUserVerificationEnabled(env) {
-  const raw = String(env.USER_VERIFICATION ?? 'true').trim().toLowerCase();
-  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
-}
-
-function getKeywordFilters(env) {
-  return String(env.KEYWORD_FILTERS || '')
-    .split(/\r?\n|,/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function matchKeywordFilter(env, message) {
-  const keywords = getKeywordFilters(env);
-  if (keywords.length === 0) return null;
-
-  const textPool = [message.text, message.caption]
-    .filter(Boolean)
-    .join('\n')
-    .toLowerCase();
-  if (!textPool) return null;
-
-  return keywords.find((item) => textPool.includes(String(item).toLowerCase())) || null;
 }
 
 async function applyPostVerifyObservationLayer(message, env, adminChatId, preloadedVerifyState = null) {
@@ -7213,26 +3632,6 @@ async function listMessageHistory(env, options = {}) {
 }
 
 
-
-function extractMessageText(message) {
-  if (typeof message?.text === 'string') return message.text;
-  if (typeof message?.caption === 'string') return message.caption;
-  return '';
-}
-
-function extractPrimaryMediaFileId(message) {
-  if (message?.photo?.length) return message.photo[message.photo.length - 1]?.file_id || null;
-  return (
-    message?.document?.file_id ||
-    message?.video?.file_id ||
-    message?.animation?.file_id ||
-    message?.audio?.file_id ||
-    message?.voice?.file_id ||
-    message?.video_note?.file_id ||
-    message?.sticker?.file_id ||
-    null
-  );
-}
 
 function getWelcomeSetupScopeKey(message) {
   const chatId = Number(message?.chat?.id || 0) || 0;
@@ -7926,35 +4325,6 @@ function getAdminPanelUser(env) {
   return String(env.ADMIN_PANEL_USER || 'admin').trim() || 'admin';
 }
 
-function createSessionToken() {
-  const bytes = new Uint8Array(24);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-function createChallengeToken() {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  return `${Date.now().toString(36)}${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
-}
-
-function bytesToHex(bytes) {
-  return Array.from(bytes || [], (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-async function hmacSha256Hex(secret, payload) {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(String(secret || '')),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(String(payload || '')));
-  return bytesToHex(new Uint8Array(signature));
-}
-
 function getVerificationProofSecret(env, state = null) {
   const configured = String(env?.VERIFY_PROOF_SECRET || env?.WEBHOOK_SECRET || env?.BOT_TOKEN || '').trim();
   if (configured) return configured;
@@ -7993,18 +4363,6 @@ function formatErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function timingSafeEqualText(left, right) {
-  const a = String(left || '');
-  const b = String(right || '');
-  if (!a || !b || a.length !== b.length) return false;
-
-  let diff = 0;
-  for (let index = 0; index < a.length; index += 1) {
-    diff |= a.charCodeAt(index) ^ b.charCodeAt(index);
-  }
-  return diff === 0;
-}
-
 async function readDeployBootstrapToken(request) {
   const url = new URL(request.url);
   const authorization = request.headers.get('authorization') || '';
@@ -8038,6 +4396,11 @@ async function handleDeployBootstrap(request, env, webhookPath, publicBaseUrl) {
   }
 
   ensureEnv(env, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
+  ensureKv(env);
+  const consumedKey = await buildDeployBootstrapConsumptionKey(expectedToken);
+  if (await env.BOT_KV.get(consumedKey)) {
+    throw new AppError(410, 'deploy_bootstrap_consumed');
+  }
 
   const webhookUrl = `${publicBaseUrl}${webhookPath}`;
   const webhookPayload = { url: webhookUrl };
@@ -8061,10 +4424,31 @@ async function handleDeployBootstrap(request, env, webhookPath, publicBaseUrl) {
 
   const passwordState = await ensureAdminPasswordState(env);
   const bootstrapNotifyError = passwordState.bootstrapNotifyError || null;
+  const ok = Boolean(!webhookError && !commandsError && passwordState.passwordReady && !bootstrapNotifyError);
+  const deploymentHealth = buildDeploymentHealthRecord({
+    ok,
+    webhookUrl,
+    webhookError,
+    commandsError,
+    passwordReady: passwordState.passwordReady,
+    bootstrapNotifyError,
+  });
+  try {
+    await env.BOT_KV.put(DEPLOYMENT_HEALTH_KEY, JSON.stringify(deploymentHealth));
+  } catch (error) {
+    writeStructuredLog('warn', 'deployment_health_persist_failed', {
+      stage: 'deploy_bootstrap',
+    }, {
+      error: formatErrorMessage(error),
+    });
+  }
+  if (ok) {
+    await env.BOT_KV.put(consumedKey, JSON.stringify({ consumedAt: new Date().toISOString() }));
+  }
 
   return json(
     {
-      ok: Boolean(!webhookError && passwordState.passwordReady && !bootstrapNotifyError),
+      ok,
       webhookUrl,
       webhook,
       webhookError,
@@ -8073,35 +4457,12 @@ async function handleDeployBootstrap(request, env, webhookPath, publicBaseUrl) {
       passwordReady: Boolean(passwordState.passwordReady),
       passwordMode: passwordState.passwordMode || 'none',
       bootstrapNotifyError,
+      deploymentHealth,
     },
     200,
     {},
     request,
   );
-}
-
-function parseCookies(cookieHeader) {
-  const pairs = String(cookieHeader || '')
-    .split(';')
-    .map((part) => part.trim())
-    .filter(Boolean);
-  const cookies = {};
-  for (const pair of pairs) {
-    const idx = pair.indexOf('=');
-    if (idx === -1) continue;
-    const key = pair.slice(0, idx).trim();
-    const value = pair.slice(idx + 1).trim();
-    cookies[key] = decodeURIComponent(value);
-  }
-  return cookies;
-}
-
-function buildSessionCookie(token) {
-  return `admin_session=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=${ADMIN_SESSION_TTL_SECONDS}`;
-}
-
-function buildExpiredSessionCookie() {
-  return 'admin_session=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0';
 }
 
 async function getAdminSession(env, request) {
@@ -8382,10 +4743,7 @@ async function syncTelegramProfile(env, userId, options = {}) {
     record.lastProfileSyncAt = nowIso;
     record.profileSyncError = null;
     if (env.BOT_KV && persistProfile) {
-      await putJsonIfChanged(env, userKey(numericUserId), record, {
-        existing,
-        ttlMs: USER_PROFILE_CACHE_TTL_MS,
-      });
+      await putUserProfileIfChanged(env, numericUserId, record, { existing });
     }
     return record;
   } catch (error) {
@@ -8393,10 +4751,7 @@ async function syncTelegramProfile(env, userId, options = {}) {
     record.profileStatus = record.firstName || record.lastName || record.username ? 'partial' : 'error';
     record.profileSyncError = error instanceof Error ? error.message : String(error);
     if (env.BOT_KV && persistProfile) {
-      await putJsonIfChanged(env, userKey(numericUserId), record, {
-        existing,
-        ttlMs: USER_PROFILE_CACHE_TTL_MS,
-      });
+      await putUserProfileIfChanged(env, numericUserId, record, { existing });
     }
     return record;
   }
@@ -8406,15 +4761,6 @@ function extractBestTelegramPhoto(photos) {
   const sets = Array.isArray(photos?.photos) ? photos.photos : [];
   const variants = sets[0] || [];
   return variants[variants.length - 1] || null;
-}
-
-function buildDisplayName(profile) {
-  const name = [profile?.firstName, profile?.lastName].filter(Boolean).join(' ').trim();
-  if (name) return name;
-  if (profile?.displayName) return profile.displayName;
-  if (profile?.username) return `@${String(profile.username).replace(/^@/, '')}`;
-  if (profile?.userId) return `用户 ${profile.userId}`;
-  return '';
 }
 
 function buildTelegramAvatarProxyUrl(userId) {
@@ -8540,60 +4886,12 @@ async function handleTelegramAvatarProxy(request, env) {
   });
 }
 
-async function telegram(env, method, payload) {
-  const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json; charset=UTF-8' },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await response.json();
-  if (!response.ok || !data.ok) {
-    throw new Error(data.description || `Telegram API error: ${response.status}`);
-  }
-  return data.result;
-}
-
-async function telegramMultipart(env, method, formData) {
-  const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
-    method: 'POST',
-    body: formData,
-  });
-
-  const data = await response.json();
-  if (!response.ok || !data.ok) {
-    throw new Error(data.description || `Telegram API error: ${response.status}`);
-  }
-  return data.result;
-}
-
-async function telegramWithThreadFallback(env, method, payload) {
-  try {
-    return await telegram(env, method, payload);
-  } catch (error) {
-    if (!payload?.message_thread_id) throw error;
-    const fallbackPayload = { ...payload };
-    delete fallbackPayload.message_thread_id;
-    return telegram(env, method, fallbackPayload);
-  }
-}
-
 function ensureEnv(env, keys) {
   for (const key of keys) {
     if (!env[key]) {
       throw new AppError(500, `缺少环境变量：${key}`);
     }
   }
-}
-
-function parseIdList(value) {
-  if (!value) return [];
-  return String(value)
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => Number(item))
-    .filter((item) => Number.isFinite(item));
 }
 
 function toChatId(value) {
@@ -8604,11 +4902,6 @@ function toChatId(value) {
   return num;
 }
 
-function normalizeWebhookPath(path) {
-  if (!path) return '/webhook';
-  return path.startsWith('/') ? path : `/${path}`;
-}
-
 function getPublicBaseUrl(url, env) {
   const raw = String(env.PUBLIC_BASE_URL || url.origin).trim();
   try {
@@ -8617,45 +4910,6 @@ function getPublicBaseUrl(url, env) {
   } catch (error) {
     throw new AppError(500, 'PUBLIC_BASE_URL 不是合法 URL');
   }
-}
-
-function parseLimit(value, fallback) {
-  const limit = Number(value);
-  if (!Number.isFinite(limit)) return fallback;
-  return clamp(limit, 1, MAX_LIST_LIMIT);
-}
-
-function parseOffset(value, fallback = 0) {
-  const offset = Number(value);
-  if (!Number.isFinite(offset) || offset < 0) return fallback;
-  return Math.floor(offset);
-}
-
-function clamp(value, min, max) {
-  return Math.min(Math.max(Number(value), min), max);
-}
-
-function randomInt(min, max) {
-  const low = Math.ceil(min);
-  const high = Math.floor(max);
-  const range = high - low + 1;
-  if (range <= 0) return low;
-  const maxUint = 0xffffffff;
-  const limit = maxUint - (maxUint % range);
-  const value = new Uint32Array(1);
-  do {
-    crypto.getRandomValues(value);
-  } while (value[0] >= limit);
-  return low + (value[0] % range);
-}
-
-function shuffleArray(items) {
-  const arr = [...items];
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = randomInt(0, i);
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
 }
 
 function html(content, status = 200, request = null, extraHeaders = {}) {
@@ -10057,3 +6311,76 @@ function escapeHtml(value) {
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 }
+
+// Keep pure handlers directly testable without changing the deployed default export.
+export {
+  buildSessionCookie,
+  extractMessageText,
+  extractPrimaryMediaFileId,
+  extractTargetUserId,
+  isUserVerificationEnabled,
+  matchKeywordFilter,
+  normalizeBotCommandText,
+  normalizeRotationAngle,
+  normalizeSliderTrace,
+  normalizeWebhookPath,
+  parseCookies,
+  parseIdList,
+  parseLimit,
+  parseOffset,
+  parseReplyCommand,
+  parseVerificationApiIdentity,
+  collectKvKeys,
+  putUserProfileIfChanged,
+  writeD1ModerationIndex,
+  deleteD1DirectoryEntries,
+  runDirectoryIndexBackfill,
+  listUsersPage,
+  listBlacklist,
+  listBlacklistPage,
+  listTrust,
+  listTrustPage,
+  buildDeployBootstrapConsumptionKey,
+  getRootAdminIds,
+  isRootAdmin,
+  getAdminMetaMode,
+  shouldSendUserMetaMessage,
+  isTopicModeEnabled,
+  isDataCleanupAutoEnabled,
+  isDeletedAccountSweepAutoEnabled,
+  isUserPrivateCommand,
+  detectMessageType,
+  isIgnoredAdminServiceMessage,
+  userKey,
+  blacklistKey,
+  adminKey,
+  topicUserKey,
+  topicThreadKey,
+  trustKey,
+  verifyKey,
+  verificationCacheKey,
+  buildGroupAdminMemberCacheKey,
+  buildMessageHistoryDedupeKey,
+  readTimedCacheValue,
+  writeTimedCacheValue,
+  pruneTimedCache,
+  serializeJsonForStorage,
+  areJsonStorageValuesEqual,
+  getJsonChangedKeys,
+  shouldThrottleUserProfileWrite,
+  normalizeD1VerificationStatusRecord,
+  isSameD1VerificationMeaning,
+  parseIsoTimeMs,
+  normalizeIsoTime,
+  getRequestId,
+  getTelegramUpdateContext,
+  buildStructuredLogRecord,
+  buildWebhookErrorStats,
+  buildDeploymentHealthRecord,
+  buildD1UserDirectoryRecord,
+  buildD1ModerationIndexRecord,
+  classifyTopLevelRoute,
+  dispatchAdminRoutes,
+  classifyVerificationApiRoute,
+  dispatchVerificationApiRoute,
+};

@@ -93,6 +93,7 @@ async function cfApiFetch(token, resource, options = {}) {
 function normalizeHttpUrl(raw) {
   const text = String(raw || '').trim();
   if (!text) return '';
+  if (/^[a-z][a-z\d+.-]*:/i.test(text) && !/^https?:\/\//i.test(text)) return '';
   try {
     const normalized = /^https?:\/\//i.test(text) ? text : `https://${text}`;
     const url = new URL(normalized);

@@ -1,23 +1,17 @@
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  readJson,
   releaseDirForVersion,
   sha256,
   verifyAndroidApkSignature,
 } from './release-utils.mjs';
+import { assertVersionConsistency } from './check-version-consistency.mjs';
 
-const electronVersion = readJson('electron-app/package.json').version;
-const mobileVersion = readJson('mobile-app/package.json').version;
-
-if (electronVersion !== mobileVersion) {
-  throw new Error(`Release versions differ: electron=${electronVersion}, mobile=${mobileVersion}`);
-}
-
-const releaseDir = releaseDirForVersion(electronVersion);
+const { version } = assertVersionConsistency();
+const releaseDir = releaseDirForVersion(version);
 const windowsInstaller = join(releaseDir, 'tg-bot-deploy-setup.exe');
 const windowsBlockmap = `${windowsInstaller}.blockmap`;
-const androidApk = join(releaseDir, `tg-bot-mobile-deploy-v${mobileVersion}.apk`);
+const androidApk = join(releaseDir, `tg-bot-mobile-deploy-v${version}.apk`);
 
 for (const artifact of [windowsInstaller, windowsBlockmap, androidApk]) {
   if (!existsSync(artifact)) {

@@ -592,6 +592,11 @@ input::placeholder {
   font-weight: 700;
 }
 
+.mi-account-manager-item__actions {
+  display: grid;
+  gap: 6px;
+}
+
 .mi-account-manager-item__delete {
   min-height: 56px;
   min-width: 56px;
@@ -602,6 +607,10 @@ input::placeholder {
   font-size: 30px;
   line-height: 1;
   box-shadow: none;
+}
+
+.mi-account-manager-item__clear {
+  font-size: 23px;
 }
 
 .mi-account-manager-item__delete:hover:not(:disabled) {
