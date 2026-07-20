@@ -3,9 +3,9 @@
   "private": true,
   "scripts": {
     "dev": "node -e \"console.log('Use TG Bot Deploy Tool for API-based deployment.')\"",
-    "test": "npm run build:worker && node --test tests/*.test.mjs",
+    "test": "npm run build:worker && node --test",
     "pretest:integration": "npm run build:worker",
-    "test:integration": "node --test tests/*.integration.mjs",
+    "test:integration": "node --test tests/worker.integration.mjs",
     "lint": "eslint worker.js worker-src scripts shared tests electron-app admin-panel/src --ext .js,.mjs,.cjs",
     "typecheck": "npm --prefix mobile-app run typecheck",
     "check": "npm run lint && npm run typecheck && npm test && npm run test:integration",
