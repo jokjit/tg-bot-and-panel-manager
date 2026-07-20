@@ -7,7 +7,7 @@ import {
 } from '../scripts/check-version-consistency.mjs';
 
 test('repository application and Android versions are consistent', () => {
-  assert.deepEqual(assertVersionConsistency(), { version: '2.3.4', versionCode: 27 });
+  assert.deepEqual(assertVersionConsistency(), { version: '2.4.0', versionCode: 28 });
 });
 
 test('Android version parser rejects missing or duplicate declarations', () => {
