@@ -1,4 +1,4 @@
-﻿import { Capacitor, CapacitorHttp } from '@capacitor/core';
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { Preferences } from '@capacitor/preferences';
 // @ts-ignore Shared CommonJS utility module is bundled by Vite.
 import deployUtils from '@tg-bot/deploy-utils';
@@ -99,6 +99,7 @@ export interface DeployFormState {
   verifyPublicBaseUrl: string;
   imagePublicBaseUrl: string;
   autoConfigureImageDomain: boolean;
+  deployImageHosting: boolean;
   panelUrl: string;
   deployPanel: boolean;
   pagesProjectName: string;
@@ -142,6 +143,14 @@ export interface DashboardD1DatabaseUsage {
   numTables: number | null;
 }
 
+export interface DashboardR2BucketUsage {
+  name: string;
+  objectCount: number | null;
+  payloadBytes: number | null;
+  metadataBytes: number | null;
+  uploadCount: number | null;
+}
+
 export interface DashboardSnapshot {
   workerName: string;
   workerRequests24h: number | null;
@@ -152,7 +161,20 @@ export interface DashboardSnapshot {
   kvStorageBytes: number | null;
   d1DatabaseCount: number | null;
   d1DatabasesUsage: DashboardD1DatabaseUsage[];
+  r2Enabled: boolean;
+  r2BucketCount: number | null;
+  r2Buckets: string[];
+  r2BucketMetrics: DashboardR2BucketUsage[];
+  r2ConfiguredBucketName: string;
+  r2ObjectCount: number | null;
+  r2StorageBytes: number | null;
+  r2MetadataBytes: number | null;
+  r2ClassAOperations30d: number | null;
+  r2ClassBOperations30d: number | null;
   pagesProjectCount: number | null;
+  pagesProjectName: string;
+  pagesBranch: string;
+  pagesPanelUrl: string;
   fetchedAt: string;
   warnings: string[];
 }
@@ -791,6 +813,195 @@ async function fetchD1DatabasesUsage(
   return { items, warning: warnings.join('; ') };
 }
 
+interface DashboardR2BucketRecord {
+  name: string;
+  jurisdiction: string;
+}
+
+function dashboardR2MetricBucketName(bucket: DashboardR2BucketRecord): string {
+  const jurisdiction = String(bucket.jurisdiction || '').trim().toLowerCase();
+  return bucket.name && jurisdiction && jurisdiction !== 'default'
+    ? `${jurisdiction}_${bucket.name}`
+    : bucket.name;
+}
+
+async function listDashboardR2Buckets(
+  token: string,
+  accountId: string,
+): Promise<DashboardR2BucketRecord[]> {
+  const response = await cfApi<any>(token, accountId, `/accounts/${accountId}/r2/buckets`);
+  if (!response.ok) throw new Error(`r2 bucket list failed: ${response.reason}`);
+  const rows = Array.isArray(response.result)
+    ? response.result
+    : Array.isArray(response.result?.buckets)
+      ? response.result.buckets
+      : [];
+  return rows
+    .map((item: any) => ({
+      name: String(item?.name || item?.bucket_name || '').trim(),
+      jurisdiction: String(item?.jurisdiction || '').trim(),
+    }))
+    .filter((item: DashboardR2BucketRecord) => Boolean(item.name));
+}
+
+function totalDashboardR2Metric(result: any, key: string): number | null {
+  let total = 0;
+  let hasValue = false;
+  for (const storageClass of ['standard', 'infrequentAccess']) {
+    for (const state of ['published', 'uploaded']) {
+      const value = Number(result?.[storageClass]?.[state]?.[key]);
+      if (!Number.isFinite(value) || value < 0) continue;
+      total += value;
+      hasValue = true;
+    }
+  }
+  return hasValue ? Math.round(total) : null;
+}
+
+async function fetchDashboardR2AccountMetrics(
+  token: string,
+  accountId: string,
+): Promise<{ objectCount: number | null; payloadBytes: number | null; metadataBytes: number | null }> {
+  const response = await cfApi<any>(token, accountId, `/accounts/${accountId}/r2/metrics`);
+  if (!response.ok) throw new Error(`r2 metrics failed: ${response.reason}`);
+  return {
+    objectCount: totalDashboardR2Metric(response.result || {}, 'objects'),
+    payloadBytes: totalDashboardR2Metric(response.result || {}, 'payloadSize'),
+    metadataBytes: totalDashboardR2Metric(response.result || {}, 'metadataSize'),
+  };
+}
+
+async function fetchDashboardR2Storage(
+  token: string,
+  accountId: string,
+): Promise<{ items: Array<DashboardR2BucketUsage & { bucketName: string }>; warning: string }> {
+  const now = new Date();
+  const from = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
+  const account = escapeGraphqlString(accountId);
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          r2StorageAdaptiveGroups(
+            limit: 10000
+            filter: {
+              datetime_geq: "${from.toISOString()}"
+              datetime_leq: "${now.toISOString()}"
+            }
+            orderBy: [datetime_DESC]
+          ) {
+            max {
+              objectCount
+              uploadCount
+              payloadSize
+              metadataSize
+            }
+            dimensions {
+              bucketName
+              datetime
+            }
+          }
+        }
+      }
+    }
+  `;
+  const result = await requestGraphql<any>(token, query);
+  if (result.errors.length > 0) {
+    return { items: [], warning: result.errors.join('; ') || 'r2 storage graphql query failed' };
+  }
+  const rows = result.data?.viewer?.accounts?.[0]?.r2StorageAdaptiveGroups;
+  if (!Array.isArray(rows)) return { items: [], warning: 'r2 storage analytics unavailable' };
+
+  const latestByBucket = new Map<string, DashboardR2BucketUsage & { bucketName: string; datetime: string }>();
+  for (const row of rows) {
+    const bucketName = String(row?.dimensions?.bucketName || '').trim();
+    const datetime = String(row?.dimensions?.datetime || '').trim();
+    if (!bucketName || !datetime) continue;
+    const current = latestByBucket.get(bucketName);
+    if (current && current.datetime >= datetime) continue;
+    const numberOrNull = (value: unknown): number | null => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : null;
+    };
+    latestByBucket.set(bucketName, {
+      bucketName,
+      datetime,
+      name: bucketName,
+      objectCount: numberOrNull(row?.max?.objectCount),
+      uploadCount: numberOrNull(row?.max?.uploadCount),
+      payloadBytes: numberOrNull(row?.max?.payloadSize),
+      metadataBytes: numberOrNull(row?.max?.metadataSize),
+    });
+  }
+  return {
+    items: [...latestByBucket.values()].sort((a, b) => a.bucketName.localeCompare(b.bucketName)),
+    warning: '',
+  };
+}
+
+const DASHBOARD_R2_CLASS_A_ACTIONS = new Set([
+  'listbuckets', 'putbucket', 'listobjects', 'putobject', 'copyobject',
+  'completemultipartupload', 'createmultipartupload', 'lifecyclestoragetiertransition',
+  'listmultipartuploads', 'uploadpart', 'uploadpartcopy', 'listparts',
+  'putbucketencryption', 'putbucketcors', 'putbucketlifecycleconfiguration',
+]);
+const DASHBOARD_R2_CLASS_B_ACTIONS = new Set([
+  'headbucket', 'headobject', 'getobject', 'usagesummary',
+  'getbucketencryption', 'getbucketlocation', 'getbucketcors', 'getbucketlifecycleconfiguration',
+]);
+
+async function fetchDashboardR2Operations30d(
+  token: string,
+  accountId: string,
+): Promise<{ classAOperations: number | null; classBOperations: number | null; warning: string }> {
+  const now = new Date();
+  const from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const account = escapeGraphqlString(accountId);
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          r2OperationsAdaptiveGroups(
+            limit: 10000
+            filter: {
+              datetime_geq: "${from.toISOString()}"
+              datetime_leq: "${now.toISOString()}"
+            }
+          ) {
+            dimensions { actionType }
+            sum { requests }
+          }
+        }
+      }
+    }
+  `;
+  const result = await requestGraphql<any>(token, query);
+  if (result.errors.length > 0) {
+    return {
+      classAOperations: null,
+      classBOperations: null,
+      warning: result.errors.join('; ') || 'r2 operations graphql query failed',
+    };
+  }
+  const rows = result.data?.viewer?.accounts?.[0]?.r2OperationsAdaptiveGroups;
+  if (!Array.isArray(rows)) {
+    return { classAOperations: null, classBOperations: null, warning: 'r2 operations analytics unavailable' };
+  }
+
+  let classAOperations = 0;
+  let classBOperations = 0;
+  for (const row of rows) {
+    const action = String(row?.dimensions?.actionType || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+    const requests = Math.max(0, parseNumber(row?.sum?.requests, 0));
+    if (DASHBOARD_R2_CLASS_A_ACTIONS.has(action)) classAOperations += requests;
+    if (DASHBOARD_R2_CLASS_B_ACTIONS.has(action)) classBOperations += requests;
+  }
+  return {
+    classAOperations: Math.round(classAOperations),
+    classBOperations: Math.round(classBOperations),
+    warning: '',
+  };
+}
 export async function fetchDashboardSnapshot(
   formInput: Partial<DeployFormState>,
 ): Promise<DashboardSnapshot> {
@@ -798,13 +1009,26 @@ export async function fetchDashboardSnapshot(
   const token = String(form.cfApiToken || '').trim();
   const accountId = String(form.cfAccountId || '').trim();
   const workerName = String(form.workerName || '').trim();
+  const r2Enabled = form.deployImageHosting !== false;
 
   if (!token) throw new Error('missing Cloudflare API Token');
   if (!accountId) throw new Error('missing Cloudflare Account ID');
 
   const warnings: string[] = [];
 
-  const [workersCount, kvCount, kvUsage, kvStorageUsage, d1Usage, pagesCount, workerReq] = await Promise.allSettled([
+  const [
+    workersCount,
+    kvCount,
+    kvUsage,
+    kvStorageUsage,
+    d1Usage,
+    pagesCount,
+    workerReq,
+    r2Buckets,
+    r2AccountMetrics,
+    r2StorageMetrics,
+    r2Operations,
+  ] = await Promise.allSettled([
     countCollection(token, accountId, `/accounts/${accountId}/workers/scripts`, 'workers'),
     countCollection(token, accountId, `/accounts/${accountId}/storage/kv/namespaces`, 'kv'),
     fetchKvRequests24h(token, accountId),
@@ -812,6 +1036,12 @@ export async function fetchDashboardSnapshot(
     fetchD1DatabasesUsage(token, accountId),
     countPagesProjects(token, accountId),
     fetchWorkerRequests24h(token, accountId, workerName),
+    r2Enabled ? listDashboardR2Buckets(token, accountId) : Promise.resolve([]),
+    r2Enabled ? fetchDashboardR2AccountMetrics(token, accountId) : Promise.resolve(null),
+    r2Enabled ? fetchDashboardR2Storage(token, accountId) : Promise.resolve({ items: [], warning: '' }),
+    r2Enabled
+      ? fetchDashboardR2Operations30d(token, accountId)
+      : Promise.resolve({ classAOperations: null, classBOperations: null, warning: '' }),
   ]);
 
   const workersScriptCount = workersCount.status === 'fulfilled' ? workersCount.value : null;
@@ -865,6 +1095,63 @@ export async function fetchDashboardSnapshot(
     warnings.push(`requests: ${workerReq.reason instanceof Error ? workerReq.reason.message : String(workerReq.reason)}`);
   }
 
+  const bucketItems = r2Buckets.status === 'fulfilled' ? r2Buckets.value : [];
+  if (r2Enabled && r2Buckets.status === 'rejected') {
+    warnings.push(`r2: ${r2Buckets.reason instanceof Error ? r2Buckets.reason.message : String(r2Buckets.reason)}`);
+  }
+  const r2BucketNames = bucketItems.map((item) => item.name);
+  const r2BucketCount = r2Enabled && r2Buckets.status === 'fulfilled' ? r2BucketNames.length : null;
+
+  const storageSnapshot = r2StorageMetrics.status === 'fulfilled'
+    ? r2StorageMetrics.value
+    : { items: [], warning: r2StorageMetrics.reason instanceof Error ? r2StorageMetrics.reason.message : String(r2StorageMetrics.reason) };
+  if (r2Enabled && storageSnapshot.warning) warnings.push(`r2 storage: ${storageSnapshot.warning}`);
+  const metricsByBucket = new Map(storageSnapshot.items.map((item) => [item.bucketName, item]));
+  const r2BucketMetrics: DashboardR2BucketUsage[] = bucketItems.map((bucket) => {
+    const metric = metricsByBucket.get(dashboardR2MetricBucketName(bucket))
+      || metricsByBucket.get(bucket.name)
+      || null;
+    return {
+      name: bucket.name,
+      objectCount: metric?.objectCount ?? null,
+      payloadBytes: metric?.payloadBytes ?? null,
+      metadataBytes: metric?.metadataBytes ?? null,
+      uploadCount: metric?.uploadCount ?? null,
+    };
+  });
+
+  const accountMetrics = r2AccountMetrics.status === 'fulfilled' ? r2AccountMetrics.value : null;
+  if (r2Enabled && r2AccountMetrics.status === 'rejected') {
+    warnings.push(`r2 metrics: ${r2AccountMetrics.reason instanceof Error ? r2AccountMetrics.reason.message : String(r2AccountMetrics.reason)}`);
+  }
+  const fallbackObjects = r2BucketMetrics.reduce(
+    (sum, item) => sum + (Number.isFinite(item.objectCount) ? Number(item.objectCount) : 0),
+    0,
+  );
+  const fallbackStorage = r2BucketMetrics.reduce(
+    (sum, item) => sum + (Number.isFinite(item.payloadBytes) ? Number(item.payloadBytes) : 0),
+    0,
+  );
+  const r2ObjectCount = Number.isFinite(accountMetrics?.objectCount)
+    ? Number(accountMetrics?.objectCount)
+    : r2BucketMetrics.length > 0 ? fallbackObjects : null;
+  const r2StorageBytes = Number.isFinite(accountMetrics?.payloadBytes)
+    ? Number(accountMetrics?.payloadBytes)
+    : r2BucketMetrics.length > 0 ? fallbackStorage : null;
+  const r2MetadataBytes = Number.isFinite(accountMetrics?.metadataBytes)
+    ? Number(accountMetrics?.metadataBytes)
+    : null;
+
+  const operationsSnapshot = r2Operations.status === 'fulfilled'
+    ? r2Operations.value
+    : {
+        classAOperations: null,
+        classBOperations: null,
+        warning: r2Operations.reason instanceof Error ? r2Operations.reason.message : String(r2Operations.reason),
+      };
+  if (r2Enabled && operationsSnapshot.warning) warnings.push(`r2 operations: ${operationsSnapshot.warning}`);
+  const configuredBucket = suggestImageBucketName(workerName);
+
   return {
     workerName,
     workerRequests24h,
@@ -875,7 +1162,20 @@ export async function fetchDashboardSnapshot(
     kvStorageBytes,
     d1DatabaseCount,
     d1DatabasesUsage,
+    r2Enabled,
+    r2BucketCount,
+    r2Buckets: r2BucketNames,
+    r2BucketMetrics,
+    r2ConfiguredBucketName: r2BucketNames.includes(configuredBucket) ? configuredBucket : '',
+    r2ObjectCount,
+    r2StorageBytes,
+    r2MetadataBytes,
+    r2ClassAOperations30d: operationsSnapshot.classAOperations,
+    r2ClassBOperations30d: operationsSnapshot.classBOperations,
     pagesProjectCount,
+    pagesProjectName: form.pagesProjectName,
+    pagesBranch: form.pagesBranch,
+    pagesPanelUrl: form.panelUrl,
     fetchedAt: new Date().toISOString(),
     warnings,
   };
@@ -1021,6 +1321,7 @@ function sanitizeFormState(input: Partial<DeployFormState>): DeployFormState {
     verifyPublicBaseUrl: String(input.verifyPublicBaseUrl || '').trim(),
     imagePublicBaseUrl: String(input.imagePublicBaseUrl || '').trim(),
     autoConfigureImageDomain: normalizeBoolean(input.autoConfigureImageDomain, true),
+    deployImageHosting: normalizeBoolean(input.deployImageHosting, true),
     panelUrl: String(input.panelUrl || '').trim(),
     deployPanel: normalizeBoolean(input.deployPanel, true),
     pagesProjectName: normalizePagesProjectName(String(input.pagesProjectName || '').trim()) || suggestPagesProjectName(workerName),
@@ -1043,6 +1344,7 @@ export async function createDefaultFormState(): Promise<DeployFormState> {
     verifyPublicBaseUrl: '',
     imagePublicBaseUrl: '',
     autoConfigureImageDomain: true,
+    deployImageHosting: true,
     panelUrl: '',
     deployPanel: true,
     pagesProjectName: suggestPagesProjectName(workerName),
@@ -2110,12 +2412,13 @@ export async function runDeploy(
   const workerName = form.workerName || assets.defaultWorkerName || 'telegram-private-chatbot';
   const kvNamespaceTitle = form.kvNamespaceTitle || DEFAULT_KV_NAMESPACE_TITLE;
   const d1DatabaseName = form.d1DatabaseName || DEFAULT_D1_DATABASE_NAME;
-  const imageBucketName = suggestImageBucketName(workerName);
+  const deployImageHosting = form.deployImageHosting !== false;
+  const imageBucketName = deployImageHosting ? suggestImageBucketName(workerName) : '';
 
   const workerUrlInput = normalizeHttpUrl(form.workerUrl);
   const verifyPublicBaseUrl = normalizeHttpUrl(form.verifyPublicBaseUrl);
-  const imagePublicBaseUrl = normalizeHttpUrl(form.imagePublicBaseUrl);
-  const autoConfigureImageDomain = form.autoConfigureImageDomain !== false;
+  const imagePublicBaseUrl = deployImageHosting ? normalizeHttpUrl(form.imagePublicBaseUrl) : '';
+  const autoConfigureImageDomain = deployImageHosting && form.autoConfigureImageDomain !== false;
   const deployPanel = Boolean(form.deployPanel);
   const panelUrlFromForm = normalizeHttpUrl(form.panelUrl);
   // Mobile keeps panel URL as read-only display state, so avoid treating it as manual override when auto deploying Pages.
@@ -2127,16 +2430,22 @@ export async function runDeploy(
     {
       id: 'resources',
       run: async () => {
-        onLog('步骤 1/7: 初始化 KV、D1 和 R2');
+        onLog(deployImageHosting ? '步骤 1/7: 初始化 KV、D1 和 R2' : '步骤 1/7: 初始化 KV 和 D1（图床已关闭）');
         const kv = await ensureKvNamespace(token, accountId, kvNamespaceTitle, onLog);
         const d1 = await ensureD1Database(token, accountId, d1DatabaseName, assets.migrations, onLog);
-        const r2 = await ensureR2Bucket(token, accountId, imageBucketName, onLog);
+        const r2 = deployImageHosting
+          ? await ensureR2Bucket(token, accountId, imageBucketName, onLog)
+          : null;
         return { kv, d1, r2 };
       },
     },
     {
       id: 'image_delivery',
       run: async ({ results }) => {
+        if (!deployImageHosting) {
+          onLog('步骤 2/7: 跳过 R2 图床配置（已关闭）。');
+          return { skipped: true, reason: 'image_hosting_disabled', active: false };
+        }
         onLog('步骤 2/7: 配置 R2 图床域名与边缘缓存');
         return ensureImageDelivery(
           token,
@@ -2167,7 +2476,7 @@ export async function runDeploy(
             vars: firstVars,
             namespaceId: results.resources.kv.namespaceId,
             databaseId: results.resources.d1.databaseId,
-            bucketName: results.resources.r2.bucketName,
+            bucketName: results.resources.r2?.bucketName || '',
           }),
           onLog,
         );
@@ -2241,7 +2550,7 @@ export async function runDeploy(
             vars: finalVars,
             namespaceId: results.resources.kv.namespaceId,
             databaseId: results.resources.d1.databaseId,
-            bucketName: results.resources.r2.bucketName,
+            bucketName: results.resources.r2?.bucketName || '',
           }),
           onLog,
         );
@@ -2310,7 +2619,7 @@ export async function runDeploy(
       : String(imageDelivery?.reason || imageDelivery?.domainStatus?.ssl || 'pending'),
     kvNamespaceId: resources.kv.namespaceId,
     d1DatabaseId: resources.d1.databaseId,
-    imageBucketName: resources.r2.bucketName,
+    imageBucketName: resources.r2?.bucketName || '',
     webhookUrl: bootstrapResult.bootstrap.webhookUrl || `${getUrlOrigin(endpoint.workerUrl)}${normalizeWebhookPath(finalWorker.finalVars.WEBHOOK_PATH || '/webhook')}`,
     panelUrl: finalWorker.effectivePanelTargetUrl || finalWorker.effectivePanelUrl,
     panelEntryUrl,

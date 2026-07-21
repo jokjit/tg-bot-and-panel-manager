@@ -42,11 +42,15 @@ export function getTelegramCommandCatalog() {
 export async function syncTelegramCommandMenu(options = {}) {
   const send = options.send || telegram;
   const commands = getTelegramCommandCatalog();
-  const adminChatIds = Array.from(new Set((options.adminChatIds || []).map(Number).filter(Number.isFinite)));
-  const adminUserIds = Array.from(new Set((options.adminUserIds || []).map(Number).filter(Number.isFinite)));
+  // A chat-scoped command menu in a group is visible to every member. Admin
+  // commands must therefore only be scoped to private admin chats.
+  const adminChatIds = Array.from(new Set((options.adminChatIds || []).map(Number).filter((chatId) => Number.isFinite(chatId) && chatId > 0)));
+  const legacyGroupChatIds = Array.from(new Set((options.legacyGroupChatIds || []).map(Number).filter((chatId) => Number.isFinite(chatId) && chatId < 0)));
+  const adminUserIds = Array.from(new Set((options.adminUserIds || []).map(Number).filter((userId) => Number.isFinite(userId) && userId > 0)));
   const scopedAdminUserIds = adminUserIds.filter((userId) => !adminChatIds.includes(userId));
   const applied = [];
   const failedScopes = [];
+  const clearedGroupScopes = [];
 
   applied.push(await send(options.env, 'setMyCommands', {
     scope: { type: 'default' },
@@ -55,6 +59,21 @@ export async function syncTelegramCommandMenu(options = {}) {
   applied.push(await send(options.env, 'setChatMenuButton', {
     menu_button: { type: 'commands' },
   }));
+
+  for (const chatId of legacyGroupChatIds) {
+    try {
+      await send(options.env, 'deleteMyCommands', {
+        scope: { type: 'chat', chat_id: chatId },
+      });
+      clearedGroupScopes.push(chatId);
+    } catch (error) {
+      failedScopes.push({
+        scope: 'admin_group_cleanup',
+        chatId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   for (const chatId of adminChatIds) {
     try {
@@ -91,6 +110,7 @@ export async function syncTelegramCommandMenu(options = {}) {
     menuButton: 'commands',
     adminCommandChats: adminChatIds,
     adminCommandTargets: scopedAdminUserIds,
+    clearedGroupScopes,
     failedScopes,
     appliedCount: applied.length,
     note: adminChatIds.length > 0 || scopedAdminUserIds.length > 0

@@ -1595,6 +1595,7 @@ async function syncTelegramCommands(env) {
   return syncTelegramCommandMenu({
     env,
     adminChatIds: getCommandAdminChatIds(env),
+    legacyGroupChatIds: getCommandGroupChatIdsForCleanup(env),
     adminUserIds: await getCommandAdminUserIds(env),
   });
 }
@@ -2776,7 +2777,13 @@ async function getDynamicGroupAdminEntries(env) {
 
 function getCommandAdminChatIds(env) {
   const chatId = env.ADMIN_CHAT_ID ? Number(env.ADMIN_CHAT_ID) : 0;
-  if (!Number.isFinite(chatId) || chatId === 0) return [];
+  if (!Number.isFinite(chatId) || chatId <= 0) return [];
+  return [chatId];
+}
+
+function getCommandGroupChatIdsForCleanup(env) {
+  const chatId = env.ADMIN_CHAT_ID ? Number(env.ADMIN_CHAT_ID) : 0;
+  if (!Number.isFinite(chatId) || chatId >= 0) return [];
   return [chatId];
 }
 

@@ -18,7 +18,7 @@ import {
 
 type Locale = 'zh' | 'en';
 type Theme = 'light' | 'dark';
-type TextField = Exclude<keyof DeployFormState, 'deployPanel' | 'autoConfigureImageDomain'>;
+type TextField = Exclude<keyof DeployFormState, 'deployPanel' | 'autoConfigureImageDomain' | 'deployImageHosting'>;
 type ViewId = 'home' | 'account' | 'deploy' | 'logs';
 
 interface AccountState {
@@ -64,6 +64,7 @@ type DashboardMetricKey =
   | 'workersScriptCount'
   | 'kvNamespaceCount'
   | 'd1DatabaseCount'
+  | 'r2BucketCount'
   | 'pagesProjectCount';
 
 type DashboardUsageKey =
@@ -73,7 +74,10 @@ type DashboardUsageKey =
   | 'kvStorageBytes'
   | 'd1StorageBytes'
   | 'd1ReadRequests24h'
-  | 'd1WriteRequests24h';
+  | 'd1WriteRequests24h'
+  | 'r2StorageBytes'
+  | 'r2ClassAOperations30d'
+  | 'r2ClassBOperations30d';
 
 type DashboardValueFormat = 'number' | 'bytes';
 
@@ -100,6 +104,7 @@ const DASHBOARD_FREE_TOTALS: Record<DashboardMetricKey, number> = {
   workersScriptCount: 100,
   kvNamespaceCount: 1000,
   d1DatabaseCount: 10,
+  r2BucketCount: 1_000_000,
   pagesProjectCount: 100,
 };
 
@@ -109,26 +114,11 @@ const D1_WRITES_FREE_24H = 100_000;
 const KV_STORAGE_FREE_BYTES = 1 * 1024 * 1024 * 1024;
 const KV_READS_FREE_24H = 100_000;
 const KV_WRITES_FREE_24H = 1_000;
+const R2_STORAGE_FREE_BYTES = 10 * 1024 * 1024 * 1024;
+const R2_CLASS_A_FREE_30D = 1_000_000;
+const R2_CLASS_B_FREE_30D = 10_000_000;
 
 const DASHBOARD_BINDINGS: DashboardMetricBinding[] = [
-  {
-    key: 'workerRequests24h',
-    labelId: 'dashLabelRequests',
-    usedId: 'dashUsedRequests',
-    totalId: 'dashTotalRequests',
-    percentId: 'dashPctRequests',
-    ringId: 'dashRingRequests',
-    cardId: 'dashCardRequests',
-  },
-  {
-    key: 'workersScriptCount',
-    labelId: 'dashLabelWorkers',
-    usedId: 'dashUsedWorkers',
-    totalId: 'dashTotalWorkers',
-    percentId: 'dashPctWorkers',
-    ringId: 'dashRingWorkers',
-    cardId: 'dashCardWorkers',
-  },
   {
     key: 'kvNamespaceCount',
     labelId: 'dashLabelKv',
@@ -146,6 +136,15 @@ const DASHBOARD_BINDINGS: DashboardMetricBinding[] = [
     percentId: 'dashPctD1',
     ringId: 'dashRingD1',
     cardId: 'dashCardD1',
+  },
+  {
+    key: 'r2BucketCount',
+    labelId: 'dashLabelR2',
+    usedId: 'dashUsedR2',
+    totalId: 'dashTotalR2',
+    percentId: 'dashPctR2',
+    ringId: 'dashRingR2',
+    cardId: 'dashCardR2',
   },
   {
     key: 'pagesProjectCount',
@@ -169,12 +168,14 @@ const DASHBOARD_LIMIT_ROWS: DashboardLimitRowDefinition[] = [
 ];
 
 const DASHBOARD_EXTRA_CONTAINER_IDS: Partial<Record<DashboardMetricKey, string>> = {
+  workerRequests24h: 'dashExtraWorker',
   kvNamespaceCount: 'dashExtraKv',
   d1DatabaseCount: 'dashExtraD1',
+  r2BucketCount: 'dashExtraR2',
   pagesProjectCount: 'dashExtraPages',
 };
 
-const DASHBOARD_ORPHAN_EXCLUDE_CARD_IDS = new Set(['dashCardKv', 'dashCardD1']);
+const DASHBOARD_ORPHAN_EXCLUDE_CARD_IDS = new Set(['dashCardKv', 'dashCardD1', 'dashCardR2']);
 
 const i18n: Record<Locale, LocaleDict> = {
   zh: {
@@ -192,15 +193,17 @@ const i18n: Record<Locale, LocaleDict> = {
     nav_deploy: '部署',
     nav_logs: '日志',
     dash_title: 'Cloudflare 仪表盘',
-    dash_desc: '展示当前账号的 Workers / KV / D1 / Pages 概览',
+    dash_desc: '当前账号的 Worker / KV / D1 / R2 / Pages 使用快照',
     dash_refresh: '刷新',
     dash_updating: '更新中...',
     dash_updated_at: '更新时间',
     dash_missing_config: '请先在账号管理中填写当前账号的 Cloudflare Token 与 Account ID',
+    dash_worker_resources: 'Worker 资源',
     dash_worker_requests: 'Worker 24h 请求',
     dash_workers_total: 'Workers 脚本数',
     dash_kv_total: 'KV 命名空间',
     dash_d1_total: 'D1 数据库',
+    dash_r2_total: 'R2 图床',
     dash_pages_total: 'Pages 项目',
     dash_used: '已用',
     dash_total: '总量',
@@ -243,6 +246,21 @@ const i18n: Record<Locale, LocaleDict> = {
     dash_quota_used_total: '{used} / {total}',
     dash_d1_db_usage_pattern: '{size} · 读 {read} / 写 {write}',
     dash_d1_db_more: '其余 {count} 个库...',
+    dash_worker_current: '当前 Worker',
+    dash_r2_mini_buckets: '存储桶',
+    dash_r2_mini_storage: '存储',
+    dash_r2_mini_class_a: 'A 类操作',
+    dash_r2_mini_class_b: 'B 类操作',
+    dash_r2_quota_storage: '总存储占用 / 10GB',
+    dash_r2_quota_class_a: '近30天 A 类操作 / 100万',
+    dash_r2_quota_class_b: '近30天 B 类操作 / 1000万',
+    dash_r2_current: '当前图床桶',
+    dash_r2_bucket_details: '存储桶明细',
+    dash_r2_bucket_usage: '{objects} 个对象 · {size}',
+    dash_r2_more: '其余 {count} 个存储桶...',
+    dash_pages_project: 'Pages 项目',
+    dash_pages_branch: '部署分支',
+    dash_pages_panel: '面板地址',
 
     account_title: '账号与偏好',
     account_desc: '每个账号独立保存部署配置，切换账号自动缓存当前草稿。',
@@ -256,20 +274,26 @@ const i18n: Record<Locale, LocaleDict> = {
     account_manager_add: '添加一个账号',
     account_manager_close: '关闭',
     account_manager_active: '激活账号',
+    account_manager_edit: '编辑账号',
     account_manager_clear_credentials: '清除凭据',
     account_manager_delete: '删除',
     account_meta_email_label: '邮箱',
     account_meta_id_label: 'Account ID',
+    account_meta_credentials_label: 'Cloudflare Token',
+    account_meta_credentials_saved: '已安全保存',
+    account_meta_credentials_missing: '需要重新填写',
     account_meta_empty: '未设置',
     account_tip: '建议按账号拆分生产/测试环境，避免参数覆盖。',
     default_account_name: '默认账号',
 
     modal_title: '添加 Cloudflare 账号',
+    modal_edit_title: '编辑 Cloudflare 账号',
     modal_desc: '',
     modal_name_label: '账号名称',
     modal_name_ph: '例如：主账号',
     modal_token_label: 'Cloudflare API Token',
     modal_token_ph: '在 Cloudflare 控制台创建',
+    modal_token_edit_ph: '留空则保留当前 Token',
     modal_account_label: 'Cloudflare Account ID',
     modal_account_ph: '32 位十六进制字符串',
     modal_email_label: '邮箱（可选）',
@@ -298,6 +322,9 @@ const i18n: Record<Locale, LocaleDict> = {
     ph_admin_chat: '管理员用户 ID 或群组 ID',
     label_verify_url: '验证域名（可选）',
     ph_verify_url: '例如 https://verify.example.com',
+    label_deploy_image_hosting: '部署图床（R2）',
+    deploy_image_hosting_on: '开启',
+    deploy_image_hosting_off: '关闭',
     label_image_url: '图床独立域名（可选）',
     ph_image_url: '例如 https://img.example.com，部署时自动绑定到 R2',
     auto_image_domain: '自动绑定 R2 域名并创建缓存规则',
@@ -331,6 +358,7 @@ const i18n: Record<Locale, LocaleDict> = {
     logs_title: '执行日志',
     log_saved: '配置已保存到本地。',
     log_account_created: '已创建新账号：{name}',
+    log_account_updated: '已更新账号：{name}',
     log_account_deleted: '已删除账号：{name}',
     log_account_switched: '已切换到账号：{name}',
     log_credentials_cleared: '已清除账号凭据：{name}',
@@ -374,15 +402,17 @@ const i18n: Record<Locale, LocaleDict> = {
     nav_deploy: 'Deploy',
     nav_logs: 'Logs',
     dash_title: 'Cloudflare Dashboard',
-    dash_desc: 'Live snapshot for current account: Workers, KV, D1, Pages and request metrics.',
+    dash_desc: 'Snapshot for Worker / KV / D1 / R2 / Pages usage under the current account.',
     dash_refresh: 'Refresh',
     dash_updating: 'Updating...',
     dash_updated_at: 'Updated at',
     dash_missing_config: 'Fill Cloudflare API Token and Account ID in account management first.',
+    dash_worker_resources: 'Worker Resources',
     dash_worker_requests: 'Worker Requests (24h)',
     dash_workers_total: 'Worker Scripts',
     dash_kv_total: 'KV Namespaces',
     dash_d1_total: 'D1 Databases',
+    dash_r2_total: 'R2 Image Storage',
     dash_pages_total: 'Pages Projects',
     dash_used: 'Used',
     dash_total: 'Total',
@@ -425,6 +455,21 @@ const i18n: Record<Locale, LocaleDict> = {
     dash_quota_used_total: '{used} / {total}',
     dash_d1_db_usage_pattern: '{size} · read {read} / write {write}',
     dash_d1_db_more: '{count} more databases...',
+    dash_worker_current: 'Current Worker',
+    dash_r2_mini_buckets: 'Buckets',
+    dash_r2_mini_storage: 'Storage',
+    dash_r2_mini_class_a: 'Class A Ops',
+    dash_r2_mini_class_b: 'Class B Ops',
+    dash_r2_quota_storage: 'Total Storage / 10 GB',
+    dash_r2_quota_class_a: 'Class A Ops (30d) / 1M',
+    dash_r2_quota_class_b: 'Class B Ops (30d) / 10M',
+    dash_r2_current: 'Current image bucket',
+    dash_r2_bucket_details: 'Bucket details',
+    dash_r2_bucket_usage: '{objects} objects · {size}',
+    dash_r2_more: '{count} more buckets...',
+    dash_pages_project: 'Pages Project',
+    dash_pages_branch: 'Deploy Branch',
+    dash_pages_panel: 'Panel URL',
 
     account_title: 'Accounts & Preferences',
     account_desc: 'Each account keeps an isolated deploy config. Switching accounts auto-caches draft data.',
@@ -438,20 +483,26 @@ const i18n: Record<Locale, LocaleDict> = {
     account_manager_add: 'Add an account',
     account_manager_close: 'Close',
     account_manager_active: 'Active',
+    account_manager_edit: 'Edit account',
     account_manager_clear_credentials: 'Clear credentials',
     account_manager_delete: 'Delete',
     account_meta_email_label: 'Email',
     account_meta_id_label: 'Account ID',
+    account_meta_credentials_label: 'Cloudflare Token',
+    account_meta_credentials_saved: 'Securely saved',
+    account_meta_credentials_missing: 'Needs to be re-entered',
     account_meta_empty: 'Not set',
     account_tip: 'Use separate accounts for production and staging to avoid accidental overrides.',
     default_account_name: 'Default Account',
 
     modal_title: 'Add Cloudflare Account',
+    modal_edit_title: 'Edit Cloudflare Account',
     modal_desc: '',
     modal_name_label: 'Account Name',
     modal_name_ph: 'Example: Main',
     modal_token_label: 'Cloudflare API Token',
     modal_token_ph: 'Create in Cloudflare dashboard',
+    modal_token_edit_ph: 'Leave blank to keep the current token',
     modal_account_label: 'Cloudflare Account ID',
     modal_account_ph: '32-char hex string',
     modal_email_label: 'Email (Optional)',
@@ -480,6 +531,9 @@ const i18n: Record<Locale, LocaleDict> = {
     ph_admin_chat: 'Admin user ID or group ID',
     label_verify_url: 'Verification URL (Optional)',
     ph_verify_url: 'e.g. https://verify.example.com',
+    label_deploy_image_hosting: 'Deploy image hosting (R2)',
+    deploy_image_hosting_on: 'On',
+    deploy_image_hosting_off: 'Off',
     label_image_url: 'Image Public URL (Optional)',
     ph_image_url: 'e.g. https://img.example.com, attached to R2 during deploy',
     auto_image_domain: 'Auto bind R2 domain and create cache rule',
@@ -513,6 +567,7 @@ const i18n: Record<Locale, LocaleDict> = {
     logs_title: 'Execution Logs',
     log_saved: 'Config has been saved locally.',
     log_account_created: 'Account created: {name}',
+    log_account_updated: 'Account updated: {name}',
     log_account_deleted: 'Account deleted: {name}',
     log_account_switched: 'Switched to account: {name}',
     log_credentials_cleared: 'Credentials cleared: {name}',
@@ -614,38 +669,12 @@ app.innerHTML = `
       </section>
 
       <div class="mi-dashboard-grid">
-        <article id="dashCardRequests" class="mi-dashboard-quota">
-          <p id="dashLabelRequests" class="mi-dashboard-quota__label"></p>
+        <article id="dashCardWorker" class="mi-dashboard-quota is-expanded">
+          <p id="dashLabelWorker" class="mi-dashboard-quota__label"></p>
           <div class="mi-dashboard-quota__body">
-            <div class="mi-dashboard-donut">
-              <svg viewBox="0 0 64 64" aria-hidden="true">
-                <circle class="mi-dashboard-donut__track" cx="32" cy="32" r="24"></circle>
-                <circle id="dashRingRequests" class="mi-dashboard-donut__ring" cx="32" cy="32" r="24" pathLength="100"></circle>
-              </svg>
-              <span id="dashPctRequests" class="mi-dashboard-donut__pct">0%</span>
-            </div>
-            <div class="mi-dashboard-quota__meta">
-              <p class="mi-dashboard-quota__line"><span id="dashUsedRequests">--</span> <small id="dashUsedTextRequests"></small></p>
-              <p class="mi-dashboard-quota__line"><span id="dashTotalRequests">--</span> <small id="dashTotalTextRequests"></small></p>
-            </div>
+            <div id="dashWorkerMiniDonuts" class="mi-worker-mini-donuts mi-d1-mini-donuts"></div>
           </div>
-        </article>
-
-        <article id="dashCardWorkers" class="mi-dashboard-quota">
-          <p id="dashLabelWorkers" class="mi-dashboard-quota__label"></p>
-          <div class="mi-dashboard-quota__body">
-            <div class="mi-dashboard-donut">
-              <svg viewBox="0 0 64 64" aria-hidden="true">
-                <circle class="mi-dashboard-donut__track" cx="32" cy="32" r="24"></circle>
-                <circle id="dashRingWorkers" class="mi-dashboard-donut__ring" cx="32" cy="32" r="24" pathLength="100"></circle>
-              </svg>
-              <span id="dashPctWorkers" class="mi-dashboard-donut__pct">0%</span>
-            </div>
-            <div class="mi-dashboard-quota__meta">
-              <p class="mi-dashboard-quota__line"><span id="dashUsedWorkers">--</span> <small id="dashUsedTextWorkers"></small></p>
-              <p class="mi-dashboard-quota__line"><span id="dashTotalWorkers">--</span> <small id="dashTotalTextWorkers"></small></p>
-            </div>
-          </div>
+          <div id="dashExtraWorker" class="mi-dashboard-quota__extras"></div>
         </article>
 
         <article id="dashCardKv" class="mi-dashboard-quota">
@@ -684,6 +713,25 @@ app.innerHTML = `
             <div id="dashD1MiniDonuts" class="mi-d1-mini-donuts"></div>
           </div>
           <div id="dashExtraD1" class="mi-dashboard-quota__extras"></div>
+        </article>
+
+        <article id="dashCardR2" class="mi-dashboard-quota">
+          <p id="dashLabelR2" class="mi-dashboard-quota__label"></p>
+          <div class="mi-dashboard-quota__body">
+            <div class="mi-dashboard-donut">
+              <svg viewBox="0 0 64 64" aria-hidden="true">
+                <circle class="mi-dashboard-donut__track" cx="32" cy="32" r="24"></circle>
+                <circle id="dashRingR2" class="mi-dashboard-donut__ring" cx="32" cy="32" r="24" pathLength="100"></circle>
+              </svg>
+              <span id="dashPctR2" class="mi-dashboard-donut__pct">0%</span>
+            </div>
+            <div class="mi-dashboard-quota__meta">
+              <p class="mi-dashboard-quota__line"><span id="dashUsedR2">--</span> <small id="dashUsedTextR2"></small></p>
+              <p class="mi-dashboard-quota__line"><span id="dashTotalR2">--</span> <small id="dashTotalTextR2"></small></p>
+            </div>
+            <div id="dashR2MiniDonuts" class="mi-d1-mini-donuts"></div>
+          </div>
+          <div id="dashExtraR2" class="mi-dashboard-quota__extras"></div>
         </article>
 
         <article id="dashCardPages" class="mi-dashboard-quota">
@@ -729,6 +777,10 @@ app.innerHTML = `
           <span id="accountMetaIdLabel"></span>
           <strong id="accountMetaId"></strong>
         </p>
+        <p class="mi-account-meta__line">
+          <span id="accountMetaCredentialsLabel"></span>
+          <strong id="accountMetaCredentials"></strong>
+        </p>
       </div>
 
       <p id="accountTip" class="mi-account-tip"></p>
@@ -764,10 +816,17 @@ app.innerHTML = `
             <input id="verifyPublicBaseUrl" />
           </label>
           <label>
+            <span id="labelDeployImageHosting"></span>
+            <select id="deployImageHostingSelect">
+              <option value="1" id="deployImageHostingOptOn"></option>
+              <option value="0" id="deployImageHostingOptOff"></option>
+            </select>
+          </label>
+          <label class="image-hosting-field">
             <span id="labelImagePublicBaseUrl"></span>
             <input id="imagePublicBaseUrl" />
           </label>
-          <label>
+          <label class="image-hosting-field">
             <span id="labelAutoImageDomain"></span>
             <select id="autoImageDomainSelect">
               <option value="1" id="autoImageDomainOptOn"></option>
@@ -881,7 +940,7 @@ app.innerHTML = `
         <span id="modalEmailLabel"></span>
         <input id="newAccountEmailInput" type="email" autocomplete="off" />
       </label>
-      <label class="mi-modal__checkbox">
+      <label id="modalCloneField" class="mi-modal__checkbox">
         <input id="cloneCurrentInput" type="checkbox" checked />
         <span id="modalCloneLabel"></span>
       </label>
@@ -899,6 +958,7 @@ const saveBtn = mustQuery<HTMLButtonElement>('#saveBtn');
 const clearLogBtn = mustQuery<HTMLButtonElement>('#clearLogBtn');
 const deployBtn = mustQuery<HTMLButtonElement>('#deployBtn');
 const deployPanelSelect = mustQuery<HTMLSelectElement>('#deployPanelSelect');
+const deployImageHostingSelect = mustQuery<HTMLSelectElement>('#deployImageHostingSelect');
 const autoImageDomainSelect = mustQuery<HTMLSelectElement>('#autoImageDomainSelect');
 
 const localeToggleBtn = mustQuery<HTMLButtonElement>('#localeToggleBtn');
@@ -907,15 +967,20 @@ const themeToggleBtn = mustQuery<HTMLButtonElement>('#themeToggleBtn');
 const activeAccountName = mustQuery<HTMLElement>('#activeAccountName');
 const accountMetaEmail = mustQuery<HTMLElement>('#accountMetaEmail');
 const accountMetaId = mustQuery<HTMLElement>('#accountMetaId');
+const accountMetaCredentials = mustQuery<HTMLElement>('#accountMetaCredentials');
 const manageAccountsBtn = mustQuery<HTMLButtonElement>('#manageAccountsBtn');
 const dashboardRefreshBtn = mustQuery<HTMLButtonElement>('#dashboardRefreshBtn');
 const dashboardMeta = mustQuery<HTMLElement>('#dashboardMeta');
 const dashboardWarning = mustQuery<HTMLElement>('#dashboardWarning');
+const dashboardWorkerMiniDonuts = mustQuery<HTMLElement>('#dashWorkerMiniDonuts');
 const dashboardKvMiniDonuts = mustQuery<HTMLElement>('#dashKvMiniDonuts');
 const dashboardD1MiniDonuts = mustQuery<HTMLElement>('#dashD1MiniDonuts');
+const dashboardR2MiniDonuts = mustQuery<HTMLElement>('#dashR2MiniDonuts');
 const dashboardExtraContainers: Partial<Record<DashboardMetricKey, HTMLElement>> = {
+  workerRequests24h: mustQuery<HTMLElement>('#dashExtraWorker'),
   kvNamespaceCount: mustQuery<HTMLElement>('#dashExtraKv'),
   d1DatabaseCount: mustQuery<HTMLElement>('#dashExtraD1'),
+  r2BucketCount: mustQuery<HTMLElement>('#dashExtraR2'),
   pagesProjectCount: mustQuery<HTMLElement>('#dashExtraPages'),
 };
 
@@ -929,6 +994,7 @@ const newAccountTokenInput = mustQuery<HTMLInputElement>('#newAccountTokenInput'
 const newAccountIdInput = mustQuery<HTMLInputElement>('#newAccountIdInput');
 const newAccountEmailInput = mustQuery<HTMLInputElement>('#newAccountEmailInput');
 const cloneCurrentInput = mustQuery<HTMLInputElement>('#cloneCurrentInput');
+const modalCloneField = mustQuery<HTMLLabelElement>('#modalCloneField');
 const cancelAddAccountBtn = mustQuery<HTMLButtonElement>('#cancelAddAccountBtn');
 const confirmAddAccountBtn = mustQuery<HTMLButtonElement>('#confirmAddAccountBtn');
 const floatingNav = mustQuery<HTMLElement>('#floatingNav');
@@ -941,6 +1007,7 @@ let currentLocale: Locale = 'zh';
 let currentTheme: Theme = 'light';
 let accounts: AccountState[] = [];
 let activeAccountId = '';
+let editingAccountId = '';
 let activeViewId: ViewId = 'home';
 let defaultFormState: DeployFormState | null = null;
 let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -950,6 +1017,7 @@ let dashboardRequestSeq = 0;
 let dashboardLoading = false;
 const dashboardCacheByAccountId = new Map<string, DashboardSnapshot>();
 const deploymentResumeByAccountId = new Map<string, { fingerprint: string; state: DeploymentResumeState }>();
+const secureCredentialWritableAccountIds = new Set<string>();
 
 function mustQuery<T extends Element>(selector: string): T {
   const node = document.querySelector<T>(selector);
@@ -1083,6 +1151,9 @@ function normalizeFormState(input: Partial<DeployFormState>, defaults: DeployFor
     autoConfigureImageDomain: typeof input.autoConfigureImageDomain === 'boolean'
       ? input.autoConfigureImageDomain
       : defaults.autoConfigureImageDomain,
+    deployImageHosting: typeof input.deployImageHosting === 'boolean'
+      ? input.deployImageHosting
+      : defaults.deployImageHosting,
     panelUrl: String(input.panelUrl ?? defaults.panelUrl).trim(),
     deployPanel: typeof input.deployPanel === 'boolean' ? input.deployPanel : defaults.deployPanel,
     pagesProjectName: normalizePagesProjectName(pagesProjectRaw) || suggestPagesProjectName(workerName),
@@ -1187,7 +1258,7 @@ async function loadUiState(defaults: DeployFormState): Promise<UiCache> {
   }
 }
 
-async function persistUiState(): Promise<void> {
+async function persistUiState(secureAccountIds: ReadonlySet<string> = new Set()): Promise<void> {
   const payload: UiCache = {
     version: 1,
     locale: currentLocale,
@@ -1200,11 +1271,16 @@ async function persistUiState(): Promise<void> {
   };
   await writeStorage(APP_STATE_KEY, JSON.stringify(payload));
 
-  const secureWrites = accounts.map((account) => saveAccountCredentials(account.id, {
-    cfApiToken: account.form.cfApiToken,
-    botToken: account.form.botToken,
-    adminChatId: account.form.adminChatId,
-  }));
+  const secureWrites = accounts
+    .filter((account) => (
+      secureAccountIds.has(account.id)
+      && secureCredentialWritableAccountIds.has(account.id)
+    ))
+    .map((account) => saveAccountCredentials(account.id, {
+      cfApiToken: account.form.cfApiToken,
+      botToken: account.form.botToken,
+      adminChatId: account.form.adminChatId,
+    }));
   try {
     await Promise.all(secureWrites);
   } catch (error) {
@@ -1220,7 +1296,9 @@ async function restoreSecureAccountCredentials(items: AccountState[]): Promise<v
         ...account.form,
         ...credentials,
       };
+      secureCredentialWritableAccountIds.add(account.id);
     } catch (error) {
+      secureCredentialWritableAccountIds.delete(account.id);
       console.error(`Unable to restore Android secure credentials for account ${account.id}`, error);
     }
   }));
@@ -1276,6 +1354,7 @@ function getFallbackFormState(): DeployFormState {
     verifyPublicBaseUrl: '',
     imagePublicBaseUrl: '',
     autoConfigureImageDomain: true,
+    deployImageHosting: true,
     panelUrl: '',
     deployPanel: true,
     pagesProjectName: 'tg-bot-panel',
@@ -1294,6 +1373,7 @@ function getFormState(): DeployFormState {
   state.cfApiToken = String(active?.form.cfApiToken || '').trim();
   state.cfAccountId = String(active?.form.cfAccountId || '').trim();
   state.deployPanel = String(deployPanelSelect.value) === '1';
+  state.deployImageHosting = String(deployImageHostingSelect.value) === '1';
   state.autoConfigureImageDomain = String(autoImageDomainSelect.value) === '1';
   return normalizeFormState(state, base);
 }
@@ -1305,6 +1385,7 @@ function setFormState(state: DeployFormState): void {
   }
 
   deployPanelSelect.value = safeState.deployPanel ? '1' : '0';
+  deployImageHostingSelect.value = safeState.deployImageHosting ? '1' : '0';
   autoImageDomainSelect.value = safeState.autoConfigureImageDomain ? '1' : '0';
 
   const workerInput = getInput('workerName');
@@ -1321,6 +1402,9 @@ function renderActiveAccountMeta(account: AccountState | null): void {
   const accountId = String(account?.form.cfAccountId || '').trim();
   accountMetaEmail.textContent = normalizeAccountEmail(account?.email) || t('account_meta_empty');
   accountMetaId.textContent = accountId || t('account_meta_empty');
+  accountMetaCredentials.textContent = account?.form.cfApiToken
+    ? t('account_meta_credentials_saved')
+    : t('account_meta_credentials_missing');
 }
 
 function renderAccountManagerList(): void {
@@ -1368,6 +1452,15 @@ function renderAccountManagerList(): void {
     const actions = document.createElement('span');
     actions.className = 'mi-account-manager-item__actions';
 
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'mi-account-manager-item__delete mi-account-manager-item__edit';
+    editBtn.dataset.accountEdit = account.id;
+    editBtn.textContent = '✎';
+    editBtn.title = t('account_manager_edit');
+    editBtn.disabled = busy;
+    editBtn.setAttribute('aria-label', t('account_manager_edit'));
+
     const clearCredentialsBtn = document.createElement('button');
     clearCredentialsBtn.type = 'button';
     clearCredentialsBtn.className = 'mi-account-manager-item__delete mi-account-manager-item__clear';
@@ -1386,7 +1479,7 @@ function renderAccountManagerList(): void {
     deleteBtn.disabled = busy || accounts.length <= 1;
     deleteBtn.setAttribute('aria-label', t('account_manager_delete'));
 
-    actions.append(clearCredentialsBtn, deleteBtn);
+    actions.append(editBtn, clearCredentialsBtn, deleteBtn);
     item.append(switchBtn, actions);
     fragment.append(item);
   }
@@ -1463,6 +1556,7 @@ function getDashboardUsedValue(snapshot: DashboardSnapshot | null, key: Dashboar
   if (key === 'workersScriptCount') return snapshot.workersScriptCount;
   if (key === 'kvNamespaceCount') return snapshot.kvNamespaceCount;
   if (key === 'd1DatabaseCount') return snapshot.d1DatabaseCount;
+  if (key === 'r2BucketCount') return snapshot.r2BucketCount;
   return snapshot.pagesProjectCount;
 }
 
@@ -1471,6 +1565,9 @@ function getDashboardUsageValue(snapshot: DashboardSnapshot | null, key: Dashboa
   if (key === 'kvReadRequests24h') return snapshot.kvReadRequests24h;
   if (key === 'kvWriteRequests24h') return snapshot.kvWriteRequests24h;
   if (key === 'kvStorageBytes') return snapshot.kvStorageBytes;
+  if (key === 'r2StorageBytes') return snapshot.r2StorageBytes;
+  if (key === 'r2ClassAOperations30d') return snapshot.r2ClassAOperations30d;
+  if (key === 'r2ClassBOperations30d') return snapshot.r2ClassBOperations30d;
   if (key === 'd1StorageBytes' || key === 'd1ReadRequests24h' || key === 'd1WriteRequests24h') {
     const databases = Array.isArray(snapshot.d1DatabasesUsage) ? snapshot.d1DatabasesUsage : [];
 
@@ -1719,6 +1816,181 @@ function renderKvTopMiniDonuts(snapshot: DashboardSnapshot | null): void {
   dashboardKvMiniDonuts.append(fragment);
 }
 
+function renderWorkerTopMiniDonuts(snapshot: DashboardSnapshot | null): void {
+  dashboardWorkerMiniDonuts.innerHTML = '';
+  const fragment = document.createDocumentFragment();
+
+  appendD1MiniDonut(fragment, {
+    labelKey: 'dash_worker_requests',
+    used: getDashboardUsedValue(snapshot, 'workerRequests24h'),
+    total: DASHBOARD_FREE_TOTALS.workerRequests24h,
+    className: 'is-worker-requests',
+    format: 'number',
+  });
+  appendD1MiniDonut(fragment, {
+    labelKey: 'dash_workers_total',
+    used: getDashboardUsedValue(snapshot, 'workersScriptCount'),
+    total: DASHBOARD_FREE_TOTALS.workersScriptCount,
+    className: 'is-worker-scripts',
+    format: 'number',
+  });
+
+  dashboardWorkerMiniDonuts.append(fragment);
+}
+
+function renderR2TopMiniDonuts(snapshot: DashboardSnapshot | null): void {
+  dashboardR2MiniDonuts.innerHTML = '';
+  const fragment = document.createDocumentFragment();
+
+  appendD1MiniDonut(fragment, {
+    labelKey: 'dash_r2_mini_buckets',
+    used: getDashboardUsedValue(snapshot, 'r2BucketCount'),
+    total: DASHBOARD_FREE_TOTALS.r2BucketCount,
+    className: 'is-r2-buckets',
+    format: 'number',
+  });
+  appendD1MiniDonut(fragment, {
+    labelKey: 'dash_r2_mini_storage',
+    used: getDashboardUsageValue(snapshot, 'r2StorageBytes'),
+    total: R2_STORAGE_FREE_BYTES,
+    className: 'is-r2-storage',
+    format: 'bytes',
+  });
+  appendD1MiniDonut(fragment, {
+    labelKey: 'dash_r2_mini_class_a',
+    used: getDashboardUsageValue(snapshot, 'r2ClassAOperations30d'),
+    total: R2_CLASS_A_FREE_30D,
+    className: 'is-r2-class-a',
+    format: 'number',
+  });
+  appendD1MiniDonut(fragment, {
+    labelKey: 'dash_r2_mini_class_b',
+    used: getDashboardUsageValue(snapshot, 'r2ClassBOperations30d'),
+    total: R2_CLASS_B_FREE_30D,
+    className: 'is-r2-class-b',
+    format: 'number',
+  });
+
+  dashboardR2MiniDonuts.append(fragment);
+}
+
+function appendDashboardInfoLine(
+  container: DocumentFragment | HTMLElement,
+  labelKey: string,
+  valueText: string,
+  modifier = '',
+): void {
+  const line = document.createElement('p');
+  line.className = `mi-dashboard-quota__extra-line${modifier ? ` ${modifier}` : ''}`;
+
+  const label = document.createElement('span');
+  label.textContent = t(labelKey);
+
+  const value = document.createElement('b');
+  value.textContent = valueText || t('not_set');
+
+  line.append(label, value);
+  container.append(line);
+}
+
+function renderWorkerDashboardExtras(snapshot: DashboardSnapshot | null): number {
+  const container = dashboardExtraContainers.workerRequests24h;
+  if (!container) return 0;
+
+  const progressGroup = document.createElement('div');
+  progressGroup.className = 'mi-dashboard-progress-group';
+  appendDashboardProgressLine(progressGroup, {
+    labelKey: 'dash_worker_requests',
+    used: getDashboardUsedValue(snapshot, 'workerRequests24h'),
+    total: DASHBOARD_FREE_TOTALS.workerRequests24h,
+    format: 'number',
+    className: 'is-worker-requests',
+  });
+  appendDashboardProgressLine(progressGroup, {
+    labelKey: 'dash_workers_total',
+    used: getDashboardUsedValue(snapshot, 'workersScriptCount'),
+    total: DASHBOARD_FREE_TOTALS.workersScriptCount,
+    format: 'number',
+    className: 'is-worker-scripts',
+  });
+  container.append(progressGroup);
+  appendDashboardInfoLine(container, 'dash_worker_current', snapshot?.workerName || '');
+  return 3;
+}
+
+function renderPagesDashboardExtras(snapshot: DashboardSnapshot | null): number {
+  const container = dashboardExtraContainers.pagesProjectCount;
+  if (!container) return 0;
+  appendDashboardInfoLine(container, 'dash_pages_project', snapshot?.pagesProjectName || '');
+  appendDashboardInfoLine(container, 'dash_pages_branch', snapshot?.pagesBranch || '');
+  appendDashboardInfoLine(container, 'dash_pages_panel', snapshot?.pagesPanelUrl || '');
+  return 3;
+}
+
+function renderR2DashboardExtras(snapshot: DashboardSnapshot | null): number {
+  const container = dashboardExtraContainers.r2BucketCount;
+  if (!container) return 0;
+
+  const progressGroup = document.createElement('div');
+  progressGroup.className = 'mi-dashboard-progress-group';
+  appendDashboardProgressLine(progressGroup, {
+    labelKey: 'dash_r2_quota_storage',
+    used: getDashboardUsageValue(snapshot, 'r2StorageBytes'),
+    total: R2_STORAGE_FREE_BYTES,
+    format: 'bytes',
+    className: 'is-r2-storage',
+  });
+  appendDashboardProgressLine(progressGroup, {
+    labelKey: 'dash_r2_quota_class_a',
+    used: getDashboardUsageValue(snapshot, 'r2ClassAOperations30d'),
+    total: R2_CLASS_A_FREE_30D,
+    format: 'number',
+    className: 'is-r2-class-a',
+  });
+  appendDashboardProgressLine(progressGroup, {
+    labelKey: 'dash_r2_quota_class_b',
+    used: getDashboardUsageValue(snapshot, 'r2ClassBOperations30d'),
+    total: R2_CLASS_B_FREE_30D,
+    format: 'number',
+    className: 'is-r2-class-b',
+  });
+  container.append(progressGroup);
+
+  let lineCount = 3;
+  appendDashboardInfoLine(container, 'dash_r2_current', snapshot?.r2ConfiguredBucketName || '');
+  lineCount += 1;
+
+  const buckets = Array.isArray(snapshot?.r2BucketMetrics) ? snapshot.r2BucketMetrics : [];
+  const top = buckets.slice(0, 3);
+  for (const bucket of top) {
+    const objects = bucket.objectCount === null ? t('dash_na') : formatDashboardNumber(bucket.objectCount);
+    const size = formatDashboardBytes(bucket.payloadBytes);
+    const line = document.createElement('p');
+    line.className = 'mi-dashboard-quota__extra-line mi-dashboard-quota__extra-line--db';
+
+    const label = document.createElement('span');
+    label.textContent = bucket.name;
+
+    const value = document.createElement('b');
+    value.textContent = tf('dash_r2_bucket_usage', { objects, size });
+
+    line.append(label, value);
+    container.append(line);
+    lineCount += 1;
+  }
+
+  if (buckets.length > top.length) {
+    const line = document.createElement('p');
+    line.className = 'mi-dashboard-quota__extra-line mi-dashboard-quota__extra-line--hint';
+    const label = document.createElement('span');
+    label.textContent = tf('dash_r2_more', { count: buckets.length - top.length });
+    line.append(label);
+    container.append(line);
+    lineCount += 1;
+  }
+
+  return lineCount;
+}
 function renderKvDashboardExtras(snapshot: DashboardSnapshot | null): number {
   const container = dashboardExtraContainers.kvNamespaceCount;
   if (!container) return 0;
@@ -1821,9 +2093,8 @@ function renderD1DashboardExtras(snapshot: DashboardSnapshot | null): number {
 }
 
 function applyDashboardGridBalancing(): void {
-  const cards = DASHBOARD_BINDINGS
-    .map((binding) => document.getElementById(binding.cardId))
-    .filter((card): card is HTMLElement => Boolean(card));
+  const cards = Array.from(document.querySelectorAll<HTMLElement>('.mi-dashboard-quota'))
+    .filter((card) => !card.hidden);
 
   for (const card of cards) {
     card.classList.remove('is-orphan-wide');
@@ -1839,9 +2110,7 @@ function applyDashboardGridBalancing(): void {
 }
 
 function renderDashboardCardExtras(snapshot: DashboardSnapshot | null): void {
-  for (const binding of DASHBOARD_BINDINGS) {
-    const card = document.getElementById(binding.cardId);
-    if (!card) continue;
+  for (const card of Array.from(document.querySelectorAll<HTMLElement>('.mi-dashboard-quota'))) {
     card.classList.remove('is-expanded', 'is-dense');
   }
 
@@ -1851,8 +2120,10 @@ function renderDashboardCardExtras(snapshot: DashboardSnapshot | null): void {
     container.innerHTML = '';
   }
 
+  renderWorkerTopMiniDonuts(snapshot);
   renderKvTopMiniDonuts(snapshot);
   renderD1TopMiniDonuts(snapshot);
+  renderR2TopMiniDonuts(snapshot);
 
   const grouped = new Map<DashboardMetricKey, DashboardLimitRowDefinition[]>();
   for (const row of DASHBOARD_LIMIT_ROWS) {
@@ -1897,6 +2168,27 @@ function renderDashboardCardExtras(snapshot: DashboardSnapshot | null): void {
     }
 
     container.append(fragment);
+  }
+
+  const workerLineCount = renderWorkerDashboardExtras(snapshot);
+  const workerCard = document.getElementById('dashCardWorker');
+  if (workerCard) {
+    workerCard.classList.add('is-expanded');
+    workerCard.classList.toggle('is-dense', workerLineCount >= 4);
+  }
+
+  const pagesLineCount = renderPagesDashboardExtras(snapshot);
+  const pagesCard = document.getElementById('dashCardPages');
+  if (pagesCard) {
+    pagesCard.classList.toggle('is-expanded', pagesLineCount >= 3);
+    pagesCard.classList.toggle('is-dense', pagesLineCount >= 4);
+  }
+
+  const r2LineCount = renderR2DashboardExtras(snapshot);
+  const r2Card = document.getElementById('dashCardR2');
+  if (r2Card) {
+    r2Card.classList.add('is-expanded');
+    r2Card.classList.toggle('is-dense', r2LineCount >= 5);
   }
 
   const kvLineCount = renderKvDashboardExtras(snapshot);
@@ -1962,6 +2254,12 @@ function setDashboardLoadingState(isLoading: boolean): void {
 }
 
 function renderDashboard(snapshot: DashboardSnapshot | null, externalWarning = '', missingConfig = false): void {
+  const active = getActiveAccount();
+  const configuredR2Enabled = active?.form.deployImageHosting !== false;
+  const r2Visible = snapshot ? snapshot.r2Enabled !== false : configuredR2Enabled;
+  const r2Card = document.getElementById('dashCardR2');
+  if (r2Card) r2Card.hidden = !r2Visible;
+
   for (const binding of DASHBOARD_BINDINGS) {
     const used = getDashboardUsedValue(snapshot, binding.key);
     const total = DASHBOARD_FREE_TOTALS[binding.key] ?? null;
@@ -2118,8 +2416,8 @@ function bindFloatingNav(): void {
       if (!nextView) return;
       if (nextView === activeViewId) return;
       void (async () => {
-        window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
         setActiveView(nextView);
+        window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
         if (nextView === 'home') {
           await refreshDashboard(false);
         }
@@ -2180,9 +2478,10 @@ function applyLocale(): void {
   closeAccountManagerBtn.setAttribute('title', t('account_manager_close'));
   setText('accountMetaEmailLabel', 'account_meta_email_label');
   setText('accountMetaIdLabel', 'account_meta_id_label');
+  setText('accountMetaCredentialsLabel', 'account_meta_credentials_label');
   setText('accountTip', 'account_tip');
 
-  setText('modalTitle', 'modal_title');
+  setText('modalTitle', editingAccountId ? 'modal_edit_title' : 'modal_title');
   setText('modalDesc', 'modal_desc');
   setText('modalNameLabel', 'modal_name_label');
   setText('modalTokenLabel', 'modal_token_label');
@@ -2205,6 +2504,9 @@ function applyLocale(): void {
   setText('labelBotToken', 'label_bot_token');
   setText('labelAdminChatId', 'label_admin_chat');
   setText('labelVerifyPublicBaseUrl', 'label_verify_url');
+  setText('labelDeployImageHosting', 'label_deploy_image_hosting');
+  setText('deployImageHostingOptOn', 'deploy_image_hosting_on');
+  setText('deployImageHostingOptOff', 'deploy_image_hosting_off');
   setText('labelImagePublicBaseUrl', 'label_image_url');
   setText('labelAutoImageDomain', 'auto_image_domain');
   setText('autoImageDomainOptOn', 'auto_image_domain_on');
@@ -2223,19 +2525,17 @@ function applyLocale(): void {
   setText('logsTitle', 'logs_title');
   setText('dashboardTitle', 'dash_title');
   setText('dashboardDesc', 'dash_desc');
-  setText('dashLabelRequests', 'dash_worker_requests');
-  setText('dashLabelWorkers', 'dash_workers_total');
+  setText('dashLabelWorker', 'dash_worker_resources');
   setText('dashLabelKv', 'dash_kv_total');
   setText('dashLabelD1', 'dash_d1_total');
+  setText('dashLabelR2', 'dash_r2_total');
   setText('dashLabelPages', 'dash_pages_total');
-  setText('dashUsedTextRequests', 'dash_used');
-  setText('dashTotalTextRequests', 'dash_total');
-  setText('dashUsedTextWorkers', 'dash_used');
-  setText('dashTotalTextWorkers', 'dash_total');
   setText('dashUsedTextKv', 'dash_used');
   setText('dashTotalTextKv', 'dash_total');
   setText('dashUsedTextD1', 'dash_used');
   setText('dashTotalTextD1', 'dash_total');
+  setText('dashUsedTextR2', 'dash_used');
+  setText('dashTotalTextR2', 'dash_total');
   setText('dashUsedTextPages', 'dash_used');
   setText('dashTotalTextPages', 'dash_total');
   setNavIconAndLabel('navHome', NAV_HOME_ICON, 'nav_home');
@@ -2255,7 +2555,7 @@ function applyLocale(): void {
   setPlaceholder('pagesProjectName', 'ph_pages_project');
   setPlaceholder('pagesBranch', 'ph_pages_branch');
   setPlaceholder('newAccountNameInput', 'modal_name_ph');
-  setPlaceholder('newAccountTokenInput', 'modal_token_ph');
+  setPlaceholder('newAccountTokenInput', editingAccountId ? 'modal_token_edit_ph' : 'modal_token_ph');
   setPlaceholder('newAccountIdInput', 'modal_account_ph');
   setPlaceholder('newAccountEmailInput', 'modal_email_ph');
 
@@ -2271,9 +2571,15 @@ function applyLocale(): void {
 }
 
 function refreshPagesFieldsState(): void {
-  const disabled = String(deployPanelSelect.value) !== '1';
-  getInput('pagesProjectName').disabled = disabled || busy;
-  getInput('pagesBranch').disabled = disabled || busy;
+  const pagesDisabled = String(deployPanelSelect.value) !== '1';
+  const imageDisabled = String(deployImageHostingSelect.value) !== '1';
+  getInput('pagesProjectName').disabled = pagesDisabled || busy;
+  getInput('pagesBranch').disabled = pagesDisabled || busy;
+  getInput('imagePublicBaseUrl').disabled = imageDisabled || busy;
+  autoImageDomainSelect.disabled = imageDisabled || busy;
+  for (const field of Array.from(document.querySelectorAll<HTMLElement>('.image-hosting-field'))) {
+    field.classList.toggle('is-disabled', imageDisabled);
+  }
 }
 
 function setBusy(nextBusy: boolean): void {
@@ -2284,6 +2590,7 @@ function setBusy(nextBusy: boolean): void {
   }
 
   deployPanelSelect.disabled = nextBusy;
+  deployImageHostingSelect.disabled = nextBusy;
   autoImageDomainSelect.disabled = nextBusy;
   saveBtn.disabled = nextBusy;
   deployBtn.disabled = nextBusy;
@@ -2310,7 +2617,7 @@ async function saveCurrentForm(showLog = true): Promise<void> {
   active.name = normalizeAccountName(active.name, fallbackAccountName(activeIndex + 1, currentLocale));
 
   renderAccountOptions();
-  await persistUiState();
+  await persistUiState(new Set([active.id]));
 
   if (showLog) {
     appendLog(t('log_saved'));
@@ -2389,54 +2696,101 @@ function syncAccountModalFromActive(force = false): void {
   }
 }
 
-function openAccountModal(): void {
+function openAccountModal(accountId = ''): void {
   clearAccountModalInputs();
+  editingAccountId = String(accountId || '').trim();
+  const target = editingAccountId
+    ? accounts.find((account) => account.id === editingAccountId) || null
+    : null;
+
   cloneCurrentInput.checked = false;
+  modalCloneField.hidden = Boolean(target);
+  if (target) {
+    newAccountNameInput.value = target.name;
+    newAccountIdInput.value = target.form.cfAccountId;
+    newAccountEmailInput.value = normalizeAccountEmail(target.email);
+  }
+
+  setText('modalTitle', target ? 'modal_edit_title' : 'modal_title');
+  setPlaceholder('newAccountTokenInput', target ? 'modal_token_edit_ph' : 'modal_token_ph');
   closeAccountManagerModal();
   accountModal.classList.remove('hidden');
   accountModal.setAttribute('aria-hidden', 'false');
-  setTimeout(() => newAccountNameInput.focus(), 0);
+  setTimeout(() => (target ? newAccountTokenInput : newAccountNameInput).focus(), 0);
 }
 
 function closeAccountModal(): void {
   accountModal.classList.add('hidden');
   accountModal.setAttribute('aria-hidden', 'true');
+  editingAccountId = '';
+  modalCloneField.hidden = false;
   clearAccountModalInputs();
+  setText('modalTitle', 'modal_title');
+  setPlaceholder('newAccountTokenInput', 'modal_token_ph');
 }
 
-async function addAccount(): Promise<void> {
+async function submitAccountModal(): Promise<void> {
   const rawName = newAccountNameInput.value.trim();
   const rawToken = newAccountTokenInput.value.trim();
   const rawAccountId = newAccountIdInput.value.trim();
   const rawEmail = newAccountEmailInput.value.trim();
+  const editing = editingAccountId
+    ? accounts.find((account) => account.id === editingAccountId) || null
+    : null;
+  const effectiveToken = rawToken || editing?.form.cfApiToken || '';
+
   if (!rawName) {
     alert(t('alert_add_name'));
     return;
   }
-  if (!rawToken || !rawAccountId) {
+  if (!effectiveToken || !rawAccountId) {
     alert(t('alert_add_required'));
     return;
   }
 
   const baseDefaults = defaultFormState || getFallbackFormState();
-  const baseForm = cloneCurrentInput.checked ? getFormState() : baseDefaults;
-  const nextForm = normalizeFormState(
-    {
-      ...baseForm,
-      cfApiToken: rawToken,
+  if (editing) {
+    const currentForm = editing.id === activeAccountId ? getFormState() : editing.form;
+    editing.name = normalizeAccountName(rawName, editing.name);
+    editing.email = normalizeAccountEmail(rawEmail);
+    editing.form = normalizeFormState({
+      ...currentForm,
+      cfApiToken: effectiveToken,
       cfAccountId: rawAccountId,
-    },
-    baseDefaults,
-  );
+    }, baseDefaults);
+    editing.updatedAt = Date.now();
+    secureCredentialWritableAccountIds.add(editing.id);
+
+    if (editing.id === activeAccountId) {
+      setFormState(editing.form);
+      refreshPagesFieldsState();
+    }
+    await persistUiState(new Set([editing.id]));
+    renderAccountOptions();
+    closeAccountModal();
+    appendLog(tf('log_account_updated', { name: editing.name }));
+    if (editing.id === activeAccountId && activeViewId === 'home') {
+      void refreshDashboard(true);
+    }
+    return;
+  }
+
+  const baseForm = cloneCurrentInput.checked ? getFormState() : baseDefaults;
+  const nextForm = normalizeFormState({
+    ...baseForm,
+    cfApiToken: effectiveToken,
+    cfAccountId: rawAccountId,
+  }, baseDefaults);
   const next = createAccount(rawName, nextForm, rawEmail);
   accounts.push(next);
   activeAccountId = next.id;
+  secureCredentialWritableAccountIds.add(next.id);
 
   setFormState(next.form);
   renderAccountOptions();
   refreshPagesFieldsState();
 
-  await persistUiState();
+  await persistUiState(new Set([next.id]));
   closeAccountModal();
   appendLog(tf('log_account_created', { name: next.name }));
   if (activeViewId === 'home') {
@@ -2457,6 +2811,7 @@ async function deleteAccountById(accountId: string): Promise<void> {
   const wasActive = target.id === activeAccountId;
 
   deploymentResumeByAccountId.delete(target.id);
+  secureCredentialWritableAccountIds.delete(target.id);
   accounts = accounts.filter((item) => item.id !== target.id);
   if (accounts.length === 0) return;
 
@@ -2490,6 +2845,7 @@ async function clearCredentialsById(accountId: string): Promise<void> {
   cancelAutoSave();
   try {
     await removeAccountCredentials(target.id);
+    secureCredentialWritableAccountIds.add(target.id);
   } catch (error) {
     console.error(`Unable to clear Android secure credentials for account ${target.id}`, error);
     alert(t('alert_clear_credentials_failed'));
@@ -2582,10 +2938,12 @@ async function onDeploy(): Promise<void> {
     appendLog(`${t('log_pages_project')}: ${result.pagesProjectName || t('not_set')}`);
     appendLog(`${t('log_kv_id')}: ${result.kvNamespaceId}`);
     appendLog(`${t('log_d1_id')}: ${result.d1DatabaseId}`);
-    appendLog(`${t('log_r2_bucket')}: ${result.imageBucketName}`);
-    appendLog(`${t('log_image_url')}: ${result.imagePublicBaseUrl || `${result.workerUrl}/media`}`);
-    if (result.imagePublicBaseUrl) {
-      appendLog(`${t('log_image_domain_status')}: ${result.imageDomainActive ? 'active' : result.imageDomainStatus}`);
+    if (form.deployImageHosting !== false) {
+      appendLog(`${t('log_r2_bucket')}: ${result.imageBucketName}`);
+      appendLog(`${t('log_image_url')}: ${result.imagePublicBaseUrl || `${result.workerUrl}/media`}`);
+      if (result.imagePublicBaseUrl) {
+        appendLog(`${t('log_image_domain_status')}: ${result.imageDomainActive ? 'active' : result.imageDomainStatus}`);
+      }
     }
 
     if (!result.bootstrapOk) {
@@ -2703,6 +3061,13 @@ deployPanelSelect.addEventListener('change', () => {
   queueAutoSave();
 });
 
+deployImageHostingSelect.addEventListener('change', () => {
+  refreshPagesFieldsState();
+  markDashboardStaleForActiveAccount();
+  renderDashboard(dashboardCacheByAccountId.get(activeAccountId) || null);
+  queueAutoSave();
+});
+
 autoImageDomainSelect.addEventListener('change', () => {
   queueAutoSave();
 });
@@ -2739,7 +3104,7 @@ cancelAddAccountBtn.addEventListener('click', () => {
 
 confirmAddAccountBtn.addEventListener('click', () => {
   if (busy) return;
-  void addAccount();
+  void submitAccountModal();
 });
 
 cloneCurrentInput.addEventListener('change', () => {
@@ -2750,6 +3115,7 @@ accountManagerList.addEventListener('click', (event) => {
   const target = event.target as HTMLElement | null;
   if (!target) return;
   const switchBtn = target.closest<HTMLButtonElement>('button[data-account-switch]');
+  const editBtn = target.closest<HTMLButtonElement>('button[data-account-edit]');
   const clearCredentialsBtn = target.closest<HTMLButtonElement>('button[data-account-clear-credentials]');
   const deleteBtn = target.closest<HTMLButtonElement>('button[data-account-delete]');
 
@@ -2759,6 +3125,12 @@ accountManagerList.addEventListener('click', (event) => {
     void queueSwitchAccount(id).then(() => {
       renderAccountManagerList();
     });
+    return;
+  }
+
+  if (editBtn?.dataset.accountEdit) {
+    if (busy) return;
+    openAccountModal(editBtn.dataset.accountEdit);
     return;
   }
 

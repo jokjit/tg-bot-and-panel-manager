@@ -12,11 +12,12 @@ test('Telegram command catalog exposes a minimal user menu and unique admin comm
   assert.equal(new Set(catalog.admin.map((item) => item.command)).size, catalog.admin.length);
 });
 
-test('Telegram command sync applies scopes, excludes overlaps, and isolates scope failures', async () => {
+test('Telegram command sync scopes admin commands to private chats and clears legacy group menus', async () => {
   const calls = [];
   const result = await syncTelegramCommandMenu({
     env: {},
-    adminChatIds: [-100, -100],
+    adminChatIds: [-100, 7, 7],
+    legacyGroupChatIds: [-100, -100],
     adminUserIds: [-100, 7, 8, 8],
     send: async (env, method, payload) => {
       calls.push({ method, payload });
@@ -24,13 +25,19 @@ test('Telegram command sync applies scopes, excludes overlaps, and isolates scop
       return { ok: true };
     },
   });
-  assert.deepEqual(result.adminCommandChats, [-100]);
-  assert.deepEqual(result.adminCommandTargets, [7, 8]);
-  assert.equal(result.appliedCount, 4);
+  assert.deepEqual(result.adminCommandChats, [7]);
+  assert.deepEqual(result.adminCommandTargets, [8]);
+  assert.deepEqual(result.clearedGroupScopes, [-100]);
+  assert.equal(result.appliedCount, 3);
   assert.deepEqual(result.failedScopes, [{ scope: 'admin_private', userId: 8, error: 'chat unavailable' }]);
   assert.equal(calls[0].payload.scope.type, 'default');
   assert.equal(calls[1].method, 'setChatMenuButton');
-  assert.equal(calls.filter((call) => call.method === 'setMyCommands').length, 4);
+  assert.deepEqual(calls[2], {
+    method: 'deleteMyCommands',
+    payload: { scope: { type: 'chat', chat_id: -100 } },
+  });
+  assert.equal(calls.filter((call) => call.method === 'setMyCommands').length, 3);
+  assert.equal(calls.some((call) => call.method === 'setMyCommands' && call.payload.scope.chat_id === -100), false);
 });
 
 test('Telegram command sync reports when no admin scope is available', async () => {
