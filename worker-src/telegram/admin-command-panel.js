@@ -10,7 +10,7 @@ const MENUS = Object.freeze({
   'blacklist-actions': { title: '🚫 黑名单操作', description: '加入或解除黑名单均需要指定用户 ID，或在用户话题中操作。', buttons: [[['⛔ 加入黑名单', 'guide:ban'], ['✅ 解除黑名单', 'guide:unban']]], back: 'moderation' },
   'trust-actions': { title: '⭐ 信任用户操作', description: '设为信任或移出信任用户均需要指定用户 ID，或在用户话题中操作。', buttons: [[['⭐ 设为信任', 'guide:trust'], ['↩️ 移出信任', 'guide:untrust']]], back: 'moderation' },
   'admin-system': { title: '👮 管理员与系统', description: '管理管理员权限、欢迎内容、数据维护和命令菜单。', buttons: [[['👮 管理员列表', 'command:admins'], ['➕ 管理员权限', 'menu:admin-access']], [['👋 欢迎内容', 'menu:welcome'], ['⚙️ 数据维护', 'menu:maintenance']], [['🔄 同步命令菜单', 'command:commands']]], back: 'home' },
-  'admin-access': { title: '👮 管理员权限', description: '管理员列表可直接查看；授权和移除仅根管理员可执行。', buttons: [[['👮 查看管理员', 'command:admins'], ['➕ 授权管理员', 'guide:adminadd']], [['➖ 移除管理员', 'guide:admindel']]], back: 'admin-system' },
+  'admin-access': { title: '👮 管理员权限', description: '管理员列表可直接查看；根管理员或配置管理群的群主可授权和移除。', buttons: [[['👮 查看管理员', 'command:admins'], ['➕ 授权管理员', 'guide:adminadd']], [['➖ 移除管理员', 'guide:admindel']]], back: 'admin-system' },
   welcome: { title: '👋 欢迎内容', description: '开启后，下一条消息会被保存为欢迎内容；支持文字和多种媒体。', buttons: [[['✏️ 设置欢迎内容', 'command:setwelcome'], ['🚫 取消设置', 'command:cancelwelcome']]], back: 'admin-system' },
   maintenance: { title: '⚙️ 数据维护', description: '清理和巡检会删除数据，需二次确认；也可查看自定义参数格式。', buttons: [[['🧹 清理历史数据', 'confirm:cleanup'], ['🧽 巡检已注销账户', 'confirm:sweepdeleted']], [['📖 参数说明', 'guide:maintenance-options']]], back: 'admin-system' },
 });
@@ -37,8 +37,8 @@ const GUIDES = Object.freeze({
   trust: ['⭐ 设为信任用户', ['请发送：/trust 用户ID 备注', '在用户话题或回复用户消息的上下文中，可发送：/trust 备注'], 'trust-actions'],
   untrust: ['↩️ 移出信任用户', ['请发送：/untrust 用户ID', '在用户话题或回复用户消息的上下文中，可直接发送：/untrust'], 'trust-actions'],
   deleteuser: ['🗑️ 彻底删除用户', ['请发送：/deleteuser 用户ID', '在用户话题或回复用户消息的上下文中，可直接发送：/deleteuser', '该命令会删除用户资料、验证状态、会话与历史消息，无法恢复。'], 'moderation'],
-  adminadd: ['➕ 授权管理员', ['仅根管理员可执行。', '请发送：/adminadd 用户ID 备注'], 'admin-access'],
-  admindel: ['➖ 移除管理员', ['仅根管理员可执行。', '请发送：/admindel 用户ID'], 'admin-access'],
+  adminadd: ['➕ 授权管理员', ['根管理员或配置管理群的群主可执行。', '请发送：/adminadd 用户ID 备注'], 'admin-access'],
+  admindel: ['➖ 移除管理员', ['根管理员或配置管理群的群主可执行。', '请发送：/admindel 用户ID'], 'admin-access'],
   'cancel-upload': ['🚫 取消图床上传', ['在图片接收状态下发送：/cancel', '取消仅影响当前管理员、当前聊天和当前话题。'], 'media'],
   'maintenance-options': ['⚙️ 维护命令参数', ['/cleanup：按默认保留策略清理历史数据。', '/cleanup 天数：自定义保留天数，例如 /cleanup 30。', '/sweepdeleted：巡检并清理已注销账户。', '/sweepdeleted 数量：自定义单批巡检数量，例如 /sweepdeleted 100。'], 'maintenance'],
 });

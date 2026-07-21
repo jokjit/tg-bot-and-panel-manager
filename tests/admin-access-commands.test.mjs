@@ -18,11 +18,11 @@ function createHandlers(overrides = {}) {
   };
 }
 
-test('admin access commands require root permission for grants and removals', async () => {
+test('admin access commands require root or configured group-owner permission for grants and removals', async () => {
   const { calls, handlers } = createHandlers();
   assert.equal(await handleAdminAccessCommand({ trimmed: '/adminadd 7 helper', rootAdmin: false }, handlers), true);
   assert.equal(calls.length, 1);
-  assert.match(calls[0][1], /只有根管理员/);
+  assert.match(calls[0][1], /根管理员或配置管理群的群主/);
   assert.equal(await handleAdminAccessCommand({ trimmed: '/admindel 7', rootAdmin: false }, handlers), true);
   assert.equal(calls.some((call) => call[0] === 'set' || call[0] === 'delete'), false);
 });

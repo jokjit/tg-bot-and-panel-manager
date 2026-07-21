@@ -4,7 +4,7 @@ export async function handleAdminAccessCommand(context = {}, handlers = {}) {
   const addMatch = trimmed.match(/^\/(?:adminadd|grantadmin|authadmin)\s+(\-?\d+)(?:\s+([\s\S]+))?$/i);
   if (addMatch) {
     if (!rootAdmin) {
-      await handlers.sendNotice('只有根管理员才可以授权新的管理员。');
+      await handlers.sendNotice('只有根管理员或配置管理群的群主才可以授权新的管理员。');
       return true;
     }
     const userId = Number(addMatch[1]);
@@ -21,7 +21,7 @@ export async function handleAdminAccessCommand(context = {}, handlers = {}) {
   const removeMatch = trimmed.match(/^\/(?:admindel|revokeadmin|deauthadmin)\s+(\-?\d+)\s*$/i);
   if (removeMatch) {
     if (!rootAdmin) {
-      await handlers.sendNotice('只有根管理员才可以移除管理员授权。');
+      await handlers.sendNotice('只有根管理员或配置管理群的群主才可以移除管理员授权。');
       return true;
     }
     const userId = Number(removeMatch[1]);

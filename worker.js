@@ -1242,7 +1242,14 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
   }
 
   const senderId = message.from?.id ? Number(message.from.id) : null;
-  const rootAdmin = senderId ? isRootAdmin(env, senderId) : false;
+  const adminChatId = toChatId(env.ADMIN_CHAT_ID);
+  const isAdminGroupOwner = Boolean(
+    senderId
+    && message.chat?.type !== 'private'
+    && Number(message.chat?.id) === adminChatId
+    && await isTelegramGroupOwner(env, adminChatId, senderId),
+  );
+  const rootAdmin = Boolean(senderId && isRootAdmin(env, senderId)) || isAdminGroupOwner;
   const pendingScope = getWelcomeSetupScopeKey(message);
 
   const systemHandled = await handleAdminSystemCommand(
@@ -4932,6 +4939,34 @@ async function isTelegramGroupAdmin(env, chatId, userId) {
     const isAdmin = status === 'creator' || status === 'administrator';
     writeTimedCacheValue(groupAdminMembershipCache, cacheKey, isAdmin, GROUP_ADMIN_MEMBER_CACHE_TTL_MS);
     return isAdmin;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function isTelegramGroupOwner(env, chatId, userId) {
+  const numericChatId = Number(chatId);
+  const numericUserId = Number(userId);
+  if (!(Number.isFinite(numericChatId) && numericChatId < 0 && Number.isFinite(numericUserId) && numericUserId > 0)) {
+    return false;
+  }
+
+  const cachedMembers = readTimedCacheValue(groupAdminListCache, String(numericChatId));
+  if (Array.isArray(cachedMembers)) {
+    const member = cachedMembers.find((item) => Number(item?.user?.id) === numericUserId);
+    if (member) {
+      const status = String(member.status || '').toLowerCase();
+      return status === 'creator' || status === 'owner';
+    }
+  }
+
+  try {
+    const member = await telegram(env, 'getChatMember', {
+      chat_id: numericChatId,
+      user_id: numericUserId,
+    });
+    const status = String(member?.status || '').toLowerCase();
+    return status === 'creator' || status === 'owner';
   } catch (error) {
     return false;
   }
