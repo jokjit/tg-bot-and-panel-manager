@@ -45,6 +45,7 @@ npm --prefix electron-app run build
 
 1.Telegram Bot：找 @BotFather 申请一个机器人，获取 Token。
   重要设置：在 BotFather 中关闭 Group Privacy (/mybots > Settings > Group Privacy > Turn off)。
+  
 2.管理员群组：创建一个 Telegram 群组，并开启话题功能 (Topics)。
   将机器人拉入群组，并设为管理员（给予管理话题权限）。
   获取群组 ID（通常以 -100 开头）。 获取 SUPERGROUP_ID 小技巧： 在 Telegram 桌面端右键群内任意消息，复制消息链接；链接里会有一段 -100xxxxxxxxxx 或 xxxxxxxxxx；若只看到纯数字   xxxxxxxxxx，在前面加上 -100，就是完整的 SUPERGROUP_ID（私密频道/群组同理）。
