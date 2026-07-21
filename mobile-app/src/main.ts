@@ -18,7 +18,7 @@ import {
 
 type Locale = 'zh' | 'en';
 type Theme = 'light' | 'dark';
-type TextField = Exclude<keyof DeployFormState, 'deployPanel'>;
+type TextField = Exclude<keyof DeployFormState, 'deployPanel' | 'autoConfigureImageDomain'>;
 type ViewId = 'home' | 'account' | 'deploy' | 'logs';
 
 interface AccountState {
@@ -53,6 +53,7 @@ const formTextFields: TextField[] = [
   'adminChatId',
   'workerUrl',
   'verifyPublicBaseUrl',
+  'imagePublicBaseUrl',
   'panelUrl',
   'pagesProjectName',
   'pagesBranch',
@@ -179,7 +180,7 @@ const i18n: Record<Locale, LocaleDict> = {
   zh: {
     badge: 'MIUIX Style',
     title: 'TG Bot 移动端部署客户端',
-    subtitle: '本地一键部署 Worker、KV、D1、Pages、Secrets 与 Webhook。',
+    subtitle: '本地一键部署 Worker、KV、D1、R2、Pages、Secrets 与 Webhook。',
     chip_cache: '配置自动缓存',
     chip_multi: '多账号隔离配置',
     locale_toggle: 'English',
@@ -297,6 +298,11 @@ const i18n: Record<Locale, LocaleDict> = {
     ph_admin_chat: '管理员用户 ID 或群组 ID',
     label_verify_url: '验证域名（可选）',
     ph_verify_url: '例如 https://verify.example.com',
+    label_image_url: '图床独立域名（可选）',
+    ph_image_url: '例如 https://img.example.com，部署时自动绑定到 R2',
+    auto_image_domain: '自动绑定 R2 域名并创建缓存规则',
+    auto_image_domain_on: '开启（一键配置）',
+    auto_image_domain_off: '关闭（域名已手工配置）',
     label_panel_url: 'Pages 面板地址（只读，/admin 跳转目标）',
     ph_panel_url: '部署后自动读取 Cloudflare 分配的 pages.dev 地址',
 
@@ -340,6 +346,9 @@ const i18n: Record<Locale, LocaleDict> = {
     log_pages_project: 'Pages Project',
     log_kv_id: 'KV Namespace ID',
     log_d1_id: 'D1 Database ID',
+    log_r2_bucket: 'R2 图床 Bucket',
+    log_image_url: '图床公开 URL',
+    log_image_domain_status: '图床域名状态',
     log_bootstrap_warn: '部署引导警告',
     not_set: '未设置',
 
@@ -353,7 +362,7 @@ const i18n: Record<Locale, LocaleDict> = {
   en: {
     badge: 'MIUIX Style',
     title: 'TG Bot Mobile Deploy Client',
-    subtitle: 'One-click local deploy for Worker, KV, D1, Pages, Secrets, and Webhook.',
+    subtitle: 'One-click local deploy for Worker, KV, D1, R2, Pages, Secrets, and Webhook.',
     chip_cache: 'Auto config cache',
     chip_multi: 'Multi-account isolation',
     locale_toggle: '中文',
@@ -471,6 +480,11 @@ const i18n: Record<Locale, LocaleDict> = {
     ph_admin_chat: 'Admin user ID or group ID',
     label_verify_url: 'Verification URL (Optional)',
     ph_verify_url: 'e.g. https://verify.example.com',
+    label_image_url: 'Image Public URL (Optional)',
+    ph_image_url: 'e.g. https://img.example.com, attached to R2 during deploy',
+    auto_image_domain: 'Auto bind R2 domain and create cache rule',
+    auto_image_domain_on: 'On (one-click setup)',
+    auto_image_domain_off: 'Off (already configured manually)',
     label_panel_url: 'Pages panel URL (read-only /admin target)',
     ph_panel_url: 'Auto-detect the Cloudflare-assigned pages.dev URL after deploy',
 
@@ -514,6 +528,9 @@ const i18n: Record<Locale, LocaleDict> = {
     log_pages_project: 'Pages Project',
     log_kv_id: 'KV Namespace ID',
     log_d1_id: 'D1 Database ID',
+    log_r2_bucket: 'R2 Image Bucket',
+    log_image_url: 'Image Public URL',
+    log_image_domain_status: 'Image domain status',
     log_bootstrap_warn: 'Bootstrap warning',
     not_set: 'Not set',
 
@@ -747,6 +764,17 @@ app.innerHTML = `
             <input id="verifyPublicBaseUrl" />
           </label>
           <label>
+            <span id="labelImagePublicBaseUrl"></span>
+            <input id="imagePublicBaseUrl" />
+          </label>
+          <label>
+            <span id="labelAutoImageDomain"></span>
+            <select id="autoImageDomainSelect">
+              <option value="1" id="autoImageDomainOptOn"></option>
+              <option value="0" id="autoImageDomainOptOff"></option>
+            </select>
+          </label>
+          <label>
             <span id="labelPanelUrl"></span>
             <input id="panelUrl" readonly />
           </label>
@@ -871,6 +899,7 @@ const saveBtn = mustQuery<HTMLButtonElement>('#saveBtn');
 const clearLogBtn = mustQuery<HTMLButtonElement>('#clearLogBtn');
 const deployBtn = mustQuery<HTMLButtonElement>('#deployBtn');
 const deployPanelSelect = mustQuery<HTMLSelectElement>('#deployPanelSelect');
+const autoImageDomainSelect = mustQuery<HTMLSelectElement>('#autoImageDomainSelect');
 
 const localeToggleBtn = mustQuery<HTMLButtonElement>('#localeToggleBtn');
 const themeToggleBtn = mustQuery<HTMLButtonElement>('#themeToggleBtn');
@@ -1050,6 +1079,10 @@ function normalizeFormState(input: Partial<DeployFormState>, defaults: DeployFor
     adminChatId: String(input.adminChatId ?? defaults.adminChatId).trim(),
     workerUrl: String(input.workerUrl ?? defaults.workerUrl).trim(),
     verifyPublicBaseUrl: String(input.verifyPublicBaseUrl ?? defaults.verifyPublicBaseUrl).trim(),
+    imagePublicBaseUrl: String(input.imagePublicBaseUrl ?? defaults.imagePublicBaseUrl).trim(),
+    autoConfigureImageDomain: typeof input.autoConfigureImageDomain === 'boolean'
+      ? input.autoConfigureImageDomain
+      : defaults.autoConfigureImageDomain,
     panelUrl: String(input.panelUrl ?? defaults.panelUrl).trim(),
     deployPanel: typeof input.deployPanel === 'boolean' ? input.deployPanel : defaults.deployPanel,
     pagesProjectName: normalizePagesProjectName(pagesProjectRaw) || suggestPagesProjectName(workerName),
@@ -1241,6 +1274,8 @@ function getFallbackFormState(): DeployFormState {
     adminChatId: '',
     workerUrl: '',
     verifyPublicBaseUrl: '',
+    imagePublicBaseUrl: '',
+    autoConfigureImageDomain: true,
     panelUrl: '',
     deployPanel: true,
     pagesProjectName: 'tg-bot-panel',
@@ -1259,6 +1294,7 @@ function getFormState(): DeployFormState {
   state.cfApiToken = String(active?.form.cfApiToken || '').trim();
   state.cfAccountId = String(active?.form.cfAccountId || '').trim();
   state.deployPanel = String(deployPanelSelect.value) === '1';
+  state.autoConfigureImageDomain = String(autoImageDomainSelect.value) === '1';
   return normalizeFormState(state, base);
 }
 
@@ -1269,6 +1305,7 @@ function setFormState(state: DeployFormState): void {
   }
 
   deployPanelSelect.value = safeState.deployPanel ? '1' : '0';
+  autoImageDomainSelect.value = safeState.autoConfigureImageDomain ? '1' : '0';
 
   const workerInput = getInput('workerName');
   const pagesInput = getInput('pagesProjectName');
@@ -2168,6 +2205,10 @@ function applyLocale(): void {
   setText('labelBotToken', 'label_bot_token');
   setText('labelAdminChatId', 'label_admin_chat');
   setText('labelVerifyPublicBaseUrl', 'label_verify_url');
+  setText('labelImagePublicBaseUrl', 'label_image_url');
+  setText('labelAutoImageDomain', 'auto_image_domain');
+  setText('autoImageDomainOptOn', 'auto_image_domain_on');
+  setText('autoImageDomainOptOff', 'auto_image_domain_off');
   setText('labelPanelUrl', 'label_panel_url');
 
   setText('labelDeployPanel', 'switch_panel');
@@ -2209,6 +2250,7 @@ function applyLocale(): void {
   setPlaceholder('botToken', 'ph_bot_token');
   setPlaceholder('adminChatId', 'ph_admin_chat');
   setPlaceholder('verifyPublicBaseUrl', 'ph_verify_url');
+  setPlaceholder('imagePublicBaseUrl', 'ph_image_url');
   setPlaceholder('panelUrl', 'ph_panel_url');
   setPlaceholder('pagesProjectName', 'ph_pages_project');
   setPlaceholder('pagesBranch', 'ph_pages_branch');
@@ -2242,6 +2284,7 @@ function setBusy(nextBusy: boolean): void {
   }
 
   deployPanelSelect.disabled = nextBusy;
+  autoImageDomainSelect.disabled = nextBusy;
   saveBtn.disabled = nextBusy;
   deployBtn.disabled = nextBusy;
 
@@ -2539,6 +2582,11 @@ async function onDeploy(): Promise<void> {
     appendLog(`${t('log_pages_project')}: ${result.pagesProjectName || t('not_set')}`);
     appendLog(`${t('log_kv_id')}: ${result.kvNamespaceId}`);
     appendLog(`${t('log_d1_id')}: ${result.d1DatabaseId}`);
+    appendLog(`${t('log_r2_bucket')}: ${result.imageBucketName}`);
+    appendLog(`${t('log_image_url')}: ${result.imagePublicBaseUrl || `${result.workerUrl}/media`}`);
+    if (result.imagePublicBaseUrl) {
+      appendLog(`${t('log_image_domain_status')}: ${result.imageDomainActive ? 'active' : result.imageDomainStatus}`);
+    }
 
     if (!result.bootstrapOk) {
       appendLog(`${t('log_bootstrap_warn')}: ${result.bootstrapReason}`);
@@ -2613,7 +2661,7 @@ for (const key of formTextFields) {
   input.addEventListener('input', () => {
     queueAutoSave();
   });
-  if (key === 'workerUrl' || key === 'verifyPublicBaseUrl') {
+  if (key === 'workerUrl' || key === 'verifyPublicBaseUrl' || key === 'imagePublicBaseUrl') {
     input.addEventListener('blur', () => {
       const normalized = normalizeHttpUrlInput(input.value);
       if (!normalized) return;
@@ -2652,6 +2700,10 @@ deployBtn.addEventListener('click', () => {
 
 deployPanelSelect.addEventListener('change', () => {
   refreshPagesFieldsState();
+  queueAutoSave();
+});
+
+autoImageDomainSelect.addEventListener('change', () => {
   queueAutoSave();
 });
 

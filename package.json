@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "dev": "node -e \"console.log('Use TG Bot Deploy Tool for API-based deployment.')\"",
+    "dev:worker-local": "npm run build:worker && node scripts/serve-local-worker.mjs",
     "test": "npm run build:worker && node --test",
     "pretest:integration": "npm run build:worker",
     "test:integration": "node --test tests/worker.integration.mjs",

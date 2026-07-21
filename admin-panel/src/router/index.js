@@ -12,6 +12,7 @@ const SettingsView = () => import('../views/SettingsView.vue');
 const KeywordsView = () => import('../views/KeywordsView.vue');
 const MessagesView = () => import('../views/MessagesView.vue');
 const HistoryView = () => import('../views/HistoryView.vue');
+const ImagesView = () => import('../views/ImagesView.vue');
 const PasswordManageView = () => import('../views/PasswordManageView.vue');
 const LoginView = () => import('../views/LoginView.vue');
 const PasswordResetView = () => import('../views/PasswordResetView.vue');
@@ -42,6 +43,7 @@ const routes = [
       { path: 'keywords', name: 'keywords', component: KeywordsView, meta: { titleKey: 'app.keywords' } },
       { path: 'messages', name: 'messages', component: MessagesView, meta: { titleKey: 'app.messages' } },
       { path: 'history', name: 'history', component: HistoryView, meta: { titleKey: 'app.history' } },
+      { path: 'images', name: 'images', component: ImagesView, meta: { titleKey: 'app.images' } },
       { path: 'password', name: 'password', component: PasswordManageView, meta: { titleKey: 'app.password' } },
       { path: 'settings', name: 'settings', component: SettingsView, meta: { titleKey: 'app.settings' } },
     ],

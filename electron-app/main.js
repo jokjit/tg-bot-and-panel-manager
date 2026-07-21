@@ -18,6 +18,7 @@ const {
   buildPagesUploadBatches,
   buildWorkerUploadMetadata: buildWorkerUploadMetadataFromParts,
   cfApiFetch,
+  ensureImageDelivery,
   getCustomDomainHost: getWorkerCustomDomainHost,
   getPagesMimeType,
   getPagesDeployBranch,
@@ -34,6 +35,7 @@ const {
   normalizeWebhookPath,
   normalizeWorkerName,
   shouldIgnorePagesAsset,
+  suggestImageBucketName,
 } = require(deployUtilsPath)
 const {
   createDeploymentRun,
@@ -160,6 +162,9 @@ function normalizeDeployPrefs(input = {}) {
   const openPanelInClient = Boolean(input.openPanelInClient ?? input.useBuiltinPanel)
   const workerUrl = asText(input.workerUrl)
   const verifyPublicBaseUrl = normalizeHttpUrl(input.verifyPublicBaseUrl)
+  const imagePublicBaseUrl = normalizeHttpUrl(input.imagePublicBaseUrl)
+  const deployImageHosting = input.deployImageHosting !== false
+  const autoConfigureImageDomain = input.autoConfigureImageDomain !== false
   const panelUrl = normalizePanelUrl(input.panelUrl)
   const panelEntryUrl = normalizePanelUrl(input.panelEntryUrl)
   const workerName = normalizeWorkerName(input.workerName || '')
@@ -175,6 +180,9 @@ function normalizeDeployPrefs(input = {}) {
     d1DatabaseName,
     workerUrl,
     verifyPublicBaseUrl,
+    imagePublicBaseUrl,
+    deployImageHosting,
+    autoConfigureImageDomain,
     panelUrl,
     panelEntryUrl: panelEntryUrl || buildAdminPanelEntryUrl(workerUrl) || panelUrl,
     pagesProjectName,
@@ -183,9 +191,9 @@ function normalizeDeployPrefs(input = {}) {
   }
 }
 
-function saveActiveDeployPrefsPatch(patch = {}) {
+function saveActiveDeployPrefsPatch(patch = {}, accountId = activeAccountId) {
   const accounts = loadAccounts()
-  const index = accounts.findIndex((item) => item.id === activeAccountId)
+  const index = accounts.findIndex((item) => item.id === accountId)
   if (index < 0) return null
 
   const currentPrefs = normalizeDeployPrefs(accounts[index]?.deployPrefs || {})
@@ -247,6 +255,13 @@ function buildEnv(account) {
     }
     if (deployPrefs.workerName) {
       env.WORKER_NAME = deployPrefs.workerName
+    }
+    if (deployPrefs.deployImageHosting) {
+      if (deployPrefs.workerName) env.R2_BUCKET_NAME = suggestImageBucketName(deployPrefs.workerName)
+      if (deployPrefs.imagePublicBaseUrl) env.IMAGE_PUBLIC_BASE_URL = deployPrefs.imagePublicBaseUrl
+    } else {
+      delete env.R2_BUCKET_NAME
+      delete env.IMAGE_PUBLIC_BASE_URL
     }
     if (deployPrefs.kvNamespaceTitle) {
       env.KV_NAMESPACE_TITLE = deployPrefs.kvNamespaceTitle
@@ -311,8 +326,17 @@ function upsertD1BindingInLocalConfig(binding, databaseName, databaseId, env = {
   return localPath
 }
 
+function upsertR2BindingInLocalConfig(binding, bucketName, env = {}) {
+  const localPath = ensureLocalWranglerFile(env)
+  const current = fs.readFileSync(localPath, 'utf8')
+  const block = `[[r2_buckets]]\nbinding = "${binding}"\nbucket_name = "${bucketName}"`
+  const next = upsertTomlBindingBlock(current, 'r2_buckets', binding, block)
+  if (next !== current) fs.writeFileSync(localPath, next.replace(/\s+$/, '') + '\n', 'utf8')
+  return localPath
+}
+
 function upsertVarsBlock(content, updates) {
-  const entries = Object.entries(updates).filter(([, value]) => String(value || '').trim())
+  const entries = Object.entries(updates).filter(([key, value]) => key && value !== undefined && value !== null)
   if (entries.length === 0) return { content, updatedKeys: [] }
 
   const formatLine = (key, value) => `${key} = ${JSON.stringify(String(value))}`
@@ -373,10 +397,14 @@ function syncRuntimeUrlsToLocalConfig(workerUrl, panelUrl, env = {}, extraUpdate
   return updatedKeys
 }
 
-function buildVerificationRuntimeVarUpdates(params = {}) {
+function buildRuntimeVarUpdates(params = {}) {
   const verifyPublicBaseUrl = normalizeHttpUrl(params?.verifyPublicBaseUrl || '')
-  if (!verifyPublicBaseUrl) return {}
-  return { VERIFY_PUBLIC_BASE_URL: verifyPublicBaseUrl }
+  const deployImageHosting = params?.deployImageHosting !== false
+  const imagePublicBaseUrl = deployImageHosting ? normalizeHttpUrl(params?.imagePublicBaseUrl || '') : ''
+  return {
+    ...(verifyPublicBaseUrl ? { VERIFY_PUBLIC_BASE_URL: verifyPublicBaseUrl } : {}),
+    IMAGE_PUBLIC_BASE_URL: imagePublicBaseUrl,
+  }
 }
 
 async function getPagesProject(env, projectName) {
@@ -721,6 +749,164 @@ async function fetchKvStorageBytesViaGraphql(env) {
   return { storageBytes: Math.max(0, Math.round(totalBytes)), warning: '' }
 }
 
+function r2MetricBucketName(bucket = {}) {
+  const name = String(bucket?.name || bucket?.bucket_name || '').trim()
+  const jurisdiction = String(bucket?.jurisdiction || '').trim().toLowerCase()
+  return name && jurisdiction && jurisdiction !== 'default' ? `${jurisdiction}_${name}` : name
+}
+
+function totalR2AccountMetric(result, key) {
+  let total = 0
+  let hasValue = false
+  for (const storageClass of ['standard', 'infrequentAccess']) {
+    for (const state of ['published', 'uploaded']) {
+      const value = Number(result?.[storageClass]?.[state]?.[key])
+      if (!Number.isFinite(value) || value < 0) continue
+      total += value
+      hasValue = true
+    }
+  }
+  return hasValue ? Math.round(total) : null
+}
+
+async function fetchR2AccountMetricsViaApi(env) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const response = await cfApiRequest(env, `/accounts/${accountId}/r2/metrics`)
+  if (!response.ok) {
+    throw new Error(`r2 metrics failed: ${response.reason || 'unknown'}`)
+  }
+  const result = response.result || {}
+  return {
+    objectCount: totalR2AccountMetric(result, 'objects'),
+    payloadBytes: totalR2AccountMetric(result, 'payloadSize'),
+    metadataBytes: totalR2AccountMetric(result, 'metadataSize'),
+  }
+}
+
+async function fetchR2StorageMetricsViaGraphql(env) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const now = new Date()
+  const from = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000)
+  const account = escapeGraphqlString(accountId)
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          r2StorageAdaptiveGroups(
+            limit: 10000
+            filter: {
+              datetime_geq: "${from.toISOString()}"
+              datetime_leq: "${now.toISOString()}"
+            }
+            orderBy: [datetime_DESC]
+          ) {
+            max {
+              objectCount
+              uploadCount
+              payloadSize
+              metadataSize
+            }
+            dimensions {
+              bucketName
+              datetime
+            }
+          }
+        }
+      }
+    }
+  `
+  const result = await requestGraphql(env, query)
+  if (result.errors.length > 0) {
+    return { items: [], warning: result.errors.join('; ') || 'r2 storage graphql query failed' }
+  }
+  const rows = result.data?.viewer?.accounts?.[0]?.r2StorageAdaptiveGroups
+  if (!Array.isArray(rows)) return { items: [], warning: 'r2 storage analytics unavailable' }
+
+  const latestByBucket = new Map()
+  for (const row of rows) {
+    const bucketName = String(row?.dimensions?.bucketName || '').trim()
+    const datetime = String(row?.dimensions?.datetime || '').trim()
+    if (!bucketName || !datetime) continue
+    const current = latestByBucket.get(bucketName)
+    if (current && current.datetime >= datetime) continue
+    latestByBucket.set(bucketName, {
+      bucketName,
+      datetime,
+      objectCount: Number.isFinite(Number(row?.max?.objectCount)) ? Math.max(0, Math.round(Number(row.max.objectCount))) : null,
+      uploadCount: Number.isFinite(Number(row?.max?.uploadCount)) ? Math.max(0, Math.round(Number(row.max.uploadCount))) : null,
+      payloadBytes: Number.isFinite(Number(row?.max?.payloadSize)) ? Math.max(0, Math.round(Number(row.max.payloadSize))) : null,
+      metadataBytes: Number.isFinite(Number(row?.max?.metadataSize)) ? Math.max(0, Math.round(Number(row.max.metadataSize))) : null,
+    })
+  }
+  return {
+    items: [...latestByBucket.values()].sort((a, b) => a.bucketName.localeCompare(b.bucketName)),
+    warning: '',
+  }
+}
+
+const R2_CLASS_A_ACTIONS = new Set([
+  'listbuckets', 'putbucket', 'listobjects', 'putobject', 'copyobject',
+  'completemultipartupload', 'createmultipartupload', 'lifecyclestoragetiertransition',
+  'listmultipartuploads', 'uploadpart', 'uploadpartcopy', 'listparts',
+  'putbucketencryption', 'putbucketcors', 'putbucketlifecycleconfiguration',
+])
+const R2_CLASS_B_ACTIONS = new Set([
+  'headbucket', 'headobject', 'getobject', 'usagesummary',
+  'getbucketencryption', 'getbucketlocation', 'getbucketcors', 'getbucketlifecycleconfiguration',
+])
+
+function classifyR2Operation(actionType) {
+  const action = String(actionType || '').replace(/[^a-z0-9]/gi, '').toLowerCase()
+  if (R2_CLASS_A_ACTIONS.has(action)) return 'a'
+  if (R2_CLASS_B_ACTIONS.has(action)) return 'b'
+  return ''
+}
+
+async function fetchR2Operations30dViaGraphql(env) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const now = new Date()
+  const from = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+  const account = escapeGraphqlString(accountId)
+  const query = `
+    {
+      viewer {
+        accounts(filter: { accountTag: "${account}" }) {
+          r2OperationsAdaptiveGroups(
+            limit: 10000
+            filter: {
+              datetime_geq: "${from.toISOString()}"
+              datetime_leq: "${now.toISOString()}"
+            }
+          ) {
+            dimensions {
+              actionType
+            }
+            sum {
+              requests
+            }
+          }
+        }
+      }
+    }
+  `
+  const result = await requestGraphql(env, query)
+  if (result.errors.length > 0) {
+    return { classAOperations: null, classBOperations: null, warning: result.errors.join('; ') || 'r2 operations graphql query failed' }
+  }
+  const rows = result.data?.viewer?.accounts?.[0]?.r2OperationsAdaptiveGroups
+  if (!Array.isArray(rows)) return { classAOperations: null, classBOperations: null, warning: 'r2 operations analytics unavailable' }
+
+  let classAOperations = 0
+  let classBOperations = 0
+  for (const row of rows) {
+    const requests = Math.max(0, parseNumber(row?.sum?.requests, 0))
+    const category = classifyR2Operation(row?.dimensions?.actionType)
+    if (category === 'a') classAOperations += requests
+    if (category === 'b') classBOperations += requests
+  }
+  return { classAOperations: Math.round(classAOperations), classBOperations: Math.round(classBOperations), warning: '' }
+}
+
 async function fetchD1Rows24hMapViaGraphql(env) {
   const { accountId } = getCfTokenAndAccount(env)
   const now = new Date()
@@ -848,6 +1034,7 @@ async function fetchD1DatabasesUsageSnapshotViaApi(env) {
 
 async function fetchDashboardSnapshotViaApi(env, account = null) {
   let workerName = getDashboardWorkerName(env, account)
+  const r2Enabled = account?.deployPrefs?.deployImageHosting !== false
   const warnings = []
 
   if (!workerName) {
@@ -878,6 +1065,10 @@ async function fetchDashboardSnapshotViaApi(env, account = null) {
     pagesCount,
     workerReq,
     d1Count,
+    r2Buckets,
+    r2AccountMetrics,
+    r2StorageMetrics,
+    r2Operations,
   ] = await Promise.allSettled([
     countWorkersScriptsViaApi(env),
     countKvNamespacesViaApi(env),
@@ -887,6 +1078,10 @@ async function fetchDashboardSnapshotViaApi(env, account = null) {
     countPagesProjectsViaApi(env),
     fetchWorkerRequests24hViaGraphql(env, workerName),
     countD1DatabasesViaApi(env),
+    r2Enabled ? listR2BucketsViaApi(env) : Promise.resolve([]),
+    r2Enabled ? fetchR2AccountMetricsViaApi(env) : Promise.resolve(null),
+    r2Enabled ? fetchR2StorageMetricsViaGraphql(env) : Promise.resolve({ items: [] }),
+    r2Enabled ? fetchR2Operations30dViaGraphql(env) : Promise.resolve({ classAOperations: null, classBOperations: null }),
   ])
 
   const workersScriptCount = workersCount.status === 'fulfilled' ? workersCount.value : null
@@ -934,6 +1129,62 @@ async function fetchDashboardSnapshotViaApi(env, account = null) {
   if (pagesCount.status === 'rejected') {
     warnings.push(`pages: ${pagesCount.reason instanceof Error ? pagesCount.reason.message : String(pagesCount.reason)}`)
   }
+  const pagesProjectName = normalizePagesProjectName(account?.deployPrefs?.pagesProjectName || env.PAGES_PROJECT_NAME || '')
+  const pagesBranch = normalizePagesBranch(account?.deployPrefs?.pagesBranch || env.PAGES_BRANCH || '')
+  const pagesPanelUrl = normalizePanelUrl(account?.deployPrefs?.panelUrl || '')
+  const r2BucketItems = r2Buckets.status === 'fulfilled' && Array.isArray(r2Buckets.value)
+    ? r2Buckets.value
+    : []
+  const r2BucketNames = r2BucketItems
+    .map((item) => String(item?.name || item?.bucket_name || '').trim())
+    .filter(Boolean)
+  const r2BucketCount = r2Buckets.status === 'fulfilled' ? r2BucketNames.length : null
+  if (r2Buckets.status === 'rejected') {
+    warnings.push(`r2: ${r2Buckets.reason instanceof Error ? r2Buckets.reason.message : String(r2Buckets.reason)}`)
+  }
+
+  const r2StorageSnapshot = r2StorageMetrics.status === 'fulfilled'
+    ? r2StorageMetrics.value
+    : { items: [], warning: r2StorageMetrics.reason instanceof Error ? r2StorageMetrics.reason.message : String(r2StorageMetrics.reason) }
+  if (r2StorageSnapshot.warning) warnings.push(`r2 storage: ${r2StorageSnapshot.warning}`)
+  const r2MetricsByBucketName = new Map(
+    (Array.isArray(r2StorageSnapshot.items) ? r2StorageSnapshot.items : []).map((item) => [item.bucketName, item]),
+  )
+  const r2BucketMetrics = r2BucketItems.map((bucket) => {
+    const name = String(bucket?.name || bucket?.bucket_name || '').trim()
+    const metricName = r2MetricBucketName(bucket)
+    const metric = r2MetricsByBucketName.get(metricName) || r2MetricsByBucketName.get(name) || null
+    return {
+      name,
+      objectCount: metric?.objectCount ?? null,
+      payloadBytes: metric?.payloadBytes ?? null,
+      metadataBytes: metric?.metadataBytes ?? null,
+      uploadCount: metric?.uploadCount ?? null,
+    }
+  }).filter((item) => item.name)
+  const r2MetricObjectCount = r2BucketMetrics.reduce((total, item) => total + (Number.isFinite(item.objectCount) ? item.objectCount : 0), 0)
+  const r2MetricPayloadBytes = r2BucketMetrics.reduce((total, item) => total + (Number.isFinite(item.payloadBytes) ? item.payloadBytes : 0), 0)
+
+  const r2AccountSnapshot = r2AccountMetrics.status === 'fulfilled' ? r2AccountMetrics.value : null
+  if (r2AccountMetrics.status === 'rejected') {
+    warnings.push(`r2 metrics: ${r2AccountMetrics.reason instanceof Error ? r2AccountMetrics.reason.message : String(r2AccountMetrics.reason)}`)
+  }
+  const r2ObjectCount = Number.isFinite(r2AccountSnapshot?.objectCount)
+    ? r2AccountSnapshot.objectCount
+    : (r2BucketMetrics.length > 0 ? r2MetricObjectCount : null)
+  const r2StorageBytes = Number.isFinite(r2AccountSnapshot?.payloadBytes)
+    ? r2AccountSnapshot.payloadBytes
+    : (r2BucketMetrics.length > 0 ? r2MetricPayloadBytes : null)
+  const r2MetadataBytes = Number.isFinite(r2AccountSnapshot?.metadataBytes) ? r2AccountSnapshot.metadataBytes : null
+
+  const r2OperationsSnapshot = r2Operations.status === 'fulfilled'
+    ? r2Operations.value
+    : { classAOperations: null, classBOperations: null, warning: r2Operations.reason instanceof Error ? r2Operations.reason.message : String(r2Operations.reason) }
+  if (r2OperationsSnapshot.warning) warnings.push(`r2 operations: ${r2OperationsSnapshot.warning}`)
+
+  const configuredR2Bucket = String(env.R2_BUCKET_NAME || '').trim()
+  const r2ConfiguredBucketName = r2BucketNames.includes(configuredR2Bucket) ? configuredR2Bucket : ''
+
 
   let workerRequests24h = null
   if (workerReq.status === 'fulfilled') {
@@ -967,10 +1218,23 @@ async function fetchDashboardSnapshotViaApi(env, account = null) {
     d1DatabaseCount,
     d1DatabasesUsage,
     d1StorageBytes: Number.isFinite(d1StorageBytes) ? d1StorageBytes : null,
+    r2Enabled,
+    r2BucketCount,
+    r2Buckets: r2BucketNames,
+    r2BucketMetrics,
+    r2ConfiguredBucketName,
+    r2ObjectCount,
+    r2StorageBytes,
+    r2MetadataBytes,
+    r2ClassAOperations30d: r2OperationsSnapshot.classAOperations,
+    r2ClassBOperations30d: r2OperationsSnapshot.classBOperations,
     d1ReadRequests24h: Number.isFinite(d1ReadRequests24h) ? d1ReadRequests24h : null,
     d1WriteRequests24h: Number.isFinite(d1WriteRequests24h) ? d1WriteRequests24h : null,
     pagesProjectCount,
     fetchedAt: new Date().toISOString(),
+    pagesProjectName,
+    pagesBranch,
+    pagesPanelUrl,
     warnings,
   }
 }
@@ -1925,6 +2189,76 @@ async function ensureD1BindingViaApi(env, options = {}, onProgress) {
   return { ok: true, databaseName, binding, databaseId, targetPath }
 }
 
+async function listR2BucketsViaApi(env) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const response = await cfApiRequest(env, `/accounts/${accountId}/r2/buckets`)
+  if (!response.ok) {
+    throw new Error(`R2 bucket list failed: ${response.reason || 'unknown'}`)
+  }
+  if (Array.isArray(response.result)) return response.result
+  return Array.isArray(response.result?.buckets) ? response.result.buckets : []
+}
+
+async function ensureR2BindingViaApi(env, options = {}, onProgress) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const workerName = normalizeWorkerName(options.workerName || env.WORKER_NAME || 'telegram-private-chatbot')
+  const bucketName = String(options.bucketName || env.R2_BUCKET_NAME || suggestImageBucketName(workerName)).trim()
+  const binding = String(options.binding || env.R2_BINDING || 'IMAGE_BUCKET').trim()
+  if (!bucketName || !binding) {
+    throw new Error('R2 initialization failed: missing_bucket_name_or_binding')
+  }
+
+  onProgress?.('正在通过 Cloudflare API 初始化 R2 图床存储...')
+  let buckets = await listR2BucketsViaApi(env)
+  let bucket = buckets.find((item) => String(item.name || '') === bucketName)
+  if (!bucket) {
+    const created = await cfApiRequest(env, `/accounts/${accountId}/r2/buckets`, {
+      method: 'POST',
+      body: { name: bucketName },
+    })
+    if (!created.ok) {
+      const reason = String(created.reason || '')
+      if (!/already exists|10013|10014/i.test(reason)) {
+        throw new Error(`R2 bucket create failed (${bucketName}): ${reason || 'unknown'}`)
+      }
+      buckets = await listR2BucketsViaApi(env)
+      bucket = buckets.find((item) => String(item.name || '') === bucketName)
+    } else {
+      bucket = created.result || { name: bucketName }
+    }
+  }
+
+  if (String(bucket?.name || bucketName) !== bucketName) {
+    throw new Error(`R2 bucket not found: ${bucketName}`)
+  }
+
+  const targetPath = upsertR2BindingInLocalConfig(binding, bucketName, env)
+  onProgress?.(`R2 已就绪：${bucketName} -> ${binding}`)
+  onProgress?.(`R2 绑定已写入账号配置：${targetPath}`)
+  return { ok: true, bucketName, binding, targetPath }
+}
+
+async function ensureImageDeliveryViaApi(env, options = {}, onProgress) {
+  const { accountId } = getCfTokenAndAccount(env)
+  const workerName = normalizeWorkerName(options.workerName || env.WORKER_NAME || 'telegram-private-chatbot')
+  const bucketName = String(options.bucketName || env.R2_BUCKET_NAME || suggestImageBucketName(workerName)).trim()
+  const imagePublicBaseUrl = normalizeHttpUrl(options.imagePublicBaseUrl || env.IMAGE_PUBLIC_BASE_URL || '')
+  if (!imagePublicBaseUrl || options.autoConfigure === false) {
+    if (imagePublicBaseUrl && options.autoConfigure === false) {
+      onProgress?.('图床域名自动配置已关闭，将直接使用已手工绑定的域名。')
+    }
+    return { skipped: true, reason: imagePublicBaseUrl ? 'manual_mode' : 'image_public_base_url_empty' }
+  }
+
+  return ensureImageDelivery({
+    accountId,
+    bucketName,
+    imagePublicBaseUrl,
+    apiRequest: (resource, requestOptions = {}) => cfApiRequest(env, resource, requestOptions),
+    onProgress,
+  })
+}
+
 async function ensureWorkerCustomDomain(env, configPath, workerUrl, onProgress) {
   const hostname = getWorkerCustomDomainHost(workerUrl)
   if (!hostname) {
@@ -2374,7 +2708,7 @@ function getBindingBlock(content, tableName, binding) {
   return matches.find((match) => new RegExp(`^[ \\t]*binding[ \\t]*=[ \\t]*"${escapedBinding}"[ \\t]*$`, 'm').test(match[0]))?.[0] || ''
 }
 
-function validatePrivateWranglerConfig(configPath) {
+function validatePrivateWranglerConfig(configPath, { requireImageHosting = true } = {}) {
   if (!fs.existsSync(configPath)) {
     throw new Error(`部署配置不存在：${configPath}`)
   }
@@ -2395,6 +2729,13 @@ function validatePrivateWranglerConfig(configPath) {
   if (!/^\s*id\s*=\s*"[^"]+"\s*$/m.test(kvBlock)) {
     throw new Error('部署配置中的 BOT_KV 缺少 namespace id，请先初始化 KV。')
   }
+
+  if (requireImageHosting) {
+    const r2Block = getBindingBlock(content, 'r2_buckets', 'IMAGE_BUCKET')
+    if (!r2Block || !/^\s*bucket_name\s*=\s*"[^"]+"\s*$/m.test(r2Block)) {
+      throw new Error('部署配置缺少 R2 绑定 IMAGE_BUCKET，请先初始化图床存储。')
+    }
+  }
 }
 
 function buildWorkerUploadMetadata(configPath) {
@@ -2404,12 +2745,15 @@ function buildWorkerUploadMetadata(configPath) {
   const kvId = getTomlString(kvBlock, 'id')
   const d1Block = getBindingBlock(content, 'd1_databases', 'DB')
   const databaseId = getTomlString(d1Block, 'database_id')
+  const r2Block = getBindingBlock(content, 'r2_buckets', 'IMAGE_BUCKET')
+  const r2BucketName = getTomlString(r2Block, 'bucket_name')
   return buildWorkerUploadMetadataFromParts({
     compatibilityDate,
     vars: parseVarsBlock(content),
     kvNamespaceId: kvId,
     d1DatabaseId: databaseId,
     d1BindingField: 'id',
+    r2BucketName,
   })
 }
 
@@ -2838,7 +3182,11 @@ function applyDeployParamsToEnv(env = {}, params = {}) {
   const d1DatabaseName = normalizeD1DatabaseName(params?.d1DatabaseName || '')
   const pagesProjectName = normalizePagesProjectName(params?.pagesProjectName || params?.projectName || '')
   const pagesBranch = normalizePagesBranch(params?.pagesBranch || params?.branch || '')
+  const imagePublicBaseUrl = normalizeHttpUrl(params?.imagePublicBaseUrl || '')
+  const deployImageHosting = params?.deployImageHosting !== false
   if (workerName) next.WORKER_NAME = workerName
+  if (deployImageHosting && workerName) next.R2_BUCKET_NAME = suggestImageBucketName(workerName)
+  if (!deployImageHosting) delete next.R2_BUCKET_NAME
   if (kvNamespaceTitle) {
     next.KV_NAMESPACE_TITLE = kvNamespaceTitle
     next.KV_NAMESPACE_NAME = kvNamespaceTitle
@@ -2846,6 +3194,7 @@ function applyDeployParamsToEnv(env = {}, params = {}) {
   if (d1DatabaseName) next.D1_DATABASE_NAME = d1DatabaseName
   if (pagesProjectName) next.PAGES_PROJECT_NAME = pagesProjectName
   if (pagesBranch) next.PAGES_BRANCH = pagesBranch
+  next.IMAGE_PUBLIC_BASE_URL = deployImageHosting ? imagePublicBaseUrl : ''
   return next
 }
 // actions
@@ -2883,20 +3232,29 @@ async function runAction(action, params, env) {
     case 'deploy-worker': {
       let effectiveWorkerUrl = normalizeHttpUrl(params?.workerUrl || '')
       const effectivePanelUrl = normalizePanelUrl(params?.panelUrl || '')
-      const runtimeVarUpdates = buildVerificationRuntimeVarUpdates(params)
+      const deployImageHosting = params?.deployImageHosting !== false
+      const runtimeVarUpdates = buildRuntimeVarUpdates(params)
       const effectiveVerifyPublicBaseUrl = normalizeHttpUrl(
         runtimeVarUpdates.VERIFY_PUBLIC_BASE_URL || params?.verifyPublicBaseUrl || '',
       )
       const runtimeUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
       if (runtimeUpdates.length > 0) send(`已更新账号运行配置：${runtimeUpdates.join(', ')}`)
-      send('正在初始化 KV 和 D1...')
+      send(deployImageHosting ? '正在初始化 KV、D1 和 R2...' : '正在初始化 KV、D1（图床已关闭）...')
       await ensureKvBindingViaApi(env, {}, send)
       await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
+      const r2 = deployImageHosting ? await ensureR2BindingViaApi(env, {}, send) : null
+      const imageDelivery = deployImageHosting
+        ? await ensureImageDeliveryViaApi(env, {
+            bucketName: r2?.bucketName,
+            imagePublicBaseUrl: runtimeVarUpdates.IMAGE_PUBLIC_BASE_URL,
+            autoConfigure: params?.autoConfigureImageDomain !== false,
+          }, send)
+        : { skipped: true, reason: 'image_hosting_disabled' }
       const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
       if (postInitUpdates.length > 0) send(`已更新账号运行配置：${postInitUpdates.join(', ')}`)
       await runScript('merge-wrangler-config.mjs', [], env)
       const workerConfigPath = getPrivateWranglerPath(env)
-      validatePrivateWranglerConfig(workerConfigPath)
+      validatePrivateWranglerConfig(workerConfigPath, { requireImageHosting: deployImageHosting })
       await uploadWorkerViaApi(env, workerConfigPath, send)
       const publicEndpoint = await ensureWorkerPublicEndpoint(env, workerConfigPath, effectiveWorkerUrl, send)
       await waitForWorkerEndpointWarmup(publicEndpoint, send)
@@ -2924,6 +3282,9 @@ async function runAction(action, params, env) {
         d1DatabaseName: normalizeD1DatabaseName(params?.d1DatabaseName || env.D1_DATABASE_NAME || '') || undefined,
         workerUrl: effectiveWorkerUrl || undefined,
         verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl || undefined,
+        imagePublicBaseUrl: runtimeVarUpdates.IMAGE_PUBLIC_BASE_URL,
+        autoConfigureImageDomain: params?.autoConfigureImageDomain !== false,
+        deployImageHosting: params?.deployImageHosting !== false,
         panelUrl: effectivePanelUrl || undefined,
         panelEntryUrl: buildAdminPanelEntryUrl(effectiveWorkerUrl) || effectivePanelUrl || undefined,
       })
@@ -2932,15 +3293,17 @@ async function runAction(action, params, env) {
         workerName: check.workerName,
         workerUrl: effectiveWorkerUrl,
         endpointType: publicEndpoint.endpointType || '',
+        imageDelivery,
         method: check.method || publicEndpoint.method || '',
       }
     }
     case 'deploy-panel': {
       const workerUrl = normalizeHttpUrl(params?.workerUrl || '')
       const panelUrl = normalizePanelUrl(params?.panelUrl || '')
+      const deployImageHosting = params?.deployImageHosting !== false
       const projectName = getPagesProjectName(env, params)
       const branch = getPagesDeployBranch(env, params)
-      const runtimeVarUpdates = buildVerificationRuntimeVarUpdates(params)
+      const runtimeVarUpdates = buildRuntimeVarUpdates(params)
       const panelDistDir = getAdminPanelDistDir()
       if (!fs.existsSync(panelDistDir) || !fs.statSync(panelDistDir).isDirectory()) {
         throw new Error(`admin_panel_dist_not_found:${panelDistDir}; run: npm --prefix admin-panel run build`)
@@ -3011,8 +3374,10 @@ async function runAction(action, params, env) {
         }
       }
       if (workerUrl && runtimePanelUrl) {
+        if (deployImageHosting) await ensureR2BindingViaApi(env, {}, send)
+        await runScript('merge-wrangler-config.mjs', [], env)
         const workerConfigPath = getPrivateWranglerPath(env)
-        validatePrivateWranglerConfig(workerConfigPath)
+        validatePrivateWranglerConfig(workerConfigPath, { requireImageHosting: deployImageHosting })
         await uploadWorkerViaApi(env, workerConfigPath, send)
         send(`Worker /admin target synced: ${runtimePanelUrl}`)
       }
@@ -3022,6 +3387,9 @@ async function runAction(action, params, env) {
         d1DatabaseName: normalizeD1DatabaseName(params?.d1DatabaseName || env.D1_DATABASE_NAME || '') || undefined,
         workerUrl: workerUrl || undefined,
         verifyPublicBaseUrl: runtimeVarUpdates.VERIFY_PUBLIC_BASE_URL || undefined,
+        imagePublicBaseUrl: runtimeVarUpdates.IMAGE_PUBLIC_BASE_URL,
+        autoConfigureImageDomain: params?.autoConfigureImageDomain !== false,
+        deployImageHosting: params?.deployImageHosting !== false,
         panelUrl: resolvedPanelUrl || undefined,
         panelEntryUrl: panelEntryUrl || undefined,
         pagesProjectName: projectName || undefined,
@@ -3056,10 +3424,9 @@ async function runAction(action, params, env) {
       const { botToken, adminChatId, workerUrl, verifyPublicBaseUrl, panelUrl } = params || {}
       let effectiveWorkerUrl = normalizeHttpUrl(workerUrl || '')
       const effectiveVerifyPublicBaseUrl = normalizeHttpUrl(verifyPublicBaseUrl || '')
-      const runtimeVarUpdates = effectiveVerifyPublicBaseUrl
-        ? { VERIFY_PUBLIC_BASE_URL: effectiveVerifyPublicBaseUrl }
-        : {}
+      const runtimeVarUpdates = buildRuntimeVarUpdates(params)
       let effectivePanelUrl = normalizePanelUrl(panelUrl || '')
+      const deployImageHosting = params?.deployImageHosting !== false
       const resumeState = normalizeDeploymentResumeState(params?.deploymentState || {})
       const deployment = createDeploymentRun({
         initialResults: resumeState.results,
@@ -3090,20 +3457,30 @@ async function runAction(action, params, env) {
         }
       })
 
-      await deployment.run('resources', async () => {
-        send('步骤 2/4：初始化 KV 和 D1...')
+      const resourcesStage = await deployment.run('resources', async () => {
+        send(deployImageHosting ? '步骤 2/4：初始化 KV、D1 和 R2...' : '步骤 2/4：初始化 KV、D1（图床已关闭）...')
         await ensureKvBindingViaApi(env, {}, send)
         await ensureD1BindingViaApi(env, { skipMigrate: false }, send)
+        const r2 = deployImageHosting ? await ensureR2BindingViaApi(env, {}, send) : null
         const postInitUpdates = syncRuntimeUrlsToLocalConfig(effectiveWorkerUrl, effectivePanelUrl, env, runtimeVarUpdates)
         if (postInitUpdates.length > 0) {
           send(`已更新账号运行配置：${postInitUpdates.join(', ')}`)
         }
         await runScript('merge-wrangler-config.mjs', [], env)
+        return { r2 }
+      })
+      await deployment.run('image_delivery', async () => {
+        if (!deployImageHosting) return { skipped: true, reason: 'image_hosting_disabled' }
+        return ensureImageDeliveryViaApi(env, {
+          bucketName: resourcesStage?.r2?.bucketName,
+          imagePublicBaseUrl: runtimeVarUpdates.IMAGE_PUBLIC_BASE_URL,
+          autoConfigure: params?.autoConfigureImageDomain !== false,
+        }, send)
       })
       const workerStage = await deployment.run('worker', async () => {
         send('步骤 3/4：部署 Worker...')
         const workerConfigPath = getPrivateWranglerPath(env)
-      validatePrivateWranglerConfig(workerConfigPath)
+      validatePrivateWranglerConfig(workerConfigPath, { requireImageHosting: deployImageHosting })
       await uploadWorkerViaApi(env, workerConfigPath, send)
       const publicEndpoint = await ensureWorkerPublicEndpoint(env, workerConfigPath, effectiveWorkerUrl, send)
       await waitForWorkerEndpointWarmup(publicEndpoint, send)
@@ -3157,6 +3534,9 @@ async function runAction(action, params, env) {
           {
             workerUrl: effectiveWorkerUrl,
             verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl,
+            imagePublicBaseUrl: runtimeVarUpdates.IMAGE_PUBLIC_BASE_URL,
+            autoConfigureImageDomain: params?.autoConfigureImageDomain !== false,
+            deployImageHosting: params?.deployImageHosting !== false,
             panelUrl: effectivePanelUrl,
             pagesProjectName: params?.pagesProjectName,
             pagesBranch: params?.pagesBranch,
@@ -3262,6 +3642,9 @@ async function runAction(action, params, env) {
         d1DatabaseName: normalizeD1DatabaseName(params?.d1DatabaseName || env.D1_DATABASE_NAME || '') || undefined,
         workerUrl: effectiveWorkerUrl || undefined,
         verifyPublicBaseUrl: effectiveVerifyPublicBaseUrl || undefined,
+        imagePublicBaseUrl: runtimeVarUpdates.IMAGE_PUBLIC_BASE_URL,
+        autoConfigureImageDomain: params?.autoConfigureImageDomain !== false,
+        deployImageHosting: params?.deployImageHosting !== false,
         panelUrl: finalPanelUrl || undefined,
         panelEntryUrl: finalPanelEntryUrl || undefined,
         pagesProjectName: normalizePagesProjectName(params?.pagesProjectName || env.PAGES_PROJECT_NAME || '') || undefined,
@@ -3274,6 +3657,7 @@ async function runAction(action, params, env) {
         panelUrl: finalPanelUrl,
         panelEntryUrl: finalPanelEntryUrl,
         workerUrl: effectiveWorkerUrl,
+        imageDelivery: deployment.snapshot().results.image_delivery || null,
         completedSteps: deployment.snapshot().completedSteps,
         deploymentState: deployment.snapshot(),
       }
@@ -3387,8 +3771,12 @@ ipcMain.handle('accounts:setActive', (_, id) => {
   return id
 })
 ipcMain.handle('accounts:getActive', () => activeAccountId)
-ipcMain.handle('accounts:saveDeployPrefs', (_, prefs) => {
-  return saveActiveDeployPrefsPatch(prefs)
+ipcMain.handle('accounts:getDeployPrefs', () => {
+  const account = getActiveAccount()
+  return account ? normalizeDeployPrefs(account.deployPrefs || {}) : null
+})
+ipcMain.handle('accounts:saveDeployPrefs', (_, prefs, accountId) => {
+  return saveActiveDeployPrefsPatch(prefs, accountId)
 })
 ipcMain.handle('accounts:clearCredentials', (_, id) => {
   deploymentResumeByAccountId.delete(String(id || ''))

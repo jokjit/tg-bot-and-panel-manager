@@ -408,6 +408,38 @@ export function fetchHistory(params = {}, options = {}) {
   });
 }
 
+export function fetchImages(options = {}) {
+  return cachedGet('/admin/api/images', {
+    params: {
+      limit: options.limit,
+      offset: options.offset,
+    },
+    ttlMs: READ_CACHE_TTL.list,
+    force: Boolean(options.force),
+  });
+}
+
+export function uploadImage(file) {
+  const formData = new FormData();
+  formData.set('file', file);
+  return api
+    .post('/admin/api/images', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 30000,
+    })
+    .then((r) => {
+      clearCachedGets(['/admin/api/images']);
+      return r.data;
+    });
+}
+
+export function deleteImage(id) {
+  return api.delete(`/admin/api/images/${encodeURIComponent(String(id || ''))}`).then((r) => {
+    clearCachedGets(['/admin/api/images']);
+    return r.data;
+  });
+}
+
 export function uploadWelcomeMedia(type, file) {
   const formData = new FormData();
   formData.set('type', String(type || '').trim());

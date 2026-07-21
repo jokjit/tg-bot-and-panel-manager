@@ -75,12 +75,23 @@ import {
 import { handleAuthorizedAdminRoute } from './worker-src/routes/admin-access.js';
 import { handleAdminReplyRoute } from './worker-src/routes/admin-reply.js';
 import { handleAdminSystemRoute } from './worker-src/routes/admin-system.js';
+import { handleAdminImageRoute } from './worker-src/routes/admin-images.js';
+import { handlePublicMediaRoute } from './worker-src/routes/media.js';
 import { TOP_LEVEL_ROUTES, classifyTopLevelRoute } from './worker-src/routes/top-level.js';
 import {
   classifyVerificationApiRoute,
   dispatchVerificationApiRoute,
 } from './worker-src/routes/verification.js';
 import { buildDeployBootstrapConsumptionKey } from './worker-src/auth/bootstrap.js';
+import {
+  IMAGE_MAX_BYTES,
+  buildImageAssetView,
+  isSafeImageObjectKey,
+  listImageAssetsPage,
+  normalizeImagePublicBaseUrl,
+  removeImageAsset,
+  storeImageAsset,
+} from './worker-src/storage/images.js';
 import { normalizeRotationAngle, normalizeSliderTrace } from './worker-src/auth/verification.js';
 import {
   buildSliderSubmitProof,
@@ -134,7 +145,23 @@ import { handleAdminAccessCommand } from './worker-src/telegram/admin-access-com
 import { handleAdminUserCommand } from './worker-src/telegram/admin-user-commands.js';
 import { handleAdminSystemCommand } from './worker-src/telegram/admin-system-commands.js';
 import { handleAdminActionCallbackCommand } from './worker-src/telegram/admin-action-callback.js';
+import {
+  buildHierarchicalAdminCommandPanelKeyboard,
+  buildAdminCommandPanelText,
+  handleAdminCommandPanelCallback,
+  isAdminCommandPanelCallback,
+} from './worker-src/telegram/admin-command-panel.js';
 import { handleAuthorizedAdminMessage } from './worker-src/telegram/admin-message.js';
+import {
+  ADMIN_IMAGE_UPLOAD_TTL_SECONDS,
+  tryHandleAdminImageUploadMessage,
+} from './worker-src/telegram/admin-image-upload.js';
+import {
+  ADMIN_PANEL_INPUT_TTL_SECONDS,
+  beginAdminPanelInput,
+  getAdminPanelInputScopeKey,
+  tryHandleAdminPanelInputMessage,
+} from './worker-src/telegram/admin-panel-input.js';
 import { handleVerificationSessionApiRequest } from './worker-src/telegram/verification-session-api.js';
 import { loadVerificationApiContext } from './worker-src/telegram/verification-api-context.js';
 import { handleVerificationChoiceApiRequest } from './worker-src/telegram/verification-choice-api.js';
@@ -246,6 +273,7 @@ const DEPLOYMENT_HEALTH_KEY = 'sys:deployment_health';
 const VERIFY_IMAGE_PATH = '/verify-image';
 const VERIFY_WEB_PATH = '/verify';
 const VERIFY_API_PREFIX = '/verify/api';
+const MEDIA_PREFIX = '/media/';
 const VERIFY_WEB_SESSION_EXPIRE_MS = 15 * 60 * 1000;
 const VERIFY_RETRY_BLOCK_MS = 60 * 60 * 1000;
 const VERIFY_STAGE_MAX_ATTEMPTS = 3;
@@ -270,6 +298,8 @@ const BOT_DESCRIPTION_MAX_LENGTH = 512;
 const BOT_SHORT_DESCRIPTION_MAX_LENGTH = 120;
 const WELCOME_SETUP_PENDING_PREFIX = 'sys:welcome_setup:';
 const WELCOME_SETUP_PENDING_TTL_SECONDS = 10 * 60;
+const ADMIN_IMAGE_UPLOAD_PENDING_PREFIX = 'sys:admin_image_upload:';
+const ADMIN_PANEL_INPUT_PENDING_PREFIX = 'sys:admin_panel_input:';
 const SYSTEM_CONFIG_CACHE_TTL_MS = 5 * 1000;
 const GROUP_ADMIN_MEMBER_CACHE_TTL_MS = 90 * 1000;
 const GROUP_ADMIN_LIST_CACHE_TTL_MS = 60 * 1000;
@@ -342,6 +372,7 @@ export default {
           reply: handleAdminReplyRequest,
           blacklist: handleAdminBlacklistRequest,
           trust: handleAdminTrustRequest,
+          images: handleAdminImageRequest,
           authorizedAdmins: handleAuthorizedAdminRequest,
           webhookManagement: handleWebhookManagementRequest,
         },
@@ -423,6 +454,7 @@ async function handleTopLevelRequest(request, url, env, webhookPath, publicBaseU
     verifyImage: VERIFY_IMAGE_PATH,
     verifyWeb: VERIFY_WEB_PATH,
     verifyApiPrefix: VERIFY_API_PREFIX,
+    mediaPrefix: MEDIA_PREFIX,
     adminPanel: ADMIN_PANEL_PATH,
   });
 
@@ -441,6 +473,13 @@ async function handleTopLevelRequest(request, url, env, webhookPath, publicBaseU
       });
     case TOP_LEVEL_ROUTES.VERIFY_API:
       return handleVerificationApiRequest(request, url, env, publicBaseUrl);
+    case TOP_LEVEL_ROUTES.MEDIA:
+      return handlePublicMediaRoute({ request, url }, {
+        getMediaPrefix: () => MEDIA_PREFIX,
+        ensureBucket: () => ensureEnv(env, ['IMAGE_BUCKET']),
+        isSafeKey: isSafeImageObjectKey,
+        getObject: (objectKey) => env.IMAGE_BUCKET.get(objectKey),
+      });
     case TOP_LEVEL_ROUTES.DEPLOY_BOOTSTRAP:
       return handleDeployBootstrap(request, env, webhookPath, publicBaseUrl);
     case TOP_LEVEL_ROUTES.ADMIN_ENTRY: {
@@ -602,6 +641,47 @@ async function handleAdminTrustRequest(request, url, env) {
     nowIso: () => new Date().toISOString(),
     addEntry: (userId, entry) => setTrustEntry(env, userId, entry),
     deleteEntry: (userId) => deleteTrustEntry(env, userId),
+    createError: (status, message) => new AppError(status, message),
+    json,
+  });
+}
+
+function mapImageUploadError(error) {
+  if (error instanceof AppError) return error;
+  const code = error instanceof Error ? error.message : String(error);
+  const messages = {
+    image_file_required: [400, '请先选择要上传的图片'],
+    image_type_not_allowed: [400, '仅支持 JPG、PNG、WebP 和 GIF 图片'],
+    image_file_empty: [400, '图片文件为空'],
+    image_file_too_large: [413, '图片大小不能超过 10 MB'],
+    image_signature_mismatch: [400, '图片内容与文件类型不匹配'],
+    image_id_invalid: [500, '图片标识生成失败'],
+  };
+  const mapped = messages[code];
+  return mapped ? new AppError(mapped[0], mapped[1]) : error;
+}
+
+async function handleAdminImageRequest(request, url, env, publicBaseUrl) {
+  return handleAdminImageRoute({ request, url, publicBaseUrl }, {
+    getAdminApiPrefix: () => ADMIN_API_PREFIX,
+    requireAdmin: (value) => requireHttpAdmin(value, env),
+    ensureBindings: () => ensureEnv(env, ['DB', 'IMAGE_BUCKET']),
+    parseLimit,
+    parseOffset,
+    listPage: (options) => listImageAssetsPage(env.DB, options),
+    store: (file, createdBy) => storeImageAsset({
+      file,
+      createdBy,
+      db: env.DB,
+      bucket: env.IMAGE_BUCKET,
+    }),
+    remove: (id) => removeImageAsset({ id, db: env.DB, bucket: env.IMAGE_BUCKET }),
+    buildView: (asset, baseUrl) => buildImageAssetView(asset, baseUrl, {
+      imagePublicBaseUrl: env.IMAGE_PUBLIC_BASE_URL,
+    }),
+    getOperator: getHttpAdminOperator,
+    isValidId: (id) => /^[a-f0-9-]{20,64}$/i.test(String(id || '')),
+    mapUploadError: mapImageUploadError,
     createError: (status, message) => new AppError(status, message),
     json,
   });
@@ -996,8 +1076,8 @@ async function handleCallbackQuery(callbackQuery, env, publicBaseUrl = '', ctx =
     return;
   }
 
-  if (data.startsWith('adm:')) {
-    await handleAdminActionCallback(callbackQuery, env, ctx);
+  if (data.startsWith('adm:') || isAdminCommandPanelCallback(data)) {
+    await handleAdminActionCallback(callbackQuery, env, publicBaseUrl, ctx);
     return;
   }
 
@@ -1138,6 +1218,8 @@ async function handleAdminMessage(message, env, adminChatId, preAuthorized = nul
     isTopicModeEnabled: () => isTopicModeEnabled(env),
     getPrivateRelayAdminUserIds: () => getPrivateRelayAdminUserIds(env),
     tryConsumePendingWelcomeSetup: (value) => tryConsumePendingWelcomeSetup(value, env),
+    tryConsumePendingImageUpload: (value) => tryConsumePendingAdminImageUpload(value, env, publicBaseUrl),
+    tryConsumePendingPanelInput: (value) => tryConsumePendingAdminPanelInput(value, env, publicBaseUrl),
     resolveAdminTargetUserId: (value, chatId) => resolveAdminTargetUserId(value, env, chatId),
     handleAdminCommand: (value, targetUserId, baseUrl) => handleAdminCommand(value, env, targetUserId, baseUrl),
     sendUserMessage: (targetUserId, text) => telegram(env, 'sendMessage', {
@@ -1154,6 +1236,11 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
   if (typeof message.text !== 'string') return false;
 
   const trimmed = normalizeBotCommandText(message.text);
+  if (trimmed === '/start') {
+    await sendAdminCommandPanel(env, message);
+    return true;
+  }
+
   const senderId = message.from?.id ? Number(message.from.id) : null;
   const rootAdmin = senderId ? isRootAdmin(env, senderId) : false;
   const pendingScope = getWelcomeSetupScopeKey(message);
@@ -1240,7 +1327,7 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
   return false;
 }
 
-async function handleAdminActionCallback(callbackQuery, env, ctx = null) {
+async function handleAdminActionCallback(callbackQuery, env, publicBaseUrl = '', ctx = null) {
   const senderId = callbackQuery.from?.id ? Number(callbackQuery.from.id) : null;
   const sourceChatId = callbackQuery.message?.chat?.id ? Number(callbackQuery.message.chat.id) : null;
   const adminChatId = toChatId(env.ADMIN_CHAT_ID);
@@ -1259,6 +1346,26 @@ async function handleAdminActionCallback(callbackQuery, env, ctx = null) {
     user: callbackQuery.from || {},
     adminChatId,
   }));
+
+  if (isAdminCommandPanelCallback(callbackQuery.data)) {
+    const sourceMessage = callbackQuery.message || { chat: { id: senderId } };
+    const commandMessage = {
+      ...sourceMessage,
+      from: callbackQuery.from || sourceMessage.from,
+    };
+    await handleAdminCommandPanelCallback(
+      { data: callbackQuery.data },
+      {
+        answer: (text, showAlert = false) => answerCallback(env, callbackQuery.id, text, showAlert),
+        startUpload: () => tryConsumePendingAdminImageUpload({ ...commandMessage, text: '/upload' }, env, publicBaseUrl),
+        runAdminCommand: (text) => handleAdminCommand({ ...commandMessage, text }, env, null, publicBaseUrl),
+        startInput: (action) => beginPendingAdminPanelInput(commandMessage, env, action),
+        confirmDeleteInput: () => confirmPendingAdminPanelDelete(commandMessage, env, publicBaseUrl),
+        editPanel: (payload) => editAdminCommandPanel(env, sourceMessage, payload),
+      },
+    );
+    return;
+  }
 
   await handleAdminActionCallbackCommand(
     {
@@ -1287,6 +1394,32 @@ async function handleAdminActionCallback(callbackQuery, env, ctx = null) {
       sendBlockedMessage: (userId, text) => telegram(env, 'sendMessage', { chat_id: userId, text }),
     },
   );
+}
+
+async function sendAdminCommandPanel(env, message) {
+  const payload = {
+    chat_id: message.chat.id,
+    text: buildAdminCommandPanelText(),
+    reply_markup: buildHierarchicalAdminCommandPanelKeyboard(),
+  };
+
+  if (message.message_thread_id) {
+    payload.message_thread_id = message.message_thread_id;
+  }
+
+  await telegramWithThreadFallback(env, 'sendMessage', payload);
+}
+
+async function editAdminCommandPanel(env, message, payload = {}) {
+  const chatId = Number(message?.chat?.id || 0);
+  const messageId = Number(message?.message_id || 0);
+  if (!chatId || !messageId) return false;
+  await telegram(env, 'editMessageText', {
+    chat_id: chatId,
+    message_id: messageId,
+    ...payload,
+  });
+  return true;
 }
 
 function getWelcomeType(env) {
@@ -1800,6 +1933,9 @@ async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
     hasToken: Boolean(env.BOT_TOKEN),
     hasKv: Boolean(env.BOT_KV),
     hasD1: Boolean(env.DB),
+    hasR2: Boolean(env.IMAGE_BUCKET),
+    imagePublicBaseUrl: normalizeImagePublicBaseUrl(env.IMAGE_PUBLIC_BASE_URL) || null,
+    imageDeliveryMode: normalizeImagePublicBaseUrl(env.IMAGE_PUBLIC_BASE_URL) ? 'r2-custom-domain' : 'worker-fallback',
     hasAdminApiKey: Boolean(env.ADMIN_API_KEY),
     adminChatId: env.ADMIN_CHAT_ID || null,
     rootAdminIds: getRootAdminIds(env),
@@ -3639,6 +3775,148 @@ function getWelcomeSetupScopeKey(message) {
   return `${chatId}:${threadId}`;
 }
 
+async function getPendingAdminImageUpload(env, scopeKey) {
+  if (!env?.BOT_KV || !scopeKey) return null;
+  return getJson(env.BOT_KV, `${ADMIN_IMAGE_UPLOAD_PENDING_PREFIX}${scopeKey}`);
+}
+
+async function setPendingAdminImageUpload(env, scopeKey, payload = {}) {
+  ensureKv(env);
+  if (!scopeKey) return;
+  await env.BOT_KV.put(`${ADMIN_IMAGE_UPLOAD_PENDING_PREFIX}${scopeKey}`, JSON.stringify(payload), {
+    expirationTtl: ADMIN_IMAGE_UPLOAD_TTL_SECONDS,
+  });
+}
+
+async function clearPendingAdminImageUpload(env, scopeKey) {
+  if (!env?.BOT_KV || !scopeKey) return;
+  await env.BOT_KV.delete(`${ADMIN_IMAGE_UPLOAD_PENDING_PREFIX}${scopeKey}`);
+}
+
+async function downloadTelegramImageFile(env, descriptor = {}) {
+  const fileId = String(descriptor.fileId || '').trim();
+  if (!fileId) throw new Error('telegram_file_missing');
+  const metadata = await telegram(env, 'getFile', { file_id: fileId });
+  const filePath = String(metadata?.file_path || '').trim();
+  const declaredSize = Number(metadata?.file_size || descriptor.fileSize || 0) || 0;
+  if (!filePath) throw new Error('telegram_file_missing');
+  if (declaredSize > IMAGE_MAX_BYTES) throw new Error('image_file_too_large');
+
+  const response = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`);
+  if (!response.ok) throw new Error('telegram_file_download_failed');
+  const contentLength = Number(response.headers.get('content-length') || 0) || 0;
+  if (contentLength > IMAGE_MAX_BYTES) throw new Error('image_file_too_large');
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength > IMAGE_MAX_BYTES) throw new Error('image_file_too_large');
+
+  return {
+    name: String(descriptor.fileName || 'telegram-image'),
+    type: String(descriptor.contentType || ''),
+    size: bytes.byteLength,
+    arrayBuffer: async () => bytes,
+  };
+}
+
+async function tryConsumePendingAdminImageUpload(message, env, publicBaseUrl) {
+  return tryHandleAdminImageUploadMessage(message, {
+    now: () => new Date(),
+    isReady: () => Boolean(env?.BOT_KV && env?.DB && env?.IMAGE_BUCKET),
+    getSession: (scopeKey) => getPendingAdminImageUpload(env, scopeKey),
+
+    setSession: (scopeKey, payload) => setPendingAdminImageUpload(env, scopeKey, payload),
+    clearSession: (scopeKey) => clearPendingAdminImageUpload(env, scopeKey),
+    sendNotice: (text) => sendAdminNotice(env, message, text),
+    downloadFile: (descriptor) => downloadTelegramImageFile(env, descriptor),
+    store: (file, createdBy) => storeImageAsset({ file, createdBy, db: env.DB, bucket: env.IMAGE_BUCKET }),
+    buildView: (asset) => buildImageAssetView(asset, publicBaseUrl, {
+      imagePublicBaseUrl: env.IMAGE_PUBLIC_BASE_URL,
+    }),
+  });
+}
+
+async function getPendingAdminPanelInput(env, scopeKey) {
+  if (!env?.BOT_KV || !scopeKey) return null;
+  return getJson(env.BOT_KV, `${ADMIN_PANEL_INPUT_PENDING_PREFIX}${scopeKey}`);
+}
+
+async function setPendingAdminPanelInput(env, scopeKey, payload = {}) {
+  ensureKv(env);
+  if (!scopeKey) return;
+  await env.BOT_KV.put(`${ADMIN_PANEL_INPUT_PENDING_PREFIX}${scopeKey}`, JSON.stringify(payload), {
+    expirationTtl: ADMIN_PANEL_INPUT_TTL_SECONDS,
+  });
+}
+
+async function clearPendingAdminPanelInput(env, scopeKey) {
+  if (!env?.BOT_KV || !scopeKey) return;
+  await env.BOT_KV.delete(`${ADMIN_PANEL_INPUT_PENDING_PREFIX}${scopeKey}`);
+}
+
+async function beginPendingAdminPanelInput(message, env, action) {
+  return beginAdminPanelInput(message, action, {
+    now: () => new Date(),
+    setSession: (scopeKey, payload) => setPendingAdminPanelInput(env, scopeKey, payload),
+    sendNotice: (text) => sendAdminNotice(env, message, text),
+  });
+}
+
+async function sendAdminPanelInputReply(env, message, userId, text) {
+  await telegram(env, 'sendMessage', { chat_id: userId, text });
+  await saveMessageHistory(env, {
+    userId: Number(userId),
+    chatType: 'private',
+    topicId: message.message_thread_id || null,
+    telegramMessageId: Number(message.message_id) || null,
+    direction: 'admin_to_user',
+    senderRole: 'admin',
+    messageType: 'text',
+    textContent: text,
+    mediaFileId: null,
+    rawPayload: message,
+  });
+}
+
+async function sendAdminPanelDeleteConfirmation(env, message, userId) {
+  const payload = {
+    chat_id: message.chat.id,
+    text: [
+      '⚠️ 确认彻底删除用户',
+      '',
+      `用户 ID：${userId}`,
+      '该操作会删除用户资料、验证状态、会话和历史消息，无法恢复。',
+      '点击下方确认按钮执行；发送 /cancel 可取消。',
+    ].join('\n'),
+    reply_markup: {
+      inline_keyboard: [[{ text: '🗑️ 确认删除用户', callback_data: 'panel:deleteuser' }]],
+    },
+  };
+  if (message.message_thread_id) payload.message_thread_id = message.message_thread_id;
+  await telegramWithThreadFallback(env, 'sendMessage', payload);
+}
+
+async function tryConsumePendingAdminPanelInput(message, env, publicBaseUrl) {
+  return tryHandleAdminPanelInputMessage(message, {
+    now: () => new Date(),
+    getSession: (scopeKey) => getPendingAdminPanelInput(env, scopeKey),
+    setSession: (scopeKey, payload) => setPendingAdminPanelInput(env, scopeKey, payload),
+    clearSession: (scopeKey) => clearPendingAdminPanelInput(env, scopeKey),
+    sendNotice: (text) => sendAdminNotice(env, message, text),
+    runAdminCommand: (text) => handleAdminCommand({ ...message, text }, env, null, publicBaseUrl),
+    sendReply: (userId, text) => sendAdminPanelInputReply(env, message, userId, text),
+    requestDeleteConfirmation: (userId) => sendAdminPanelDeleteConfirmation(env, message, userId),
+  });
+}
+
+async function confirmPendingAdminPanelDelete(message, env, publicBaseUrl) {
+  const scopeKey = getAdminPanelInputScopeKey(message);
+  const pending = await getPendingAdminPanelInput(env, scopeKey);
+  const userId = Number(pending?.userId || 0);
+  if (!scopeKey || pending?.action !== 'deleteuser' || pending?.stage !== 'confirm' || !userId) return false;
+  await clearPendingAdminPanelInput(env, scopeKey);
+  await handleAdminCommand({ ...message, text: `/deleteuser ${userId}` }, env, null, publicBaseUrl);
+  return true;
+}
+
 function normalizeWelcomeTypeForSetup(value) {
   const type = String(value || '').trim().toLowerCase();
   if (type === WELCOME_TYPE_TEXT) return WELCOME_TYPE_TEXT;
@@ -4943,7 +5221,7 @@ function corsHeaders(request = null) {
 
   return {
     'access-control-allow-origin': allowOrigin,
-    'access-control-allow-methods': 'GET,POST,OPTIONS',
+    'access-control-allow-methods': 'GET,HEAD,POST,DELETE,OPTIONS',
     'access-control-allow-headers': 'Content-Type, Authorization, X-Admin-Key',
     'access-control-allow-credentials': 'true',
     vary: 'Origin',
@@ -5495,6 +5773,153 @@ function renderVerificationWebPage() {
       .grid{gap:8px}
       .grid button{border-radius:14px}
     }
+
+
+    /* Verification UI refresh: compact, calm and mobile-first. */
+    body{
+      align-items:flex-start;
+      background:
+        radial-gradient(720px 360px at 10% -8%,rgba(37,99,235,.12),transparent 60%),
+        radial-gradient(620px 320px at 100% 0,rgba(20,184,166,.10),transparent 58%),
+        #f4f7fb;
+    }
+    .shell{
+      width:min(560px,100%);
+      max-height:none;
+      border-color:rgba(148,163,184,.32);
+      border-radius:26px;
+      box-shadow:0 24px 70px rgba(30,64,175,.12),0 2px 10px rgba(15,23,42,.06);
+    }
+    .shell::before{width:220px;height:220px;inset:-140px auto auto -120px;opacity:.7}
+    .shell::after{width:190px;height:190px;inset:auto -110px -120px auto;opacity:.65}
+    .hero{
+      padding:20px 22px 16px;
+      background:linear-gradient(145deg,rgba(255,255,255,.98),rgba(248,251,255,.96));
+      border-bottom-color:rgba(203,213,225,.72);
+    }
+    .hero-head{align-items:center;margin-bottom:14px}
+    .title{font-size:clamp(24px,5.8vw,29px);line-height:1.15;letter-spacing:-.5px}
+    .subtitle{max-width:430px;margin-top:6px;font-size:13px;line-height:1.55;font-weight:500;color:#64748b}
+    .hero-tag{
+      gap:5px;margin-top:0;padding:6px 10px;border:0;color:#1d4ed8;background:#eff6ff;
+      font-size:11px;font-weight:750;
+    }
+    .hero-tag::before{
+      content:'✓';display:grid;place-items:center;width:16px;height:16px;border-radius:50%;
+      color:#fff;background:#2563eb;font-size:10px;
+    }
+    .flow{gap:10px;margin-top:0}
+    .flow-item{
+      min-width:0;padding:9px 11px;border:1px solid #e2e8f0;border-radius:13px;
+      background:#f8fafc;box-shadow:none;transform:none;
+    }
+    .flow-item i{width:24px;height:24px;border:0;color:#64748b;background:#e2e8f0}
+    .flow-item span{
+      overflow:hidden;color:#64748b;font-size:12px;text-overflow:ellipsis;white-space:nowrap;
+    }
+    .flow-item.active{
+      border-color:#bfdbfe;background:#eff6ff;
+      box-shadow:inset 0 0 0 1px rgba(59,130,246,.08);transform:none;
+    }
+    .flow-item.active i{border:0;color:#fff;background:#2563eb}
+    .flow-item.active span{color:#1e40af}
+    .flow-item.done{border-color:#bbf7d0;background:#f0fdf4}
+    .flow-item.done i{border:0;color:#fff;background:#16a34a}
+    .content{gap:12px;padding:14px 16px 18px;overflow:visible}
+    .status{
+      padding:10px 12px;border-color:#e2e8f0;border-radius:12px;background:#f8fafc;
+      color:#475569;font-size:13px;line-height:1.5;
+    }
+    .status.warn{border-color:#fde68a;background:#fffbeb;color:#92400e}
+    .status.ok{border-color:#bbf7d0;background:#f0fdf4;color:#166534}
+    .status.err{border-color:#fecdd3;background:#fff1f2;color:#be123c}
+    .panel{
+      padding:18px;border-color:#e2e8f0;border-radius:20px;
+      box-shadow:0 10px 30px rgba(15,23,42,.045);
+    }
+    .panel h2{
+      margin-bottom:8px;color:#0f2742;font-size:clamp(21px,5vw,25px);line-height:1.25;
+      letter-spacing:-.4px;font-weight:850;
+    }
+    .meta{gap:6px;margin-bottom:14px}
+    .chip{
+      padding:5px 9px;border-color:#dbeafe;background:#f8fbff;color:#4b6682;
+      font-size:11px;font-weight:650;
+    }
+    .board.rotation-board{
+      width:min(100%,226px);max-width:226px;padding:9px;border:1px solid #dbeafe;
+      background:radial-gradient(circle at 35% 25%,#fff 0%,#f0f7ff 46%,#e3effb 100%);
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.85),0 14px 32px rgba(30,64,175,.13);
+    }
+    .puzzle-bg.rotation-image{box-shadow:0 8px 22px rgba(30,64,175,.13)}
+    .slider-row{gap:8px;margin-top:14px}
+    .slider-controls{padding:0 3px}
+    .slider-track{
+      height:52px;border-color:#dbe3ee;background:#f1f5f9;
+      box-shadow:inset 0 1px 3px rgba(15,23,42,.08);
+    }
+    .slider-track-fill{background:linear-gradient(90deg,rgba(37,99,235,.18),rgba(20,184,166,.13))}
+    .slider-handle{
+      width:54px;height:54px;border-color:#dbeafe;color:#2563eb;
+      box-shadow:0 7px 18px rgba(30,64,175,.18);
+    }
+    .slider-track-text{inset:0 14px 0 66px;color:#64748b;font-size:12px;font-weight:650}
+    .tiny{padding:0 4px;color:#64748b;font-size:12px;line-height:1.55;text-align:center}
+    .actions{
+      margin:10px -2px -2px;padding:8px 2px 2px;
+      background:linear-gradient(180deg,rgba(255,255,255,0),#fff 34%);
+    }
+    .primary-btn{
+      min-height:50px;border-radius:15px;background:linear-gradient(135deg,#2563eb,#1d4ed8);
+      font-size:16px;font-weight:780;box-shadow:0 9px 22px rgba(37,99,235,.24);
+    }
+    .grid{gap:9px}
+    .grid button,.choice-grid button{
+      border-color:#dbe3ee;border-radius:14px;background:#f8fafc;box-shadow:none;
+    }
+    .grid button.selected,.choice-grid button.selected{
+      border-color:#60a5fa;background:#eff6ff;box-shadow:0 0 0 3px rgba(59,130,246,.12);
+    }
+    .choice-image-wrap{border-color:#e2e8f0;border-radius:16px;background:#f8fafc}
+    .foot{color:#64748b;font-size:12px;line-height:1.55}
+
+    @media (max-width:640px){
+      body{display:block;padding:0;background:#f8fafc}
+      .shell{
+        width:100%;min-height:100dvh;max-height:none;border:0;border-radius:0;
+        box-shadow:none;overflow:visible;
+      }
+      .hero{padding:16px 16px 13px}
+      .hero-head{gap:8px;margin-bottom:12px}
+      .title{font-size:23px}
+      .subtitle{margin-top:4px;font-size:12px;line-height:1.5}
+      .hero-tag{padding:5px 8px;font-size:10px}
+      .hero-tag::before{width:14px;height:14px;font-size:9px}
+      .flow{gap:8px}
+      .flow-item{padding:8px 9px;gap:8px}
+      .flow-item i{width:22px;height:22px}
+      .flow-item span{font-size:11px}
+      .content{padding:12px 12px calc(16px + env(safe-area-inset-bottom))}
+      .status{padding:9px 11px;font-size:12px}
+      .panel{padding:15px;border-radius:18px}
+      .panel h2{font-size:21px}
+      .board.rotation-board{width:min(62vw,218px);max-width:218px}
+      .slider-controls{padding:0}
+      .slider-track{height:50px}
+      .slider-handle{width:52px;height:52px}
+      .slider-track-text{inset:0 10px 0 60px;font-size:11px}
+      .primary-btn{width:100%;min-height:50px}
+      .chip{padding:4px 8px;font-size:10px}
+    }
+    @media (max-width:380px){
+      .hero{padding:14px 13px 12px}
+      .title{font-size:21px}
+      .subtitle{font-size:11px}
+      .content{padding:10px}
+      .panel{padding:13px}
+      .panel h2{font-size:19px}
+      .board.rotation-board{width:min(60vw,202px);max-width:202px}
+    }
   </style>
 </head>
 <body>
@@ -5503,9 +5928,9 @@ function renderVerificationWebPage() {
       <div class="hero-head">
         <div>
           <h1 id="pageTitle" class="title">两步安全验证</h1>
-          <p id="pageSubtitle" class="subtitle">先完成旋转验证，再完成九宫格九选二。每一步最多 3 次，超限将锁定 60 分钟。</p>
+          <p id="pageSubtitle" class="subtitle">完成两个简单步骤，确认你是真实用户。每步最多尝试 3 次。</p>
         </div>
-        <span class="hero-tag">Bot Shield v2</span>
+        <span class="hero-tag">安全连接</span>
       </div>
       <div id="flow" class="flow">
         <div id="stageOne" class="flow-item"><i>1</i><span id="stageOneLabel">旋转验证</span></div>
@@ -5516,7 +5941,7 @@ function renderVerificationWebPage() {
       <div id="status" class="status">正在加载验证会话...</div>
 
       <section id="choicePanel" class="panel hide">
-        <h2>数字图片验证</h2>
+        <h2>识别图片数字</h2>
         <div class="meta">
           <span id="choiceAttemptChip" class="chip"></span>
           <span class="chip">四选一</span>
@@ -5534,10 +5959,10 @@ function renderVerificationWebPage() {
       </section>
 
       <section id="sliderPanel" class="panel hide">
-        <h2>第一步：旋转验证</h2>
+        <h2>旋转图片</h2>
         <div class="meta">
           <span id="sliderAttemptChip" class="chip"></span>
-          <span class="chip">拖动滑杆转正图片</span>
+          <span class="chip">调整到正确方向</span>
         </div>
         <div id="puzzleWrap" class="board">
           <img id="puzzleBg" class="puzzle-bg" alt="slider puzzle" />
@@ -5549,25 +5974,25 @@ function renderVerificationWebPage() {
             <div id="sliderTrack" class="slider-track" role="slider" tabindex="0" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
               <div id="sliderTrackFill" class="slider-track-fill"></div>
               <div id="sliderHandle" class="slider-handle" aria-hidden="true"></div>
-              <span id="sliderTrackText" class="slider-track-text">拖动滑杆，把上方图片转正</span>
+              <span id="sliderTrackText" class="slider-track-text">拖动滑杆旋转图片</span>
             </div>
           </div>
-          <div class="tiny">按住下方滑杆微调角度，让图片里的箭头和 N 朝上后提交。滑杆区域已禁用页面手势滚动。</div>
+          <div class="tiny">将箭头和字母 N 调整为朝上，然后确认。</div>
         </div>
         <div class="actions">
-          <button id="sliderSubmitBtn" class="primary-btn" type="button">提交第一步</button>
+          <button id="sliderSubmitBtn" class="primary-btn" type="button">确认并继续</button>
         </div>
       </section>
 
       <section id="gridPanel" class="panel hide">
-        <h2>第二步：九宫格点选（九选二）</h2>
+        <h2>选择对应图片</h2>
         <div class="meta">
           <span id="gridAttemptChip" class="chip"></span>
           <span id="gridPromptChip" class="chip"></span>
         </div>
         <div id="gridCells" class="grid"></div>
         <div class="actions">
-          <button id="gridSubmitBtn" class="primary-btn" type="button" disabled>提交第二步</button>
+          <button id="gridSubmitBtn" class="primary-btn" type="button" disabled>完成验证</button>
         </div>
         <div id="gridHint" class="foot">当前已选择 0/2</div>
       </section>
@@ -5696,8 +6121,8 @@ function renderVerificationWebPage() {
         const numeric = Boolean(payload && (payload.flowMode === 'numeric-choice' || payload.stage === 'choice'));
         el.pageTitle.textContent = numeric ? '数字图片验证' : '两步安全验证';
         el.pageSubtitle.textContent = numeric
-          ? '识别图片中的 4 位数字，并从四个选项中选择正确答案。'
-          : '先完成旋转验证，再完成九宫格九选二。每一步最多 3 次，超限将锁定 60 分钟。';
+          ? '看清图片中的 4 位数字，选择正确答案。'
+          : '完成两个简单步骤，确认你是真实用户。每步最多尝试 3 次。';
         el.stageOneLabel.textContent = numeric ? '数字四选一' : '旋转验证';
         el.stageTwoLabel.textContent = '九宫格点选';
         el.stageTwo.classList.toggle('hide', numeric);

@@ -27,6 +27,7 @@ const ADMIN_COMMANDS = Object.freeze([
   { command: 'admindel', description: '移除管理员：/admindel 用户ID' },
   { command: 'panelpass', description: '重发当前面板临时密码' },
   { command: 'panelreset', description: '生成新的面板临时密码' },
+  { command: 'upload', description: '上传下一张图片到图床' },
   { command: 'sweepdeleted', description: '巡检已注销账户并清理' },
   { command: 'setcommands', description: '同步 Telegram 斜杠菜单' },
 ]);

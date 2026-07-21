@@ -51,13 +51,13 @@ body[data-theme="dark"] {
 .hidden { display: none !important; }
 
 .sidebar {
-  width: 240px;
-  min-width: 240px;
+  width: 288px;
+  min-width: 288px;
   background: var(--surface);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  padding: 20px 12px;
+  padding: 20px 12px 14px;
 }
 .sidebar-title {
   font-size: 11px;
@@ -146,6 +146,31 @@ body[data-theme="dark"] {
   color: #ef4444;
   background: #fee2e2;
 }
+#account-list { display: grid; gap: 8px; max-height: min(48vh, 430px); overflow-y: auto; padding: 2px; }
+.account-item {
+  display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; gap: 10px; padding: 10px;
+  border: 1px solid transparent; outline: none;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.account-item:hover, .account-item:focus-visible { background: var(--bg); border-color: var(--border); }
+.account-item.active { background: var(--accent-light); border-color: color-mix(in srgb, var(--accent) 26%, var(--border)); }
+.account-avatar { width: 40px; height: 40px; }
+.account-info { min-width: 0; }
+.account-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.account-name { min-width: 0; font-size: 14px; font-weight: 600; }
+.account-active { flex-shrink: 0; padding: 2px 5px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); font-size: 10px; font-weight: 600; }
+.account-meta { display: flex; align-items: center; gap: 6px; min-width: 0; margin-top: 4px; }
+.account-id { min-width: 0; flex: 1; }
+.account-token-state { flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px; color: #059669; font-size: 10px; white-space: nowrap; }
+.account-token-state::before { content: ""; width: 5px; height: 5px; border-radius: 999px; background: currentColor; }
+.account-actions { display: flex; align-items: center; gap: 2px; opacity: 0; transition: opacity 0.15s; }
+.account-item:hover .account-actions,
+.account-item:focus-within .account-actions,
+.account-item.active .account-actions { opacity: 1; }
+.account-action { width: 24px; height: 24px; border: 0; border-radius: 7px; background: transparent; color: var(--text-2); font: inherit; font-size: 15px; line-height: 1; cursor: pointer; }
+.account-action:hover { background: var(--surface); color: var(--text); }
+.account-action.clear:hover { color: #b45309; background: #fef3c7; }
+.account-action.delete:hover { color: #ef4444; background: #fee2e2; }
 .add-account-btn {
   margin-top: 8px;
   padding: 10px 8px;
@@ -160,6 +185,11 @@ body[data-theme="dark"] {
   gap: 6px;
   transition: background 0.15s;
 }
+.account-token-hint { grid-column: 2; grid-row: 2; margin: 0; overflow: hidden; text-overflow: ellipsis; }
+.account-clear { grid-column: 3; grid-row: 1; text-align: center; }
+.account-del { grid-column: 3; grid-row: 2; text-align: center; }
+.account-item.active .account-clear,
+.account-item.active .account-del { opacity: 0.72; }
 .add-account-btn:hover { background: var(--accent-light); }
 .sidebar-footer {
   margin-top: auto;
@@ -396,6 +426,14 @@ body[data-theme="dark"] {
   color: var(--text);
 }
 
+
+.dash-meta-grid .dash-value-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dash-meta-grid .dash-value-truncate[title] { cursor: help; }
 .dash-extra {
   margin-top: 2px;
   display: grid;
@@ -934,38 +972,16 @@ body[data-theme="dark"] {
     <div class="dashboard-warning hidden" id="dashboard-warning"></div>
 
     <div class="dash-grid">
-      <article class="dash-card" id="dash-card-requests">
+      <article class="dash-card dash-card-resource" id="dash-card-worker">
         <div class="dash-row">
-          <div class="dash-label" id="dash-label-requests">Worker 24h Requests</div>
-          <div class="dash-donut">
-            <svg viewBox="0 0 64 64" aria-hidden="true">
-              <circle class="dash-donut-track" cx="32" cy="32" r="24"></circle>
-              <circle class="dash-donut-ring" id="dash-ring-requests" cx="32" cy="32" r="24" pathLength="100"></circle>
-            </svg>
-            <span class="dash-donut-pct" id="dash-pct-requests">0%</span>
-          </div>
+          <div class="dash-label" id="dash-label-worker">Worker</div>
         </div>
         <div class="dash-meta-grid">
-          <div><small id="dash-used-text-requests">Used</small><b id="dash-used-requests">--</b></div>
-          <div><small id="dash-total-text-requests">Total</small><b id="dash-total-requests">--</b></div>
+          <div><small id="dash-used-text-worker">Used</small><b id="dash-used-requests">--</b></div>
+          <div><small id="dash-total-text-worker">Total</small><b id="dash-total-requests">--</b></div>
         </div>
-      </article>
-
-      <article class="dash-card" id="dash-card-workers">
-        <div class="dash-row">
-          <div class="dash-label" id="dash-label-workers">Workers Scripts</div>
-          <div class="dash-donut">
-            <svg viewBox="0 0 64 64" aria-hidden="true">
-              <circle class="dash-donut-track" cx="32" cy="32" r="24"></circle>
-              <circle class="dash-donut-ring" id="dash-ring-workers" cx="32" cy="32" r="24" pathLength="100"></circle>
-            </svg>
-            <span class="dash-donut-pct" id="dash-pct-workers">0%</span>
-          </div>
-        </div>
-        <div class="dash-meta-grid">
-          <div><small id="dash-used-text-workers">Used</small><b id="dash-used-workers">--</b></div>
-          <div><small id="dash-total-text-workers">Total</small><b id="dash-total-workers">--</b></div>
-        </div>
+        <div class="dash-mini-grid" id="dash-mini-worker"></div>
+        <div class="dash-extra" id="dash-extra-worker"></div>
       </article>
 
       <article class="dash-card dash-card-resource" id="dash-card-kv">
@@ -992,21 +1008,27 @@ body[data-theme="dark"] {
         <div class="dash-extra" id="dash-extra-d1"></div>
       </article>
 
-      <article class="dash-card" id="dash-card-pages">
+      <article class="dash-card dash-card-resource" id="dash-card-r2">
+        <div class="dash-row">
+          <div class="dash-label" id="dash-label-r2">R2 图床</div>
+        </div>
+        <div class="dash-meta-grid">
+          <div><small id="dash-used-text-r2">存储桶数</small><b id="dash-used-r2">--</b></div>
+          <div><small id="dash-total-text-r2">当前图床桶</small><b class="dash-value-truncate" id="dash-total-r2">--</b></div>
+        </div>
+        <div class="dash-mini-grid" id="dash-mini-r2"></div>
+        <div class="dash-extra" id="dash-extra-r2"></div>
+      </article>
+
+      <article class="dash-card dash-card-resource" id="dash-card-pages">
         <div class="dash-row">
           <div class="dash-label" id="dash-label-pages">Pages Projects</div>
-          <div class="dash-donut">
-            <svg viewBox="0 0 64 64" aria-hidden="true">
-              <circle class="dash-donut-track" cx="32" cy="32" r="24"></circle>
-              <circle class="dash-donut-ring" id="dash-ring-pages" cx="32" cy="32" r="24" pathLength="100"></circle>
-            </svg>
-            <span class="dash-donut-pct" id="dash-pct-pages">0%</span>
-          </div>
         </div>
         <div class="dash-meta-grid">
           <div><small id="dash-used-text-pages">Used</small><b id="dash-used-pages">--</b></div>
           <div><small id="dash-total-text-pages">Total</small><b id="dash-total-pages">--</b></div>
         </div>
+        <div class="dash-mini-grid" id="dash-mini-pages"></div>
         <div class="dash-extra" id="dash-extra-pages"></div>
       </article>
     </div>
@@ -1041,6 +1063,24 @@ body[data-theme="dark"] {
           <label class="deploy-field">
             <span id="label-verify-public-base-url">Verification URL base (optional)</span>
             <input id="d-verify-public-base-url" />
+          </label>
+          <label class="deploy-field">
+            <span id="label-deploy-image-hosting">Deploy image hosting (R2)</span>
+            <select id="d-deploy-image-hosting-select">
+              <option value="1" id="deploy-image-hosting-on">Enabled</option>
+              <option value="0" id="deploy-image-hosting-off">Disabled</option>
+            </select>
+          </label>
+          <label class="deploy-field">
+            <span id="label-image-public-base-url">Image public URL (optional)</span>
+            <input id="d-image-public-base-url" />
+          </label>
+          <label class="deploy-field">
+            <span id="label-auto-image-domain">Auto configure image domain and cache</span>
+            <select id="d-auto-image-domain-select">
+              <option value="1" id="auto-image-domain-on">Enabled</option>
+              <option value="0" id="auto-image-domain-off">Manual</option>
+            </select>
           </label>
           <label class="deploy-field">
             <span id="label-panel-url">Panel URL</span>
@@ -1140,6 +1180,9 @@ const deployKvNamespaceTitle = document.getElementById("d-kv-namespace-title")
 const deployD1DatabaseName = document.getElementById("d-d1-database-name")
 const deployWorkerUrl = document.getElementById("d-worker-url")
 const deployVerifyPublicBaseUrl = document.getElementById("d-verify-public-base-url")
+const deployImagePublicBaseUrl = document.getElementById("d-image-public-base-url")
+const deployAutoImageDomainSelect = document.getElementById("d-auto-image-domain-select")
+const deployImageHostingSelect = document.getElementById("d-deploy-image-hosting-select")
 const deployPanelUrl = document.getElementById("d-panel-url")
 const deployPanelSelect = document.getElementById("d-deploy-panel-select")
 const deployPagesProjectName = document.getElementById("d-pages-project-name")
@@ -1193,9 +1236,15 @@ const D1_LIMITS = {
   writes: 100000,
 }
 
+const R2_LIMITS = {
+  buckets: 1000000,
+  storage: 10 * 1024 * 1024 * 1024,
+  classAOperations: 1000000,
+  classBOperations: 10000000,
+}
+
 const DASHBOARD_BINDINGS = [
   { key: "workerRequests24h", usedId: "dash-used-requests", totalId: "dash-total-requests", pctId: "dash-pct-requests", ringId: "dash-ring-requests" },
-  { key: "workersScriptCount", usedId: "dash-used-workers", totalId: "dash-total-workers", pctId: "dash-pct-workers", ringId: "dash-ring-workers" },
   { key: "kvNamespaceCount", usedId: "dash-used-kv", totalId: "dash-total-kv", pctId: "dash-pct-kv", ringId: "dash-ring-kv" },
   { key: "d1DatabaseCount", usedId: "dash-used-d1", totalId: "dash-total-d1", pctId: "dash-pct-d1", ringId: "dash-ring-d1" },
   { key: "pagesProjectCount", usedId: "dash-used-pages", totalId: "dash-total-pages", pctId: "dash-pct-pages", ringId: "dash-ring-pages" },
@@ -1220,12 +1269,32 @@ const i18n = {
     clear_local_data: "清除本地数据",
     no_account_tip: "请先在左侧添加 Cloudflare 账号（API Token 模式）。",
     nav_aria: "快捷导航",
+    dash_label_r2: "R2 图床",
+    dash_r2_buckets: "存储桶数",
+    dash_r2_current: "当前图床桶",
+    dash_r2_bucket_list: "已有桶",
+    dash_r2_more: "其余 {count} 个桶...",
+    dash_r2_mini_buckets: "存储桶数量",
+    dash_r2_mini_storage: "R2 存储占用",
+    dash_r2_mini_class_a: "R2 A 类操作（近30天）",
+    dash_r2_mini_class_b: "R2 B 类操作（近30天）",
+    dash_r2_quota_storage: "总存储占用 / 10GB",
+    dash_r2_quota_class_a: "近30天 A 类操作 / 100万",
+    dash_r2_quota_class_b: "近30天 B 类操作 / 1000万",
+    dash_r2_objects: "对象",
+    dash_r2_storage: "总存储",
+    dash_r2_class_a: "A 类操作（近30天）",
+    dash_r2_class_b: "B 类操作（近30天）",
+    dash_r2_bucket_details: "桶明细",
+    dash_r2_object_short: "对象",
+    dash_r2_storage_short: "存储",
+    dash_r2_disabled: "图床功能未开启，已跳过 R2 资源和使用情况查询。",
     nav_home: "首页",
     nav_deploy: "部署",
     nav_panel: "面板",
     nav_logs: "日志",
     dashboard_title: "Cloudflare 仪表盘",
-    dashboard_desc: "当前账号的 Worker / KV / D1 / Pages 使用快照",
+    dashboard_desc: "当前账号的 Worker / KV / D1 / R2 / Pages 使用快照",
     dashboard_refresh: "刷新",
     dashboard_updating: "更新中...",
     dashboard_updated_at: "更新时间",
@@ -1239,6 +1308,17 @@ const i18n = {
     dash_label_kv: "KV 命名空间",
     dash_label_d1: "D1 数据库数",
     dash_label_pages: "Pages 项目数",
+    dash_label_worker: "Worker 资源",
+    dash_worker_mini_requests: "Worker 24h 请求",
+    dash_worker_mini_scripts: "Worker 脚本数",
+    dash_worker_quota_requests: "24h 请求 / 10万",
+    dash_worker_quota_scripts: "Worker 脚本数 / 100",
+    dash_worker_current: "当前 Worker",
+    dash_pages_mini_projects: "Pages 项目数",
+    dash_pages_quota_projects: "Pages 项目数 / 100",
+    dash_pages_project: "当前项目",
+    dash_pages_branch: "生产分支",
+    dash_pages_panel: "面板地址",
     dash_kv_mini_namespaces: "命名空间数量",
     dash_kv_mini_storage: "KV 存储占用",
     dash_kv_mini_reads: "KV 24h 读",
@@ -1264,6 +1344,13 @@ const i18n = {
     label_d1: "D1 Database Name",
     label_worker_url: "Worker URL",
     label_verify_url: "Verification URL base (optional)",
+    label_image_url: "图床独立域名（可选）",
+    auto_image_domain: "自动绑定 R2 域名并创建缓存规则",
+    label_deploy_image_hosting: "部署图床（R2）",
+    deploy_image_hosting_on: "开启",
+    deploy_image_hosting_off: "关闭",
+    auto_image_domain_on: "开启（一键配置）",
+    auto_image_domain_off: "关闭（域名已手工配置）",
     label_panel_url: "Pages 面板地址（只读，/admin 跳转目标）",
     switch_panel: "自动部署 Pages 管理面板",
     switch_panel_on: "开启",
@@ -1304,6 +1391,7 @@ const i18n = {
     ph_d1: "默认 tg-bot-history，可按账号自定义",
     ph_worker_url: "https://your-worker.example.com",
     ph_verify_url: "留空则使用 Worker 地址（PUBLIC_BASE_URL）",
+    ph_image_url: "例如 https://img.example.com，部署时自动绑定到 R2",
     ph_panel_url: "部署后自动读取 Cloudflare 分配的 pages.dev 地址",
     ph_pages_project: "默认 tg-admin-panel，可按账号自定义",
     ph_pages_branch: "默认 main",
@@ -1331,6 +1419,26 @@ const i18n = {
   },
   en: {
     app_title: "TG Bot Deploy Tool",
+    dash_label_r2: "R2 Image Storage",
+    dash_r2_buckets: "Buckets",
+    dash_r2_current: "Image Bucket",
+    dash_r2_bucket_list: "Available Buckets",
+    dash_r2_more: "{count} more buckets...",
+    dash_r2_mini_buckets: "Buckets",
+    dash_r2_mini_storage: "R2 Storage",
+    dash_r2_mini_class_a: "R2 Class A Ops (30d)",
+    dash_r2_mini_class_b: "R2 Class B Ops (30d)",
+    dash_r2_quota_storage: "Total Storage / 10 GB",
+    dash_r2_quota_class_a: "Class A Ops (30d) / 1M",
+    dash_r2_quota_class_b: "Class B Ops (30d) / 10M",
+    dash_r2_objects: "Objects",
+    dash_r2_storage: "Total Storage",
+    dash_r2_class_a: "Class A Ops (30d)",
+    dash_r2_class_b: "Class B Ops (30d)",
+    dash_r2_bucket_details: "Bucket Details",
+    dash_r2_object_short: "Objects",
+    dash_r2_storage_short: "Storage",
+    dash_r2_disabled: "Image hosting is disabled, so R2 resources and usage are not queried.",
     sidebar_title: "Cloudflare Accounts",
     add_account_btn: "Add Account",
     clear_local_data: "Clear Local Data",
@@ -1341,7 +1449,7 @@ const i18n = {
     nav_panel: "Panel",
     nav_logs: "Logs",
     dashboard_title: "Cloudflare Dashboard",
-    dashboard_desc: "Snapshot for Worker / KV / D1 / Pages usage under current account",
+    dashboard_desc: "Snapshot for Worker / KV / D1 / R2 / Pages usage under current account",
     dashboard_refresh: "Refresh",
     dashboard_updating: "Updating...",
     dashboard_updated_at: "Updated At",
@@ -1355,6 +1463,17 @@ const i18n = {
     dash_label_kv: "KV Namespaces",
     dash_label_d1: "D1 Databases",
     dash_label_pages: "Pages Projects",
+    dash_label_worker: "Worker Resources",
+    dash_worker_mini_requests: "Worker 24h Requests",
+    dash_worker_mini_scripts: "Worker Scripts",
+    dash_worker_quota_requests: "24h Requests / 100K",
+    dash_worker_quota_scripts: "Worker Scripts / 100",
+    dash_worker_current: "Current Worker",
+    dash_pages_mini_projects: "Pages Projects",
+    dash_pages_quota_projects: "Pages Projects / 100",
+    dash_pages_project: "Current Project",
+    dash_pages_branch: "Production Branch",
+    dash_pages_panel: "Panel URL",
     dash_kv_mini_namespaces: "Namespaces",
     dash_kv_mini_storage: "Storage",
     dash_kv_mini_reads: "24h Reads",
@@ -1380,6 +1499,13 @@ const i18n = {
     label_d1: "D1 Database Name",
     label_worker_url: "Worker URL",
     label_verify_url: "Verification URL base (optional)",
+    label_image_url: "Image public URL (optional)",
+    auto_image_domain: "Auto bind R2 domain and create cache rule",
+    label_deploy_image_hosting: "Deploy image hosting (R2)",
+    deploy_image_hosting_on: "Enabled",
+    deploy_image_hosting_off: "Disabled",
+    auto_image_domain_on: "On (one-click setup)",
+    auto_image_domain_off: "Off (already configured manually)",
     label_panel_url: "Pages panel URL (read-only /admin target)",
     switch_panel: "Auto deploy Pages admin panel",
     switch_panel_on: "On",
@@ -1420,6 +1546,7 @@ const i18n = {
     ph_d1: "Default tg-bot-history, customizable per account",
     ph_worker_url: "https://your-worker.example.com",
     ph_verify_url: "Leave empty to use Worker URL (PUBLIC_BASE_URL)",
+    ph_image_url: "e.g. https://img.example.com, attached to R2 during deploy",
     ph_panel_url: "Auto-detect Cloudflare-assigned pages.dev URL after deploy",
     ph_pages_project: "Default tg-admin-panel, customizable per account",
     ph_pages_branch: "Default main",
@@ -1571,6 +1698,9 @@ function getSavedDeployParams() {
     d1DatabaseName: normalizeD1DatabaseName(prefs.d1DatabaseName || "") || "tg-bot-history",
     workerUrl: String(prefs.workerUrl || "").trim(),
     verifyPublicBaseUrl: normalizeHttpUrl(prefs.verifyPublicBaseUrl || ""),
+    imagePublicBaseUrl: normalizeHttpUrl(prefs.imagePublicBaseUrl || ""),
+    autoConfigureImageDomain: prefs.autoConfigureImageDomain !== false,
+    deployImageHosting: prefs.deployImageHosting !== false,
     panelUrl: normalizePanelUrl(prefs.panelUrl),
     panelEntryUrl: String(prefs.panelEntryUrl || "").trim(),
     pagesProjectName: normalizePagesProjectName(prefs.pagesProjectName || "") || "tg-admin-panel",
@@ -1589,6 +1719,9 @@ function applyDeployFormFromActiveAccount() {
   deployD1DatabaseName.value = normalizeD1DatabaseName(prefs.d1DatabaseName || "") || "tg-bot-history"
   deployWorkerUrl.value = prefs.workerUrl || ""
   deployVerifyPublicBaseUrl.value = normalizeHttpUrl(prefs.verifyPublicBaseUrl || "")
+  deployImagePublicBaseUrl.value = normalizeHttpUrl(prefs.imagePublicBaseUrl || "")
+  deployAutoImageDomainSelect.value = prefs.autoConfigureImageDomain === false ? "0" : "1"
+  deployImageHostingSelect.value = prefs.deployImageHosting === false ? "0" : "1"
   deployPanelUrl.value = normalizePanelUrl(prefs.panelUrl)
   deployPagesProjectName.value = normalizePagesProjectName(prefs.pagesProjectName || "") || "tg-admin-panel"
   deployPagesBranch.value = normalizePagesBranch(prefs.pagesBranch || "main")
@@ -1605,6 +1738,9 @@ function getDeployFormParams() {
     d1DatabaseName: normalizeD1DatabaseName(deployD1DatabaseName.value) || "tg-bot-history",
     workerUrl: deployWorkerUrl.value.trim(),
     verifyPublicBaseUrl: normalizeHttpUrl(deployVerifyPublicBaseUrl.value),
+    imagePublicBaseUrl: normalizeHttpUrl(deployImagePublicBaseUrl.value),
+    autoConfigureImageDomain: deployAutoImageDomainSelect.value === "1",
+    deployImageHosting: deployImageHostingSelect.value === "1",
     panelUrl: normalizePanelUrl(deployPanelUrl.value),
     pagesProjectName: normalizePagesProjectName(deployPagesProjectName.value) || "tg-admin-panel",
     pagesBranch: normalizePagesBranch(deployPagesBranch.value),
@@ -1614,9 +1750,12 @@ function getDeployFormParams() {
 }
 
 function refreshDeployPanelFieldsState() {
-  const enabled = deployPanelSelect.value === "1"
-  deployPagesProjectName.disabled = !enabled || running
-  deployPagesBranch.disabled = !enabled || running
+  const panelEnabled = deployPanelSelect.value === "1"
+  const imageHostingEnabled = deployImageHostingSelect.value === "1"
+  deployPagesProjectName.disabled = !panelEnabled || running
+  deployPagesBranch.disabled = !panelEnabled || running
+  deployImagePublicBaseUrl.disabled = !imageHostingEnabled || running
+  deployAutoImageDomainSelect.disabled = !imageHostingEnabled || running
 }
 
 function positionNavIndicator(immediate = false) {
@@ -1707,12 +1846,15 @@ function setStatus(text, isRunning) {
   if (deployOpenPanelBtn) deployOpenPanelBtn.disabled = isRunning
   if (deployStartBtn) deployStartBtn.disabled = isRunning
   if (deployPanelSelect) deployPanelSelect.disabled = isRunning
+  if (deployImageHostingSelect) deployImageHostingSelect.disabled = isRunning
+  if (deployAutoImageDomainSelect) deployAutoImageDomainSelect.disabled = isRunning
   ;[
     deployWorkerName,
     deployKvNamespaceTitle,
     deployD1DatabaseName,
     deployWorkerUrl,
     deployVerifyPublicBaseUrl,
+    deployImagePublicBaseUrl,
     deployPagesProjectName,
     deployPagesBranch,
     deployBotToken,
@@ -1766,9 +1908,14 @@ function setDonut(used, total, ringId, pctId) {
 
 function clearDashboardExtras() {
   byId("dash-mini-kv").innerHTML = ""
+  byId("dash-mini-worker").innerHTML = ""
+  byId("dash-mini-pages").innerHTML = ""
   byId("dash-mini-d1").innerHTML = ""
+  byId("dash-mini-r2").innerHTML = ""
   byId("dash-extra-kv").innerHTML = ""
   byId("dash-extra-d1").innerHTML = ""
+  byId("dash-extra-worker").innerHTML = ""
+  byId("dash-extra-r2").innerHTML = ""
   byId("dash-extra-pages").innerHTML = ""
 }
 
@@ -1871,6 +2018,31 @@ function renderDashboardExtras(snapshot) {
   if (!snapshot) return
 
   const kvMini = byId("dash-mini-kv")
+  const workerMini = byId("dash-mini-worker")
+  appendMiniDonut(workerMini, {
+    labelKey: "dash_worker_mini_requests",
+    used: snapshot.workerRequests24h,
+    total: DASHBOARD_TOTALS.workerRequests24h,
+    className: "is-kv-read",
+    kind: "num",
+  })
+  appendMiniDonut(workerMini, {
+    labelKey: "dash_worker_mini_scripts",
+    used: snapshot.workersScriptCount,
+    total: DASHBOARD_TOTALS.workersScriptCount,
+    className: "is-kv-namespaces",
+    kind: "num",
+  })
+  const workerNode = byId("dash-extra-worker")
+  appendProgressLine(workerNode, t("dash_worker_quota_requests"), snapshot.workerRequests24h, DASHBOARD_TOTALS.workerRequests24h, "num")
+  appendProgressLine(workerNode, t("dash_worker_quota_scripts"), snapshot.workersScriptCount, DASHBOARD_TOTALS.workersScriptCount, "num")
+  if (snapshot.workerName) {
+    const workerName = document.createElement("p")
+    workerName.className = "dash-extra-db"
+    workerName.textContent = `${t("dash_worker_current")}: ${snapshot.workerName}`
+    workerNode.appendChild(workerName)
+  }
+
   appendMiniDonut(kvMini, {
     labelKey: "dash_kv_mini_namespaces",
     used: snapshot.kvNamespaceCount,
@@ -1961,14 +2133,112 @@ function renderDashboardExtras(snapshot) {
     d1Node.appendChild(more)
   }
 
+  const r2Mini = byId("dash-mini-r2")
+  appendMiniDonut(r2Mini, {
+    labelKey: "dash_r2_mini_buckets",
+    used: snapshot.r2BucketCount,
+    total: R2_LIMITS.buckets,
+    className: "is-r2-buckets",
+    kind: "num",
+  })
+  appendMiniDonut(r2Mini, {
+    labelKey: "dash_r2_mini_storage",
+    used: snapshot.r2StorageBytes,
+    total: R2_LIMITS.storage,
+    className: "is-r2-storage",
+    kind: "bytes",
+  })
+  appendMiniDonut(r2Mini, {
+    labelKey: "dash_r2_mini_class_a",
+    used: snapshot.r2ClassAOperations30d,
+    total: R2_LIMITS.classAOperations,
+    className: "is-r2-class-a",
+    kind: "num",
+  })
+  appendMiniDonut(r2Mini, {
+    labelKey: "dash_r2_mini_class_b",
+    used: snapshot.r2ClassBOperations30d,
+    total: R2_LIMITS.classBOperations,
+    className: "is-r2-class-b",
+    kind: "num",
+  })
+
+  const r2Node = byId("dash-extra-r2")
+  appendProgressLine(r2Node, t("dash_r2_quota_storage"), snapshot.r2StorageBytes, R2_LIMITS.storage, "bytes")
+  appendProgressLine(r2Node, t("dash_r2_quota_class_a"), snapshot.r2ClassAOperations30d, R2_LIMITS.classAOperations, "num")
+  appendProgressLine(r2Node, t("dash_r2_quota_class_b"), snapshot.r2ClassBOperations30d, R2_LIMITS.classBOperations, "num")
+  if (snapshot.r2ConfiguredBucketName) {
+    const configured = document.createElement("p")
+    configured.className = "dash-extra-db"
+    configured.textContent = `${t("dash_r2_current")}: ${snapshot.r2ConfiguredBucketName}`
+    r2Node.appendChild(configured)
+  }
+  const r2BucketMetrics = Array.isArray(snapshot.r2BucketMetrics) ? snapshot.r2BucketMetrics : []
+  const r2Buckets = Array.isArray(snapshot.r2Buckets) ? snapshot.r2Buckets : []
+  if (r2BucketMetrics.length > 0) {
+    const title = document.createElement("p")
+    title.className = "dash-extra-title"
+    title.textContent = t("dash_r2_bucket_details")
+    r2Node.appendChild(title)
+  }
+  r2BucketMetrics.slice(0, 3).forEach((bucket) => {
+    const row = document.createElement("p")
+    row.className = "dash-extra-db"
+    row.textContent = `${bucket.name} · ${t("dash_r2_object_short")} ${formatNumber(bucket.objectCount)} · ${t("dash_r2_storage_short")} ${formatBytes(bucket.payloadBytes)}`
+    r2Node.appendChild(row)
+  })
+  if (r2BucketMetrics.length === 0 && r2Buckets.length > 0) {
+    const row = document.createElement("p")
+    row.className = "dash-extra-db"
+    row.textContent = `${t("dash_r2_bucket_list")}: ${r2Buckets.slice(0, 3).join(" · ")}`
+    r2Node.appendChild(row)
+  }
+  const r2DetailCount = r2BucketMetrics.length || r2Buckets.length
+  if (r2DetailCount > 3) {
+    const more = document.createElement("p")
+    more.className = "dash-extra-db muted"
+    more.textContent = fmt(t("dash_r2_more"), { count: r2DetailCount - 3 })
+    r2Node.appendChild(more)
+  }
+  if (snapshot.r2Enabled === false) {
+    const hint = document.createElement("p")
+    hint.className = "dash-extra-db muted"
+    hint.textContent = t("dash_r2_disabled")
+    r2Node.prepend(hint)
+  }
+
+  const pagesMini = byId("dash-mini-pages")
+  appendMiniDonut(pagesMini, {
+    labelKey: "dash_pages_mini_projects",
+    used: snapshot.pagesProjectCount,
+    total: DASHBOARD_TOTALS.pagesProjectCount,
+    className: "is-d1-databases",
+    kind: "num",
+  })
   const pagesNode = byId("dash-extra-pages")
-  const workerLine = document.createElement("p")
-  workerLine.className = "dash-extra-db"
-  workerLine.textContent = `Worker: ${snapshot.workerName || t("dash_na")}`
-  pagesNode.appendChild(workerLine)
+  appendProgressLine(pagesNode, t("dash_pages_quota_projects"), snapshot.pagesProjectCount, DASHBOARD_TOTALS.pagesProjectCount, "num")
+  for (const [label, value] of [
+    [t("dash_pages_project"), snapshot.pagesProjectName],
+    [t("dash_pages_branch"), snapshot.pagesBranch],
+    [t("dash_pages_panel"), snapshot.pagesPanelUrl],
+  ]) {
+    const detail = document.createElement("p")
+    detail.className = "dash-extra-db"
+    detail.textContent = `${label}: ${value || t("dash_na")}`
+    pagesNode.appendChild(detail)
+  }
+}
+
+function setR2DashboardCardVisible(enabled) {
+  const card = byId("dash-card-r2")
+  if (card) card.classList.toggle("hidden", !enabled)
 }
 
 function renderDashboard(snapshot, externalWarning = "", missingConfig = false) {
+  const r2Enabled = snapshot
+    ? snapshot.r2Enabled !== false
+    : currentActiveAccount?.deployPrefs?.deployImageHosting !== false
+  setR2DashboardCardVisible(r2Enabled)
   DASHBOARD_BINDINGS.forEach((binding) => {
     const usedRaw = snapshot && Number.isFinite(snapshot[binding.key]) ? Number(snapshot[binding.key]) : null
     const total = DASHBOARD_TOTALS[binding.key]
@@ -1976,6 +2246,11 @@ function renderDashboard(snapshot, externalWarning = "", missingConfig = false) 
     byId(binding.totalId).textContent = formatNumber(total)
     setDonut(usedRaw, total, binding.ringId, binding.pctId)
   })
+
+  const r2BucketCount = snapshot && Number.isFinite(snapshot.r2BucketCount) ? Number(snapshot.r2BucketCount) : null
+  byId("dash-used-r2").textContent = formatNumber(r2BucketCount)
+  byId("dash-total-r2").textContent = formatNumber(R2_LIMITS.buckets)
+  byId("dash-total-r2").title = ""
 
   renderDashboardExtras(snapshot)
 
@@ -2032,7 +2307,6 @@ async function refreshDashboard(force = false) {
       return
     }
   }
-
   const requestId = ++dashboardRequestSeq
   setDashboardLoading(true)
   try {
@@ -2073,16 +2347,22 @@ function applyLocale() {
   setText("dash-label-requests", "dash_label_requests")
   setText("dash-label-workers", "dash_label_workers")
   setText("dash-label-kv", "dash_label_kv")
+  setText("dash-label-worker", "dash_label_worker")
   setText("dash-label-d1", "dash_label_d1")
+  setText("dash-label-r2", "dash_label_r2")
   setText("dash-label-pages", "dash_label_pages")
   setText("dash-used-text-requests", "dash_used")
   setText("dash-total-text-requests", "dash_total")
   setText("dash-used-text-workers", "dash_used")
   setText("dash-total-text-workers", "dash_total")
   setText("dash-used-text-kv", "dash_used")
+  setText("dash-used-text-worker", "dash_used")
+  setText("dash-total-text-worker", "dash_total")
   setText("dash-total-text-kv", "dash_total")
   setText("dash-used-text-d1", "dash_used")
   setText("dash-total-text-d1", "dash_total")
+  setText("dash-used-text-r2", "dash_r2_buckets")
+  setText("dash-total-text-r2", "dash_total")
   setText("dash-used-text-pages", "dash_used")
   setText("dash-total-text-pages", "dash_total")
 
@@ -2095,6 +2375,13 @@ function applyLocale() {
   setText("label-d1-database-name", "label_d1")
   setText("label-worker-url", "label_worker_url")
   setText("label-verify-public-base-url", "label_verify_url")
+  setText("label-image-public-base-url", "label_image_url")
+  setText("label-auto-image-domain", "auto_image_domain")
+  setText("auto-image-domain-on", "auto_image_domain_on")
+  setText("label-deploy-image-hosting", "label_deploy_image_hosting")
+  setText("deploy-image-hosting-on", "deploy_image_hosting_on")
+  setText("deploy-image-hosting-off", "deploy_image_hosting_off")
+  setText("auto-image-domain-off", "auto_image_domain_off")
   setText("label-panel-url", "label_panel_url")
   setText("label-deploy-panel", "switch_panel")
   setText("d-deploy-panel-on", "switch_panel_on")
@@ -2128,6 +2415,7 @@ function applyLocale() {
   deployD1DatabaseName.placeholder = t("ph_d1")
   deployWorkerUrl.placeholder = t("ph_worker_url")
   deployVerifyPublicBaseUrl.placeholder = t("ph_verify_url")
+  deployImagePublicBaseUrl.placeholder = t("ph_image_url")
   deployPanelUrl.placeholder = t("ph_panel_url")
   deployPagesProjectName.placeholder = t("ph_pages_project")
   deployPagesBranch.placeholder = t("ph_pages_branch")
@@ -2205,11 +2493,18 @@ async function execAction(action, params) {
 
 async function saveDeployForm(showStatus = false) {
   const params = getDeployFormParams()
-  await window.api.accounts.saveDeployPrefs(params)
+  const accountId = currentActiveAccount?.id
+  const savedPrefs = await window.api.accounts.saveDeployPrefs(params, accountId)
+  if (!savedPrefs) throw new Error(t("no_active_account"))
+  if (currentActiveAccount?.id === accountId) {
+    currentActiveAccount.deployPrefs = savedPrefs
+    setR2DashboardCardVisible(savedPrefs.deployImageHosting !== false)
+  }
   if (showStatus) {
     setStatus("status_saved", false)
     output.textContent += `${t("status_saved")}\n`
   }
+  return savedPrefs
 }
 
 async function onDeployStart() {
@@ -2279,6 +2574,15 @@ deployPanelSelect.addEventListener("change", () => {
   refreshDeployPanelFieldsState()
 })
 
+deployImageHostingSelect.addEventListener("change", () => {
+  refreshDeployPanelFieldsState()
+  saveDeployForm(false).catch(() => {})
+})
+
+deployAutoImageDomainSelect.addEventListener("change", () => {
+  saveDeployForm(false).catch(() => {})
+})
+
 ;[
   deployBotToken,
   deployAdminChatId,
@@ -2287,6 +2591,7 @@ deployPanelSelect.addEventListener("change", () => {
   deployD1DatabaseName,
   deployWorkerUrl,
   deployVerifyPublicBaseUrl,
+  deployImagePublicBaseUrl,
   deployPagesProjectName,
   deployPagesBranch,
 ].forEach((el) => {
@@ -2343,28 +2648,38 @@ byId("confirm-add").addEventListener("click", async () => {
 })
 
 async function renderAccounts() {
-  const [accounts, activeId] = await Promise.all([
+  const [accounts, storedActiveId, activePrefs] = await Promise.all([
     window.api.accounts.list(),
     window.api.accounts.getActive(),
+    window.api.accounts.getDeployPrefs(),
   ])
+  const activeId = accounts.some((account) => account.id === storedActiveId)
+    ? storedActiveId
+    : accounts[0]?.id || null
 
   const list = byId("account-list")
   const tip = byId("no-account-tip")
   tip.classList.toggle("hidden", accounts.length > 0)
 
-  currentActiveAccount = accounts.find((a) => a.id === activeId) || accounts[0] || null
+  currentActiveAccount = accounts.find((a) => a.id === activeId) || null
+  if (currentActiveAccount) currentActiveAccount.deployPrefs = activePrefs || {}
 
   list.innerHTML = accounts
     .map((a) => {
-      const shortId = a.accountId ? `${a.accountId.slice(0, 8)}...` : ""
+      const accountId = String(a.accountId || "").trim()
+      const shortId = accountId ? `${accountId.slice(0, 6)}...${accountId.slice(-4)}` : ""
+      const identity = [a.email, shortId].filter(Boolean).join(" | ")
+      const label = a.name || t("unnamed_account")
       return `
-    <div class="account-item ${a.id === activeId ? "active" : ""}" data-id="${a.id}">
+    <div class="account-item ${a.id === activeId ? "active" : ""}" data-id="${a.id}" role="button" tabindex="0" aria-label="${label}">
       <div class="account-avatar">${(a.name || "?")[0].toUpperCase()}</div>
       <div class="account-info">
-        <div class="account-name">${a.name || t("unnamed_account")}</div>
-        <div class="account-id">${a.email || shortId}</div>
+        <div class="account-head"><div class="account-name" title="${label}">${label}</div></div>
+        <div class="account-meta">
+          <div class="account-id" title="${accountId}">${identity}</div>
+        </div>
       </div>
-      <span class="account-token-hint">${a.hasApiToken ? `${t("token_saved_hint")}: ${a.apiTokenHint}` : ""}</span>
+      <span class="account-token-hint">${a.hasApiToken ? t("token_saved_hint") : ""}</span>
       <span class="account-clear" data-clear="${a.id}" title="${t("clear_credentials")}">⌫</span>
       <span class="account-del" data-del="${a.id}" title="${t("delete_title")}">x</span>
     </div>`
@@ -2373,7 +2688,13 @@ async function renderAccounts() {
 
   list.querySelectorAll(".account-item").forEach((el) => {
     el.addEventListener("click", async (e) => {
-      if (e.target.dataset.del) return
+      if (running || e.target.closest("[data-del], [data-clear]")) return
+      await window.api.accounts.setActive(el.dataset.id)
+      await renderAccounts()
+    })
+    el.addEventListener("keydown", async (e) => {
+      if (running || e.target !== el || !["Enter", " "].includes(e.key)) return
+      e.preventDefault()
       await window.api.accounts.setActive(el.dataset.id)
       await renderAccounts()
     })
@@ -2381,6 +2702,7 @@ async function renderAccounts() {
 
   list.querySelectorAll("[data-del]").forEach((el) => {
     el.addEventListener("click", async (e) => {
+      if (running) return
       e.stopPropagation()
       if (!confirm(t("delete_account_confirm"))) return
       await window.api.accounts.delete(el.dataset.del)
@@ -2390,6 +2712,7 @@ async function renderAccounts() {
 
   list.querySelectorAll("[data-clear]").forEach((el) => {
     el.addEventListener("click", async (e) => {
+      if (running) return
       e.stopPropagation()
       if (!confirm(t("clear_credentials_confirm"))) return
       await window.api.accounts.clearCredentials(el.dataset.clear)

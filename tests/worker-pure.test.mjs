@@ -547,10 +547,13 @@ test('classifies top-level routes and preserves admin handler order', async () =
       verifyImage: '/verify-image',
       verifyWeb: '/verify',
       verifyApiPrefix: '/verify/api',
+      mediaPrefix: '/media/',
       adminPanel: '/admin',
     };
     assert.equal(module.classifyTopLevelRoute('GET', '/health', paths), 'health');
     assert.equal(module.classifyTopLevelRoute('POST', '/verify/api/choice', paths), 'verify_api');
+    assert.equal(module.classifyTopLevelRoute('GET', '/media/2026/07/image.png', paths), 'media');
+    assert.equal(module.classifyTopLevelRoute('HEAD', '/media/2026/07/image.png', paths), 'media');
     assert.equal(module.classifyTopLevelRoute('GET', '/unknown', paths), null);
 
     const calls = [];

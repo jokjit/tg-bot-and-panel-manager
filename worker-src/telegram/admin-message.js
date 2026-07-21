@@ -55,8 +55,10 @@ export async function handleAuthorizedAdminMessage(context = {}, handlers = {}) 
   if (!isGroupAdminChat && !isAuthorizedPrivateAdminChat) return;
   if (isIgnoredAdminServiceMessage(message)) return;
   if (await handlers.tryConsumePendingWelcomeSetup(message)) return;
+  if (await handlers.tryConsumePendingImageUpload?.(message)) return;
 
   const defaultTargetUserId = await handlers.resolveAdminTargetUserId(message, adminChatId);
+  if (await handlers.tryConsumePendingPanelInput?.(message)) return;
   if (await handlers.handleAdminCommand(message, defaultTargetUserId, publicBaseUrl)) return;
 
   const parsedCommand = parseReplyCommand(message.text);

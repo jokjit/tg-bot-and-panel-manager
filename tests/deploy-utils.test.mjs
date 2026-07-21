@@ -14,6 +14,7 @@ import {
   normalizeWebhookPath,
   parseCfApiResult,
   shouldIgnorePagesAsset,
+  suggestImageBucketName,
   suggestPagesProjectName,
 } from '../shared/deploy-utils.cjs';
 import {
@@ -30,6 +31,8 @@ test('normalizes URLs, paths, and Pages project names', () => {
   assert.equal(normalizeWebhookPath(''), '/webhook');
   assert.equal(normalizePagesProjectName(' My Worker / Panel '), 'my-worker-panel');
   assert.equal(suggestPagesProjectName('Support Bot'), 'support-bot-panel');
+  assert.equal(suggestImageBucketName('Support Bot'), 'support-bot-images');
+  assert.equal(suggestImageBucketName('a'.repeat(80)).length, 63);
 });
 
 test('builds panel URLs and rejects platform-hosted custom domains', () => {
@@ -73,6 +76,7 @@ test('builds deterministic Worker upload metadata', () => {
     sortVars: true,
     kvNamespaceId: 'kv-id',
     d1DatabaseId: 'db-id',
+    r2BucketName: 'test-worker-images',
     compatibilityDate: '2026-01-01',
   }), {
     main_module: 'worker.js',
@@ -83,6 +87,7 @@ test('builds deterministic Worker upload metadata', () => {
       { type: 'plain_text', name: 'Z', text: 'last' },
       { type: 'kv_namespace', name: 'BOT_KV', namespace_id: 'kv-id' },
       { type: 'd1', name: 'DB', database_id: 'db-id' },
+      { type: 'r2_bucket', name: 'IMAGE_BUCKET', bucket_name: 'test-worker-images' },
     ],
   });
 });

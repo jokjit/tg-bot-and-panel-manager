@@ -6,13 +6,16 @@
 
 1. Cloudflare API 初始化 / 复用 KV Namespace
 2. Cloudflare API 初始化 / 复用 D1 Database
-3. 自动执行 `migrations/*.sql`
-4. 上传 `worker.js`（multipart + metadata bindings）
-5. 自动启用 `workers.dev`，或绑定你填写的自定义域名
-6. 自动创建 / 复用 Pages 项目并直传管理面板静态资源
-7. 回写 `ADMIN_PANEL_URL` 到 Worker 变量并重新上传生效
-8. 写入 Worker Secrets：`BOT_TOKEN`、`ADMIN_CHAT_ID`、`DEPLOY_BOOTSTRAP_TOKEN`
-9. 调用 `/deploy/bootstrap` 完成 Webhook / 命令 / 面板初始密码链路
+3. Cloudflare API 初始化 / 复用 R2 Bucket，并绑定为 `IMAGE_BUCKET`
+4. 自动执行 `migrations/*.sql`
+5. 上传 `worker.js`（multipart + metadata bindings）
+6. 自动启用 `workers.dev`，或绑定你填写的自定义域名
+7. 自动创建 / 复用 Pages 项目并直传管理面板静态资源
+8. 回写 `ADMIN_PANEL_URL` 到 Worker 变量并重新上传生效
+9. 写入 Worker Secrets：`BOT_TOKEN`、`ADMIN_CHAT_ID`、`DEPLOY_BOOTSTRAP_TOKEN`
+10. 调用 `/deploy/bootstrap` 完成 Webhook / 命令 / 面板初始密码链路
+
+部署配置中的“图床独立域名”对应 `IMAGE_PUBLIC_BASE_URL`。默认开启一键配置：部署器会自动识别 Zone、把域名绑定到 R2 bucket、创建一年 Edge TTL 的缓存规则并轮询证书状态。图片访客流量直接走 R2/CDN，不经过 Worker。Token 需要 R2 Edit、Zone Read 和 Cache Rules Edit 权限；若域名已经手工配置，可关闭自动配置选项。
 
 ## 本地开发
 

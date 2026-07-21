@@ -7,6 +7,7 @@ export async function dispatchAdminRoutes(context, handlers) {
     () => handlers.reply(request, url, env),
     () => handlers.blacklist(request, url, env),
     () => handlers.trust(request, url, env),
+    () => (handlers.images ? handlers.images(request, url, env, publicBaseUrl) : null),
     () => handlers.authorizedAdmins(request, url, env),
     () => handlers.webhookManagement(request, url, env, webhookPath, publicBaseUrl),
   ];

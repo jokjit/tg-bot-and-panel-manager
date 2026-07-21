@@ -40,7 +40,7 @@ function upsertBindingBlock(content, tableName, binding, block) {
   }
 
   const commentedPlaceholder = new RegExp(
-    `#\\s*\\[\\[${escapeRegExp(tableName)}\\]\\][\\s\\S]*?#\\s*(?:id|database_id)\\s*=\\s*"<YOUR_[^"]+_ID>"`,
+    `#\\s*\\[\\[${escapeRegExp(tableName)}\\]\\][\\s\\S]*?#\\s*(?:id|database_id|bucket_name)\\s*=\\s*"<YOUR_[^"]+(?:_ID|_NAME)>"`,
   );
   if (commentedPlaceholder.test(content)) {
     return content.replace(commentedPlaceholder, block);
@@ -80,6 +80,11 @@ if (existsSync(localPath)) {
     const d1Block = findBindingBlock(local, 'd1_databases', 'DB');
     if (d1Block) {
       merged = upsertBindingBlock(merged, 'd1_databases', 'DB', d1Block);
+    }
+
+    const r2Block = findBindingBlock(local, 'r2_buckets', 'IMAGE_BUCKET');
+    if (r2Block) {
+      merged = upsertBindingBlock(merged, 'r2_buckets', 'IMAGE_BUCKET', r2Block);
     }
 
     const varsMatch = local.match(/\[vars\][\s\S]*?(?=\n\[|$)/);

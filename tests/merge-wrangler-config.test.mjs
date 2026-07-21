@@ -11,7 +11,17 @@ const root = resolve(import.meta.dirname, '..');
 
 test('merges private bindings, vars, account, worker, and main settings', async () => {
   const cwd = await mkdtemp(resolve(tmpdir(), 'tg-bot-wrangler-'));
-  await writeFile(resolve(cwd, 'wrangler.toml'), '[vars]\nENV = "base"\n\n[\n');
+  await writeFile(resolve(cwd, 'wrangler.toml'), [
+    'name = "base-worker"',
+    'main = "worker.js"',
+    '',
+    '# [[r2_buckets]]',
+    '# binding = "IMAGE_BUCKET"',
+    '# bucket_name = "<YOUR_R2_BUCKET_NAME>"',
+    '',
+    '[vars]',
+    'ENV = "base"',
+  ].join('\n'));
   await writeFile(resolve(cwd, 'wrangler.local.toml'), [
     '[vars]',
     'ENV = "local"',
@@ -24,6 +34,10 @@ test('merges private bindings, vars, account, worker, and main settings', async 
     '[[d1_databases]]',
     'binding = "DB"',
     'database_id = "db-id"',
+    '',
+    '[[r2_buckets]]',
+    'binding = "IMAGE_BUCKET"',
+    'bucket_name = "test-worker-images"',
   ].join('\n'));
 
   await execFileAsync(process.execPath, [resolve(root, 'scripts/merge-wrangler-config.mjs')], {
@@ -39,4 +53,5 @@ test('merges private bindings, vars, account, worker, and main settings', async 
   assert.match(merged, /SECRET = "value"/);
   assert.match(merged, /binding = "BOT_KV"[\s\S]*id = "kv-id"/);
   assert.match(merged, /binding = "DB"[\s\S]*database_id = "db-id"/);
+  assert.match(merged, /binding = "IMAGE_BUCKET"[\s\S]*bucket_name = "test-worker-images"/);
 });

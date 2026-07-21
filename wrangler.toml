@@ -19,11 +19,18 @@ workers_dev = true
 # database_name = "tg-bot-history"
 # database_id = "<YOUR_D1_DATABASE_ID>"
 
+# IMAGE_BUCKET 用于保存图床原始图片，图片元数据和分页索引仍保存在 D1。
+# 部署工具会按当前 Worker 名称自动创建或复用 R2 bucket。
+# [[r2_buckets]]
+# binding = "IMAGE_BUCKET"
+# bucket_name = "<YOUR_R2_BUCKET_NAME>"
+
 [vars]
 WEBHOOK_PATH = "/webhook"
 TOPIC_MODE = "true"
 USER_VERIFICATION = "true"
 ADMIN_META_MODE = "new-topic"
+IMAGE_PUBLIC_BASE_URL = ""
 VERIFY_MAX_FAILURES = "2"
 WELCOME_TEXT = "你好，欢迎使用私聊中转机器人。"
 BLOCKED_TEXT = "你已被管理员限制联系，如有需要请稍后再试。"

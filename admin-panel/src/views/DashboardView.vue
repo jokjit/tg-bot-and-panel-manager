@@ -142,6 +142,11 @@ const heroIndicators = computed(() => [
     label: t('dashboard.d1'),
     value: statusData.value?.hasD1 ? t('app.enabled') : t('app.disabled'),
   },
+  {
+    key: 'r2',
+    label: t('dashboard.r2'),
+    value: statusData.value?.hasR2 ? t('app.enabled') : t('app.disabled'),
+  },
 ]);
 
 const runtimeRows = computed(() => [
@@ -152,6 +157,10 @@ const runtimeRows = computed(() => [
   {
     label: t('dashboard.panelLabel'),
     value: statusData.value?.adminPanel || statusData.value?.adminPanelTarget || '-',
+  },
+  {
+    label: t('dashboard.imageUrlLabel'),
+    value: statusData.value?.imagePublicBaseUrl || `${statusData.value?.publicBaseUrl || ''}/media`,
   },
 ]);
 

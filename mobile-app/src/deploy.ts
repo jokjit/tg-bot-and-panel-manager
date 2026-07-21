@@ -1,9 +1,9 @@
 ﻿import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { Preferences } from '@capacitor/preferences';
 // @ts-ignore Shared CommonJS utility module is bundled by Vite.
-import deployUtils from '../../shared/deploy-utils.cjs';
+import deployUtils from '@tg-bot/deploy-utils';
 // @ts-ignore Shared CommonJS deployment orchestration is bundled by Vite.
-import deploymentCore from '../../shared/deployment-core.cjs';
+import deploymentCore from '@tg-bot/deployment-core';
 
 const {
   buildCfErrorReason,
@@ -12,6 +12,7 @@ const {
   buildPagesManifest,
   buildPagesUploadBatches,
   buildWorkerUploadMetadata: buildWorkerUploadMetadataFromParts,
+  ensureImageDelivery: ensureImageDeliveryCore,
   getCustomDomainHost,
   getUrlOrigin,
   normalizeHttpUrl,
@@ -19,6 +20,7 @@ const {
   normalizePagesProjectName,
   normalizeWebhookPath,
   isPagesUploadAuthError,
+  suggestImageBucketName,
   suggestPagesProjectName,
 } = deployUtils as {
   buildCfErrorReason: (json: any, status: number, text?: string) => string;
@@ -31,11 +33,20 @@ const {
     vars: Record<string, string>;
     kvNamespaceId: string;
     d1DatabaseId: string;
+    r2BucketName: string;
     sortVars?: boolean;
   }) => Record<string, unknown>;
+  ensureImageDelivery: (options: {
+    accountId: string;
+    bucketName: string;
+    imagePublicBaseUrl: string;
+    apiRequest: (resource: string, options?: { method?: string; body?: unknown }) => Promise<any>;
+    onProgress: (text: string) => void;
+  }) => Promise<any>;
   getCustomDomainHost: (value: string) => string;
   getUrlOrigin: (value: string) => string;
   isPagesUploadAuthError: (error: any) => boolean;
+  suggestImageBucketName: (workerName: string) => string;
   normalizeHashListResult: (result: any, fallback: string[]) => string[];
   normalizeHttpUrl: (value: string) => string;
   normalizePagesProjectName: (value: string) => string;
@@ -86,6 +97,8 @@ export interface DeployFormState {
   adminChatId: string;
   workerUrl: string;
   verifyPublicBaseUrl: string;
+  imagePublicBaseUrl: string;
+  autoConfigureImageDomain: boolean;
   panelUrl: string;
   deployPanel: boolean;
   pagesProjectName: string;
@@ -96,8 +109,12 @@ export interface DeployRunResult {
   workerName: string;
   workerUrl: string;
   verifyPublicBaseUrl: string;
+  imagePublicBaseUrl: string;
+  imageDomainActive: boolean;
+  imageDomainStatus: string;
   kvNamespaceId: string;
   d1DatabaseId: string;
+  imageBucketName: string;
   webhookUrl: string;
   panelUrl: string;
   panelEntryUrl: string;
@@ -1002,6 +1019,8 @@ function sanitizeFormState(input: Partial<DeployFormState>): DeployFormState {
     adminChatId: String(input.adminChatId || '').trim(),
     workerUrl: String(input.workerUrl || '').trim(),
     verifyPublicBaseUrl: String(input.verifyPublicBaseUrl || '').trim(),
+    imagePublicBaseUrl: String(input.imagePublicBaseUrl || '').trim(),
+    autoConfigureImageDomain: normalizeBoolean(input.autoConfigureImageDomain, true),
     panelUrl: String(input.panelUrl || '').trim(),
     deployPanel: normalizeBoolean(input.deployPanel, true),
     pagesProjectName: normalizePagesProjectName(String(input.pagesProjectName || '').trim()) || suggestPagesProjectName(workerName),
@@ -1022,6 +1041,8 @@ export async function createDefaultFormState(): Promise<DeployFormState> {
     adminChatId: '',
     workerUrl: '',
     verifyPublicBaseUrl: '',
+    imagePublicBaseUrl: '',
+    autoConfigureImageDomain: true,
     panelUrl: '',
     deployPanel: true,
     pagesProjectName: suggestPagesProjectName(workerName),
@@ -1242,17 +1263,100 @@ async function ensureD1Database(
   return { databaseId: found.id };
 }
 
+async function listR2Buckets(token: string, accountId: string): Promise<Array<{ name: string }>> {
+  const response = await cfApi<any>(token, accountId, `/accounts/${accountId}/r2/buckets`);
+  if (!response.ok) {
+    throw new Error(`R2 bucket 列表读取失败: ${response.reason}`);
+  }
+  const source = Array.isArray(response.result)
+    ? response.result
+    : Array.isArray(response.result?.buckets)
+      ? response.result.buckets
+      : [];
+  return source
+    .map((item: any) => ({ name: String(item?.name || '').trim() }))
+    .filter((item: { name: string }) => Boolean(item.name));
+}
+
+async function ensureR2Bucket(
+  token: string,
+  accountId: string,
+  bucketName: string,
+  onLog: (text: string) => void,
+): Promise<{ bucketName: string }> {
+  onLog('正在初始化 R2 图床存储...');
+  let buckets = await listR2Buckets(token, accountId);
+  let found = buckets.find((item) => item.name === bucketName);
+
+  if (!found) {
+    const created = await cfApi<any>(token, accountId, `/accounts/${accountId}/r2/buckets`, {
+      method: 'POST',
+      jsonBody: { name: bucketName },
+    });
+    if (!created.ok) {
+      if (!/already exists|10013|10014/i.test(created.reason)) {
+        throw new Error(`R2 bucket 创建失败: ${created.reason}`);
+      }
+      buckets = await listR2Buckets(token, accountId);
+      found = buckets.find((item) => item.name === bucketName);
+    } else {
+      found = { name: String(created.result?.name || bucketName) };
+    }
+  }
+
+  if (!found?.name) {
+    throw new Error(`找不到 R2 bucket: ${bucketName}`);
+  }
+  onLog(`R2 就绪: ${bucketName}`);
+  return { bucketName };
+}
+
+async function ensureImageDelivery(
+  token: string,
+  accountId: string,
+  bucketName: string,
+  imagePublicBaseUrl: string,
+  autoConfigure: boolean,
+  onLog: (text: string) => void,
+): Promise<any> {
+  if (!imagePublicBaseUrl) {
+    return { skipped: true, reason: 'image_public_base_url_empty', active: false };
+  }
+  if (!autoConfigure) {
+    onLog('图床域名自动配置已关闭，将直接使用已手工绑定的域名。');
+    return { skipped: true, reason: 'manual_mode', active: false };
+  }
+
+  return ensureImageDeliveryCore({
+    accountId,
+    bucketName,
+    imagePublicBaseUrl,
+    apiRequest: (resource: string, requestOptions: { method?: string; body?: unknown } = {}) => cfApi<any>(
+      token,
+      accountId,
+      resource,
+      {
+        method: (requestOptions.method || 'GET') as RequestOptions['method'],
+        jsonBody: requestOptions.body,
+      },
+    ),
+    onProgress: onLog,
+  });
+}
+
 function buildWorkerUploadMetadata(options: {
   compatibilityDate: string;
   vars: Record<string, string>;
   namespaceId: string;
   databaseId: string;
+  bucketName: string;
 }): Record<string, unknown> {
   return buildWorkerUploadMetadataFromParts({
     compatibilityDate: options.compatibilityDate,
     vars: options.vars,
     kvNamespaceId: options.namespaceId,
     d1DatabaseId: options.databaseId,
+    r2BucketName: options.bucketName,
     sortVars: true,
   });
 }
@@ -2006,9 +2110,12 @@ export async function runDeploy(
   const workerName = form.workerName || assets.defaultWorkerName || 'telegram-private-chatbot';
   const kvNamespaceTitle = form.kvNamespaceTitle || DEFAULT_KV_NAMESPACE_TITLE;
   const d1DatabaseName = form.d1DatabaseName || DEFAULT_D1_DATABASE_NAME;
+  const imageBucketName = suggestImageBucketName(workerName);
 
   const workerUrlInput = normalizeHttpUrl(form.workerUrl);
   const verifyPublicBaseUrl = normalizeHttpUrl(form.verifyPublicBaseUrl);
+  const imagePublicBaseUrl = normalizeHttpUrl(form.imagePublicBaseUrl);
+  const autoConfigureImageDomain = form.autoConfigureImageDomain !== false;
   const deployPanel = Boolean(form.deployPanel);
   const panelUrlFromForm = normalizeHttpUrl(form.panelUrl);
   // Mobile keeps panel URL as read-only display state, so avoid treating it as manual override when auto deploying Pages.
@@ -2020,19 +2127,35 @@ export async function runDeploy(
     {
       id: 'resources',
       run: async () => {
-        onLog('步骤 1/6: 初始化 KV 和 D1');
+        onLog('步骤 1/7: 初始化 KV、D1 和 R2');
         const kv = await ensureKvNamespace(token, accountId, kvNamespaceTitle, onLog);
         const d1 = await ensureD1Database(token, accountId, d1DatabaseName, assets.migrations, onLog);
-        return { kv, d1 };
+        const r2 = await ensureR2Bucket(token, accountId, imageBucketName, onLog);
+        return { kv, d1, r2 };
+      },
+    },
+    {
+      id: 'image_delivery',
+      run: async ({ results }) => {
+        onLog('步骤 2/7: 配置 R2 图床域名与边缘缓存');
+        return ensureImageDelivery(
+          token,
+          accountId,
+          results.resources.r2.bucketName,
+          imagePublicBaseUrl,
+          autoConfigureImageDomain,
+          onLog,
+        );
       },
     },
     {
       id: 'initial_worker',
       run: async ({ results }) => {
-        onLog('步骤 2/6: 初次上传 Worker');
+        onLog('步骤 3/7: 初次上传 Worker');
         const firstVars: Record<string, string> = { ...assets.defaultVars };
         if (workerUrlInput) firstVars.PUBLIC_BASE_URL = workerUrlInput;
         if (verifyPublicBaseUrl) firstVars.VERIFY_PUBLIC_BASE_URL = verifyPublicBaseUrl;
+        firstVars.IMAGE_PUBLIC_BASE_URL = imagePublicBaseUrl;
         if (manualPanelUrl) firstVars.ADMIN_PANEL_URL = manualPanelUrl;
         await uploadWorker(
           token,
@@ -2044,6 +2167,7 @@ export async function runDeploy(
             vars: firstVars,
             namespaceId: results.resources.kv.namespaceId,
             databaseId: results.resources.d1.databaseId,
+            bucketName: results.resources.r2.bucketName,
           }),
           onLog,
         );
@@ -2053,7 +2177,7 @@ export async function runDeploy(
     {
       id: 'endpoint',
       run: async () => {
-        onLog('步骤 3/6: 配置 Worker 公开入口');
+        onLog('步骤 4/7: 配置 Worker 公开入口');
         const customHost = getCustomDomainHost(workerUrlInput);
         const workersDevUrl = await ensureWorkersDevEndpoint(token, accountId, workerName, onLog);
         let workerUrl = workersDevUrl;
@@ -2074,7 +2198,7 @@ export async function runDeploy(
       run: async ({ results }) => {
         let effectivePanelUrl = manualPanelUrl;
         if (deployPanel) {
-          onLog('步骤 4/6: 部署 Pages 管理面板');
+          onLog('步骤 5/7: 部署 Pages 管理面板');
           const pagesResult = await deployPanelToPages(
             token,
             accountId,
@@ -2085,7 +2209,7 @@ export async function runDeploy(
           );
           if (!effectivePanelUrl) effectivePanelUrl = pagesResult.panelUrl;
         } else {
-          onLog('步骤 4/6: 跳过 Pages 管理面板部署（已关闭）。');
+          onLog('步骤 5/7: 跳过 Pages 管理面板部署（已关闭）。');
         }
         return {
           effectivePanelUrl,
@@ -2096,7 +2220,7 @@ export async function runDeploy(
     {
       id: 'final_worker',
       run: async ({ results }) => {
-        onLog('步骤 5/6: 回写最终运行变量并更新 Worker');
+        onLog('步骤 6/7: 回写最终运行变量并更新 Worker');
         const { effectivePanelUrl, effectivePanelTargetUrl } = results.panel;
         const finalVars: Record<string, string> = {
           ...results.initial_worker.firstVars,
@@ -2117,6 +2241,7 @@ export async function runDeploy(
             vars: finalVars,
             namespaceId: results.resources.kv.namespaceId,
             databaseId: results.resources.d1.databaseId,
+            bucketName: results.resources.r2.bucketName,
           }),
           onLog,
         );
@@ -2126,7 +2251,7 @@ export async function runDeploy(
     {
       id: 'bootstrap',
       run: async ({ results }) => {
-        onLog('步骤 6/6: 更新 Worker Secrets + 触发部署引导');
+        onLog('步骤 7/7: 更新 Worker Secrets + 触发部署引导');
         const bootstrapToken = randomHex(24);
         await upsertWorkerSecrets(
           token,
@@ -2163,7 +2288,14 @@ export async function runDeploy(
     },
   });
 
-  const { resources, endpoint, panel, final_worker: finalWorker, bootstrap: bootstrapResult } = pipeline.results;
+  const {
+    resources,
+    image_delivery: imageDelivery,
+    endpoint,
+    panel,
+    final_worker: finalWorker,
+    bootstrap: bootstrapResult,
+  } = pipeline.results;
   const finalVerifyBaseUrl = verifyPublicBaseUrl || endpoint.workerUrl;
   const panelEntryUrl = buildAdminPanelEntryUrl(endpoint.workerUrl) || panel.effectivePanelTargetUrl || panel.effectivePanelUrl;
 
@@ -2171,8 +2303,14 @@ export async function runDeploy(
     workerName,
     workerUrl: endpoint.workerUrl,
     verifyPublicBaseUrl: finalVerifyBaseUrl,
+    imagePublicBaseUrl,
+    imageDomainActive: Boolean(imageDelivery?.active),
+    imageDomainStatus: imageDelivery?.active
+      ? 'active'
+      : String(imageDelivery?.reason || imageDelivery?.domainStatus?.ssl || 'pending'),
     kvNamespaceId: resources.kv.namespaceId,
     d1DatabaseId: resources.d1.databaseId,
+    imageBucketName: resources.r2.bucketName,
     webhookUrl: bootstrapResult.bootstrap.webhookUrl || `${getUrlOrigin(endpoint.workerUrl)}${normalizeWebhookPath(finalWorker.finalVars.WEBHOOK_PATH || '/webhook')}`,
     panelUrl: finalWorker.effectivePanelTargetUrl || finalWorker.effectivePanelUrl,
     panelEntryUrl,

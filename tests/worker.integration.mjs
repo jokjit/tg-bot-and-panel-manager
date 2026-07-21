@@ -13,6 +13,7 @@ async function createWorkerRuntime() {
     compatibilityDate: '2025-07-18',
     kvNamespaces: ['BOT_KV'],
     d1Databases: ['DB'],
+    r2Buckets: ['IMAGE_BUCKET'],
     bindings: {
       ADMIN_API_KEY: adminKey,
       ADMIN_CHAT_ID: '-100123',
@@ -34,6 +35,7 @@ test('Miniflare runs the bundled Worker with KV and D1 bindings', async (t) => {
   t.after(() => mf.dispose());
   const kv = await mf.getKVNamespace('BOT_KV');
   const db = await mf.getD1Database('DB');
+  const imageBucket = await mf.getR2Bucket('IMAGE_BUCKET');
 
   await t.test('health and status routes expose runtime binding state', async () => {
     await kv.put('sys:deployment_health', JSON.stringify({ status: 'healthy', source: 'integration' }));
@@ -46,6 +48,9 @@ test('Miniflare runs the bundled Worker with KV and D1 bindings', async (t) => {
     const status = await statusResponse.json();
     assert.equal(status.hasKv, true);
     assert.equal(status.hasD1, true);
+    assert.equal(status.hasR2, true);
+    assert.equal(status.imagePublicBaseUrl, null);
+    assert.equal(status.imageDeliveryMode, 'worker-fallback');
     assert.equal(status.deploymentHealth.source, 'integration');
   });
 
@@ -119,5 +124,45 @@ test('Miniflare runs the bundled Worker with KV and D1 bindings', async (t) => {
     const list = await listResponse.json();
     assert.equal(list.source, 'd1');
     assert.equal(list.blacklist[0].reason, 'integration-test');
+  });
+
+  await t.test('image hosting uploads to R2, indexes in D1, serves publicly, and deletes', async () => {
+    const migrationSql = (await readFile('migrations/0005_image_assets.sql', 'utf8'))
+      .replace(/\s+/g, ' ')
+      .trim();
+    await db.exec(migrationSql);
+    const pngBytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    const form = new FormData();
+    form.set('file', new Blob([pngBytes], { type: 'image/png' }), 'integration.png');
+    const uploadResponse = await mf.dispatchFetch('https://bot.example.com/admin/api/images', {
+      method: 'POST',
+      headers: { 'x-admin-key': adminKey },
+      body: form,
+    });
+    assert.equal(uploadResponse.status, 201);
+    const uploaded = await uploadResponse.json();
+    assert.equal(uploaded.image.originalName, 'integration.png');
+    assert.equal(uploaded.image.contentType, 'image/png');
+    assert.match(uploaded.image.url, /^https:\/\/bot\.example\.com\/media\//);
+    assert.ok(await imageBucket.get(uploaded.image.objectKey));
+
+    const publicResponse = await mf.dispatchFetch(uploaded.image.url);
+    assert.equal(publicResponse.status, 200);
+    assert.equal(publicResponse.headers.get('content-type'), 'image/png');
+    assert.deepEqual(new Uint8Array(await publicResponse.arrayBuffer()), pngBytes);
+
+    const listResponse = await mf.dispatchFetch('https://bot.example.com/admin/api/images', {
+      headers: { 'x-admin-key': adminKey },
+    });
+    const list = await listResponse.json();
+    assert.equal(list.total, 1);
+    assert.equal(list.images[0].id, uploaded.image.id);
+
+    const deleteResponse = await mf.dispatchFetch(`https://bot.example.com/admin/api/images/${uploaded.image.id}`, {
+      method: 'DELETE',
+      headers: { 'x-admin-key': adminKey },
+    });
+    assert.equal(deleteResponse.status, 200);
+    assert.equal(await imageBucket.get(uploaded.image.objectKey), null);
   });
 });

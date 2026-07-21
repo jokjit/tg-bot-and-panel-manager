@@ -25,6 +25,7 @@ function createHandlers(overrides = {}) {
     isTopicModeEnabled: () => true,
     getPrivateRelayAdminUserIds: async () => [],
     tryConsumePendingWelcomeSetup: async () => false,
+    tryConsumePendingImageUpload: async () => false,
     resolveAdminTargetUserId: async (...args) => { calls.push(['target', ...args]); return 7; },
     handleAdminCommand: async (...args) => { calls.push(['command', ...args]); return false; },
     sendUserMessage: async (...args) => calls.push(['send', ...args]),
@@ -58,6 +59,18 @@ test('admin command handling short-circuits reply and relay paths', async () => 
   }, handlers);
   assert.equal(calls.some((call) => call[0] === 'command'), true);
   assert.equal(calls.some((call) => call[0] === 'send' || call[0] === 'relay'), false);
+});
+
+test('pending image upload short-circuits reply and relay paths', async () => {
+  const { calls, handlers } = createHandlers({
+    tryConsumePendingImageUpload: async (...args) => { calls.push(['upload', ...args]); return true; },
+  });
+  await handleAuthorizedAdminMessage({
+    message: createMessage({ text: undefined, photo: [{ file_id: 'image' }] }),
+    adminChatId: -100,
+  }, handlers);
+  assert.equal(calls.some((call) => call[0] === 'upload'), true);
+  assert.equal(calls.some((call) => call[0] === 'command' || call[0] === 'relay'), false);
 });
 
 test('admin reply command sends normalized text and records history', async () => {
