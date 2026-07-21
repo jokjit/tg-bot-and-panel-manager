@@ -47,6 +47,9 @@ npm --prefix electron-app run build
 
 cloudflare api设置
 <img width="1108" height="517" alt="image" src="https://github.com/user-attachments/assets/ec8a1aa4-40e9-40c7-8f3e-72a4910fd427" />
+开启图床功能需用到r2，API需增加以下权限
+<img width="1171" height="137" alt="image" src="https://github.com/user-attachments/assets/6f88a2f8-aaa3-44f1-a630-2e95a5ebf30a" />
+
 
   下边的选择包含你的cloudflare账户
 
