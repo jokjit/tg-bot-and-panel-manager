@@ -12,6 +12,8 @@ mobile-app/public/deploy-assets/
 mobile-app/release-apk/
 mobile-app/android/keystore/
 release-packages/
+/.build-temp/
+mobile-app/test-artifacts/
 npm-debug.log*
 worker.bundle.js
 
