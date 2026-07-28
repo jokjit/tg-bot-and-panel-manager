@@ -43,11 +43,19 @@ test('user relay reports the last error when every delivery path fails', async (
 test('admin relay maps text and Telegram media payloads and ignores commands', async () => {
   const calls = [];
   const send = async (env, method, payload) => { calls.push({ method, payload }); return { ok: true }; };
-  await relayAdminMessageToUser({ text: 'hello' }, {}, 7, send);
-  await relayAdminMessageToUser({ photo: [{ file_id: 'small' }, { file_id: 'large' }], caption: 'photo' }, {}, 7, send);
+  const entities = [{ type: 'blockquote', offset: 0, length: 5 }];
+  const captionEntities = [{ type: 'bold', offset: 0, length: 5 }];
+  await relayAdminMessageToUser({ text: 'hello', entities }, {}, 7, send);
+  await relayAdminMessageToUser({
+    photo: [{ file_id: 'small' }, { file_id: 'large' }],
+    caption: 'photo',
+    caption_entities: captionEntities,
+  }, {}, 7, send);
   await relayAdminMessageToUser({ contact: { phone_number: '123', first_name: 'Ada' } }, {}, 7, send);
   await relayAdminMessageToUser({ text: '/help' }, {}, 7, send);
   assert.deepEqual(calls.map((call) => call.method), ['sendMessage', 'sendPhoto', 'sendContact']);
+  assert.equal(calls[0].payload.entities, entities);
   assert.equal(calls[1].payload.photo, 'large');
+  assert.equal(calls[1].payload.caption_entities, captionEntities);
   assert.equal(calls[2].payload.first_name, 'Ada');
 });

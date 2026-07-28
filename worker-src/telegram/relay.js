@@ -71,7 +71,11 @@ export async function relayUserMessageToAdmins(options = {}) {
 
 export async function relayAdminMessageToUser(message, env, targetUserId, send = telegram) {
   if (typeof message.text === 'string' && !message.text.startsWith('/')) {
-    return send(env, 'sendMessage', { chat_id: targetUserId, text: message.text });
+    return send(env, 'sendMessage', {
+      chat_id: targetUserId,
+      text: message.text,
+      entities: message.entities?.length ? message.entities : undefined,
+    });
   }
 
   const media = [
@@ -89,6 +93,7 @@ export async function relayAdminMessageToUser(message, env, targetUserId, send =
       chat_id: targetUserId,
       [field]: fileId,
       caption: message.caption || undefined,
+      caption_entities: message.caption_entities?.length ? message.caption_entities : undefined,
     });
   }
 
