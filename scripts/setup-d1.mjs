@@ -184,8 +184,9 @@ function upsertD1Binding(content, binding, databaseName, databaseId) {
   const block = `[[d1_databases]]\nbinding = "${binding}"\ndatabase_name = "${databaseName}"\ndatabase_id = "${databaseId}"`;
   const pattern = /\[\[d1_databases\]\][\s\S]*?(?=\n\[\[|\n\[|$)/g;
   const matches = [...String(content).matchAll(pattern)];
+  const bindingLine = `binding = "${binding}"`;
   for (const match of matches) {
-    if (new RegExp(`^\\s*binding\\s*=\\s*"${binding.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\s*$`, 'm').test(match[0])) {
+    if (match[0].split('\n').some((line) => line.trim() === bindingLine)) {
       return String(content).replace(match[0], block);
     }
   }
@@ -193,12 +194,9 @@ function upsertD1Binding(content, binding, databaseName, databaseId) {
   return trimmed ? `${trimmed}\n\n${block}\n` : `${block}\n`;
 }
 
-function escapeSqlString(value) {
-  return String(value || '').replaceAll("'", "''");
-}
-
-async function executeD1Sql(databaseId, sql) {
-  const data = await cfApiRequest(`/d1/database/${encodeURIComponent(databaseId)}/query`, 'POST', { sql });
+async function executeD1Sql(databaseId, sql, params) {
+  const body = params ? { sql, params } : { sql };
+  const data = await cfApiRequest(`/d1/database/${encodeURIComponent(databaseId)}/query`, 'POST', body);
   return data.result;
 }
 
@@ -234,8 +232,8 @@ async function applyMigrations(databaseId) {
     if (applied.has(file)) continue;
     const sql = readFileSync(join(migrationsDir, file), 'utf8').trim();
     if (!sql) continue;
-    const mergedSql = `${sql}\n\nINSERT INTO d1_migrations (name) VALUES ('${escapeSqlString(file)}');`;
-    await executeD1Sql(databaseId, mergedSql);
+    await executeD1Sql(databaseId, sql);
+    await executeD1Sql(databaseId, 'INSERT INTO d1_migrations (name) VALUES (?);', [file]);
     appliedNow.push(file);
     console.log(`Applied migration: ${file}`);
   }
