@@ -46,9 +46,11 @@ const {
 } = require(deployUtilsPath)
 const {
   createDeploymentRun,
+  deleteWorkerSecret: deleteWorkerSecretCore,
   ensurePagesProject: ensurePagesProjectCore,
   normalizeDeploymentResumeState,
   runDeploymentSteps,
+  syncWorkerSecrets,
 } = require(deploymentCorePath)
 
 const DEPLOY_TOOL_VERSION = `v${app.getVersion()}`
@@ -2029,28 +2031,17 @@ async function ensureWorkerPublicEndpoint(env, configPath, workerUrl, onProgress
   }
 }
 
-async function putWorkerSecretViaApi(env, workerName, name, value) {
-  const { accountId } = getCfTokenAndAccount(env)
-  return cfApiRequest(env, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/secrets`, {
-    method: 'PUT',
-    body: {
-      name,
-      text: String(value || ''),
-      type: 'secret_text',
-    },
-  })
-}
-
 async function deleteWorkerSecretViaApi(env, workerName, name) {
   const { accountId } = getCfTokenAndAccount(env)
-  return cfApiRequest(env, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/secrets/${encodeURIComponent(name)}`, {
-    method: 'DELETE',
+  return deleteWorkerSecretCore({
+    accountId,
+    workerName,
+    name,
+    apiRequest: (resource, options) => cfApiRequest(env, resource, {
+      method: options.method,
+      body: options.body,
+    }),
   })
-}
-
-async function listWorkerSecretsViaApi(env, workerName) {
-  const { accountId } = getCfTokenAndAccount(env)
-  return cfApiRequest(env, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/secrets`)
 }
 
 async function updateWorkerSecretsViaApi(env, configPath, secrets, onProgress) {
@@ -2059,35 +2050,21 @@ async function updateWorkerSecretsViaApi(env, configPath, secrets, onProgress) {
     throw new Error('Worker secret update failed: missing_worker_name_in_config')
   }
 
-  const entries = Object.entries(secrets || {})
-    .map(([name, value]) => [String(name || '').trim(), String(value || '').trim()])
-    .filter(([name, value]) => name && value)
-  if (entries.length === 0) {
-    return { ok: true, names: [] }
-  }
-
-  for (const [name, value] of entries) {
-    const updated = await putWorkerSecretViaApi(env, workerName, name, value)
-    if (!updated.ok) {
-      throw new Error(`Worker secret update failed (${name}): ${updated.reason || 'unknown'}`)
-    }
-  }
-
-  const listed = await listWorkerSecretsViaApi(env, workerName)
-  if (listed.ok) {
-    const visibleNames = (Array.isArray(listed.result) ? listed.result : [])
-      .map((item) => String(item.name || item.binding || item.id || '').trim())
-      .filter(Boolean)
-    const missing = entries.map(([name]) => name).filter((name) => !visibleNames.includes(name))
-    if (missing.length > 0) {
-      throw new Error(`Worker secret verification failed: missing ${missing.join(', ')}`)
-    }
-  } else {
-    onProgress?.(`Worker secret list warning: ${listed.reason || 'unknown'}`)
-  }
-
-  onProgress?.(`Worker Secrets 已通过 Cloudflare API 更新：${entries.map(([name]) => name).join(', ')}`)
-  return { ok: true, names: entries.map(([name]) => name) }
+  const { accountId } = getCfTokenAndAccount(env)
+  return syncWorkerSecrets({
+    accountId,
+    workerName,
+    secrets,
+    verifyAfterWrite: true,
+    onProgress,
+    apiRequest: (resource, options) => cfApiRequest(env, resource, {
+      method: options.method,
+      body: options.body,
+    }),
+    messages: {
+      updated: ({ secretNames }) => `Worker Secrets 已通过 Cloudflare API 更新：${secretNames.join(', ')}`,
+    },
+  })
 }
 
 async function listKvNamespacesViaApi(env) {

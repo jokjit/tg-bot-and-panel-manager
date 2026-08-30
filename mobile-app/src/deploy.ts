@@ -55,9 +55,20 @@ const {
 };
 
 const {
+  deleteWorkerSecret: deleteWorkerSecretCore,
   ensurePagesProject: ensurePagesProjectCore,
   runDeploymentSteps,
+  syncWorkerSecrets,
 } = deploymentCore as {
+  deleteWorkerSecret: (options: {
+    accountId: string;
+    workerName: string;
+    name: string;
+    apiRequest: (resource: string, options: {
+      method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+      body?: unknown;
+    }) => Promise<any>;
+  }) => Promise<CfResult<unknown>>;
   ensurePagesProject: (options: {
     projectName: string;
     getProject: (projectName: string) => Promise<PageProjectResult>;
@@ -76,6 +87,18 @@ const {
       onStep?: (event: any) => void;
     },
   ) => Promise<{ results: Record<string, any>; completedSteps: string[] }>;
+  syncWorkerSecrets: (options: {
+    accountId: string;
+    workerName: string;
+    secrets: Record<string, string>;
+    verifyAfterWrite?: boolean;
+    onProgress?: (text: string) => void;
+    apiRequest: (resource: string, options: {
+      method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+      body?: unknown;
+    }) => Promise<any>;
+    messages?: Record<string, string | ((context: any) => string)>;
+  }) => Promise<{ ok: boolean; names: string[] }>;
 };
 
 const CF_API_BASE = 'https://api.cloudflare.com/client/v4';
@@ -1906,31 +1929,20 @@ async function upsertWorkerSecrets(
   secrets: Record<string, string>,
   onLog: (text: string) => void,
 ): Promise<void> {
-  const names = Object.entries(secrets)
-    .map(([name, value]) => [name, String(value || '').trim()] as const)
-    .filter(([, value]) => Boolean(value));
-
-  for (const [name, value] of names) {
-    const response = await cfApi<any>(
-      token,
-      accountId,
-      `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/secrets`,
-      {
-        method: 'PUT',
-        jsonBody: {
-          name,
-          text: value,
-          type: 'secret_text',
-        },
-      },
-    );
-
-    if (!response.ok) {
-      throw new Error(`Secret 写入失败 (${name}): ${response.reason}`);
-    }
-  }
-
-  onLog(`Worker Secrets 已更新: ${names.map(([name]) => name).join(', ')}`);
+  await syncWorkerSecrets({
+    accountId,
+    workerName,
+    secrets,
+    onProgress: onLog,
+    apiRequest: (resource, options) => cfApi<any>(token, accountId, resource, {
+      method: options.method,
+      jsonBody: options.body,
+    }),
+    messages: {
+      updateFailed: ({ secretName, failureReason }) => `Secret 写入失败 (${secretName}): ${failureReason}`,
+      updated: ({ secretNames }) => `Worker Secrets 已更新: ${secretNames.join(', ')}`,
+    },
+  });
 }
 
 async function deleteWorkerSecret(
@@ -1939,12 +1951,15 @@ async function deleteWorkerSecret(
   workerName: string,
   name: string,
 ): Promise<CfResult<unknown>> {
-  return cfApi(
-    token,
+  return deleteWorkerSecretCore({
     accountId,
-    `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/secrets/${encodeURIComponent(name)}`,
-    { method: 'DELETE' },
-  );
+    workerName,
+    name,
+    apiRequest: (resource, options) => cfApi(token, accountId, resource, {
+      method: options.method,
+      jsonBody: options.body,
+    }),
+  });
 }
 
 async function waitForWorkerHealth(workerUrl: string, onLog: (text: string) => void): Promise<void> {

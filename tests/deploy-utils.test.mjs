@@ -18,10 +18,14 @@ import {
   suggestPagesProjectName,
 } from '../shared/deploy-utils.cjs';
 import {
+  buildWorkerSecretsResource,
   createDeploymentRun,
+  deleteWorkerSecret,
   ensurePagesProject,
   normalizeDeploymentResumeState,
+  normalizeWorkerSecretEntries,
   runDeploymentSteps,
+  syncWorkerSecrets,
 } from '../shared/deployment-core.cjs';
 
 test('normalizes URLs, paths, and Pages project names', () => {
@@ -90,6 +94,76 @@ test('builds deterministic Worker upload metadata', () => {
       { type: 'r2_bucket', name: 'IMAGE_BUCKET', bucket_name: 'test-worker-images' },
     ],
   });
+});
+
+test('shared deployment core normalizes Worker secrets and resource paths', () => {
+  assert.deepEqual(normalizeWorkerSecretEntries({
+    ' BOT_TOKEN ': ' token ',
+    EMPTY: ' ',
+    '': 'ignored',
+  }), [['BOT_TOKEN', 'token']]);
+  assert.equal(
+    buildWorkerSecretsResource('account-id', 'worker/name', 'SECRET/NAME'),
+    '/accounts/account-id/workers/scripts/worker%2Fname/secrets/SECRET%2FNAME',
+  );
+});
+
+test('shared deployment core updates and verifies Worker secrets', async () => {
+  const calls = [];
+  const progress = [];
+  const result = await syncWorkerSecrets({
+    accountId: 'account-id',
+    workerName: 'worker-name',
+    secrets: { BOT_TOKEN: ' bot-token ', ADMIN_CHAT_ID: ' 123 ' },
+    verifyAfterWrite: true,
+    onProgress: (message) => progress.push(message),
+    apiRequest: async (resource, options) => {
+      calls.push([resource, options]);
+      if (options.method === 'GET') {
+        return { ok: true, result: [{ name: 'BOT_TOKEN' }, { binding: 'ADMIN_CHAT_ID' }] };
+      }
+      return { ok: true };
+    },
+  });
+
+  assert.deepEqual(result, { ok: true, names: ['BOT_TOKEN', 'ADMIN_CHAT_ID'] });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0][1], {
+    method: 'PUT',
+    body: { name: 'BOT_TOKEN', text: 'bot-token', type: 'secret_text' },
+  });
+  assert.match(progress[0], /BOT_TOKEN, ADMIN_CHAT_ID/);
+});
+
+test('shared deployment core reports secret verification and deletion results', async () => {
+  await assert.rejects(
+    syncWorkerSecrets({
+      accountId: 'account-id',
+      workerName: 'worker-name',
+      secrets: { BOT_TOKEN: 'token' },
+      verifyAfterWrite: true,
+      apiRequest: async (_resource, options) => options.method === 'GET'
+        ? { ok: true, result: [] }
+        : { ok: true },
+    }),
+    /missing BOT_TOKEN/,
+  );
+
+  const calls = [];
+  const deleted = await deleteWorkerSecret({
+    accountId: 'account-id',
+    workerName: 'worker-name',
+    name: 'DEPLOY_BOOTSTRAP_TOKEN',
+    apiRequest: async (...args) => {
+      calls.push(args);
+      return { ok: true };
+    },
+  });
+  assert.deepEqual(deleted, { ok: true });
+  assert.deepEqual(calls[0], [
+    '/accounts/account-id/workers/scripts/worker-name/secrets/DEPLOY_BOOTSTRAP_TOKEN',
+    { method: 'DELETE' },
+  ]);
 });
 
 test('shared deployment core reuses or creates and verifies Pages projects', async () => {

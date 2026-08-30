@@ -22,6 +22,84 @@ function normalizeDeploymentResumeState(input = {}) {
   return { results, completedSteps };
 }
 
+function normalizeWorkerSecretEntries(secrets = {}) {
+  return Object.entries(secrets && typeof secrets === 'object' ? secrets : {})
+    .map(([name, value]) => [String(name || '').trim(), String(value || '').trim()])
+    .filter(([name, value]) => name && value);
+}
+
+function buildWorkerSecretsResource(accountId, workerName, secretName = '') {
+  const account = String(accountId || '').trim();
+  const worker = String(workerName || '').trim();
+  if (!account) throw new Error('worker_secret_account_id_required');
+  if (!worker) throw new Error('worker_secret_worker_name_required');
+  const base = `/accounts/${account}/workers/scripts/${encodeURIComponent(worker)}/secrets`;
+  const name = String(secretName || '').trim();
+  return name ? `${base}/${encodeURIComponent(name)}` : base;
+}
+
+async function syncWorkerSecrets(options = {}) {
+  const entries = normalizeWorkerSecretEntries(options.secrets);
+  const apiRequest = options.apiRequest;
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+  const messages = options.messages || {};
+  if (typeof apiRequest !== 'function') throw new Error('worker_secret_api_adapter_required');
+  if (entries.length === 0) return { ok: true, names: [] };
+
+  const resource = buildWorkerSecretsResource(options.accountId, options.workerName);
+  for (const [name, value] of entries) {
+    const updated = await apiRequest(resource, {
+      method: 'PUT',
+      body: { name, text: value, type: 'secret_text' },
+    });
+    if (!updated?.ok) {
+      const reason = String(updated?.reason || 'unknown');
+      throw new Error(formatMessage(
+        messages.updateFailed,
+        ({ secretName, failureReason }) => `Worker secret update failed (${secretName}): ${failureReason}`,
+        { secretName: name, failureReason: reason, result: updated },
+      ));
+    }
+  }
+
+  const names = entries.map(([name]) => name);
+  if (options.verifyAfterWrite) {
+    const listed = await apiRequest(resource, { method: 'GET' });
+    if (listed?.ok) {
+      const visibleNames = (Array.isArray(listed.result) ? listed.result : [])
+        .map((item) => String(item?.name || item?.binding || item?.id || '').trim())
+        .filter(Boolean);
+      const missing = names.filter((name) => !visibleNames.includes(name));
+      if (missing.length > 0) {
+        throw new Error(formatMessage(
+          messages.verifyFailed,
+          ({ missingNames }) => `Worker secret verification failed: missing ${missingNames.join(', ')}`,
+          { missingNames: missing, result: listed },
+        ));
+      }
+    } else {
+      onProgress(formatMessage(
+        messages.listWarning,
+        ({ reason }) => `Worker secret list warning: ${reason}`,
+        { reason: String(listed?.reason || 'unknown'), result: listed },
+      ));
+    }
+  }
+
+  onProgress(formatMessage(
+    messages.updated,
+    ({ secretNames }) => `Worker Secrets updated: ${secretNames.join(', ')}`,
+    { secretNames: names },
+  ));
+  return { ok: true, names };
+}
+
+async function deleteWorkerSecret(options = {}) {
+  if (typeof options.apiRequest !== 'function') throw new Error('worker_secret_api_adapter_required');
+  const resource = buildWorkerSecretsResource(options.accountId, options.workerName, options.name);
+  return options.apiRequest(resource, { method: 'DELETE' });
+}
+
 async function ensurePagesProject(options = {}) {
   const projectName = String(options.projectName || '').trim();
   const getProject = options.getProject;
@@ -205,8 +283,12 @@ function createDeploymentRun(options = {}) {
 }
 
 module.exports = {
+  buildWorkerSecretsResource,
   createDeploymentRun,
+  deleteWorkerSecret,
   ensurePagesProject,
   normalizeDeploymentResumeState,
+  normalizeWorkerSecretEntries,
   runDeploymentSteps,
+  syncWorkerSecrets,
 };
