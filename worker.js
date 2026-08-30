@@ -399,7 +399,14 @@ export default {
         ctx.waitUntil(runDeletedAccountSweepIfDue(runtimeEnv).catch(() => {}));
       }
 
-      const topLevelResponse = await handleTopLevelRequest(request, url, runtimeEnv, webhookPath, publicBaseUrl);
+      const topLevelResponse = await handleTopLevelRequest(
+        request,
+        url,
+        runtimeEnv,
+        webhookPath,
+        publicBaseUrl,
+        { requestId, startedAt },
+      );
       if (topLevelResponse) return topLevelResponse;
 
       const adminResponse = await dispatchAdminRoutes(
@@ -489,7 +496,7 @@ class AppError extends Error {
   }
 }
 
-async function handleTopLevelRequest(request, url, env, webhookPath, publicBaseUrl) {
+async function handleTopLevelRequest(request, url, env, webhookPath, publicBaseUrl, requestContext = {}) {
   const route = classifyTopLevelRoute(request.method, url.pathname, {
     verifyImage: VERIFY_IMAGE_PATH,
     verifyWeb: VERIFY_WEB_PATH,
@@ -521,7 +528,7 @@ async function handleTopLevelRequest(request, url, env, webhookPath, publicBaseU
         getObject: (objectKey) => env.IMAGE_BUCKET.get(objectKey),
       });
     case TOP_LEVEL_ROUTES.DEPLOY_BOOTSTRAP:
-      return handleDeployBootstrap(request, env, webhookPath, publicBaseUrl);
+      return handleDeployBootstrap(request, env, webhookPath, publicBaseUrl, requestContext);
     case TOP_LEVEL_ROUTES.ADMIN_ENTRY: {
       const panelUrl = buildAdminPanelRedirectUrl(env, publicBaseUrl, request);
       if (isAbsoluteHttpUrl(panelUrl)) return Response.redirect(panelUrl, 302);
@@ -4373,9 +4380,9 @@ function formatErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function handleDeployBootstrap(request, env, webhookPath, publicBaseUrl) {
+async function handleDeployBootstrap(request, env, webhookPath, publicBaseUrl, requestContext = {}) {
   return handleDeployBootstrapRequest(
-    { request, env, webhookPath, publicBaseUrl },
+    { request, env, webhookPath, publicBaseUrl, ...requestContext },
     {
       createError: (status, message) => new AppError(status, message),
       ensureEnv,
@@ -4384,6 +4391,7 @@ async function handleDeployBootstrap(request, env, webhookPath, publicBaseUrl) {
       syncTelegramCommands,
       ensureAdminPasswordState,
       json,
+      writeStructuredLog,
     },
   );
 }

@@ -19,7 +19,14 @@ export async function handleDeployBootstrapRequest(context = {}, handlers = {}) 
     env,
     webhookPath,
     publicBaseUrl,
+    requestId = null,
+    startedAt,
   } = context;
+  const nowMs = typeof handlers.nowMs === 'function' ? handlers.nowMs : Date.now;
+  const requestStartedAt = Number.isFinite(Number(startedAt)) ? Number(startedAt) : nowMs();
+  const log = typeof handlers.writeStructuredLog === 'function'
+    ? handlers.writeStructuredLog
+    : writeStructuredLog;
   const expectedToken = String(env?.DEPLOY_BOOTSTRAP_TOKEN || '').trim();
   if (!expectedToken) {
     throw handlers.createError(404, 'deploy_bootstrap_disabled');
@@ -72,7 +79,8 @@ export async function handleDeployBootstrapRequest(context = {}, handlers = {}) 
     try {
       await env.BOT_KV.put(DEPLOYMENT_HEALTH_KEY, JSON.stringify(deploymentHealth));
     } catch (error) {
-      writeStructuredLog('warn', 'deployment_health_persist_failed', {
+      log('warn', 'deployment_health_persist_failed', {
+        requestId,
         stage: 'deploy_bootstrap',
       }, {
         error: formatErrorMessage(error),
@@ -81,6 +89,18 @@ export async function handleDeployBootstrapRequest(context = {}, handlers = {}) 
     if (ok) {
       await env.BOT_KV.put(consumedKey, JSON.stringify({ consumedAt: new Date().toISOString() }));
     }
+
+    log(ok ? 'info' : 'warn', 'deployment_bootstrap_completed', {
+      requestId,
+      stage: 'deploy_bootstrap',
+    }, {
+      durationMs: Math.max(0, nowMs() - requestStartedAt),
+      status: deploymentHealth.status,
+      webhookReady: deploymentHealth.webhookReady,
+      commandsReady: deploymentHealth.commandsReady,
+      passwordReady: deploymentHealth.passwordReady,
+      bootstrapNotifyReady: deploymentHealth.bootstrapNotifyReady,
+    });
 
     return handlers.json(
       {
