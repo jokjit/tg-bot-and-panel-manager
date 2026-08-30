@@ -100,6 +100,10 @@ import {
 } from './worker-src/storage/images.js';
 import { normalizeRotationAngle, normalizeSliderTrace } from './worker-src/auth/verification.js';
 import {
+  buildEffectiveSystemConfig,
+  mergeRuntimeEnv,
+} from './worker-src/config/runtime.js';
+import {
   buildSliderSubmitProof,
   validateSliderSubmitProof,
 } from './worker-src/auth/slider-proof.js';
@@ -3594,84 +3598,7 @@ async function getRuntimeEnv(env) {
   if (!env.BOT_KV) {
     return env;
   }
-
-  const systemConfig = await getSystemConfig(env);
-  const runtime = { ...env };
-  const runtimeKeys = [
-    'VERIFY_EXPIRE_MS',
-    'VERIFY_FAIL_BLOCK_MS',
-    'VERIFY_TIMEOUT_BLOCK_MS',
-    'VERIFY_MAX_FAILURES',
-    'VERIFY_MATH_ENABLED',
-    'VERIFY_CAPTCHA_ENABLED',
-    'VERIFY_WEB_SESSION_EXPIRE_MS',
-    'VERIFY_RETRY_BLOCK_MS',
-    'VERIFY_STAGE_MAX_ATTEMPTS',
-    'VERIFY_MIN_SLIDER_TIME_MS',
-    'VERIFY_SLIDER_TOLERANCE',
-    'VERIFY_ROTATION_TOLERANCE',
-    'VERIFY_PROOF_SECRET',
-    'VERIFY_OBSERVE_MESSAGE_COUNT',
-    'VERIFY_FAIL_TOPIC_ID',
-    'BOT_TOKEN',
-    'ADMIN_CHAT_ID',
-    'ADMIN_IDS',
-    'ADMIN_ID',
-    'WEBHOOK_SECRET',
-    'PUBLIC_BASE_URL',
-    'VERIFY_PUBLIC_BASE_URL',
-    'WEBHOOK_PATH',
-    'TOPIC_MODE',
-    'USER_VERIFICATION',
-    'ADMIN_META_MODE',
-    'WELCOME_TYPE',
-    'WELCOME_MEDIA',
-    'WELCOME_TEXT',
-    'BOT_DESCRIPTION',
-    'BOT_SHORT_DESCRIPTION',
-    'BOT_DESCRIPTION_DEFAULT',
-    'BOT_SHORT_DESCRIPTION_DEFAULT',
-    'BOT_DESCRIPTION_ZH_CN',
-    'BOT_SHORT_DESCRIPTION_ZH_CN',
-    'BOT_DESCRIPTION_EN_US',
-    'BOT_SHORT_DESCRIPTION_EN_US',
-    'BLOCKED_TEXT',
-    'DATA_RETENTION_DAYS',
-    'DATA_CLEANUP_BATCH_SIZE',
-    'DATA_CLEANUP_AUTO',
-    'DELETED_ACCOUNT_SWEEP_AUTO',
-    'DELETED_ACCOUNT_SWEEP_BATCH_SIZE',
-    'ADMIN_API_KEY',
-    'ADMIN_PANEL_URL',
-    'ADMIN_PANEL_USER',
-    'KEYWORD_FILTERS',
-  ];
-
-  for (const key of runtimeKeys) {
-    const value = systemConfig?.[key];
-    if (typeof value === 'string' && value.trim()) {
-      runtime[key] = value.trim();
-    }
-  }
-
-  if (!String(runtime.BOT_DESCRIPTION || '').trim()) {
-    runtime.BOT_DESCRIPTION = String(
-      systemConfig?.BOT_DESCRIPTION_DEFAULT ||
-        systemConfig?.BOT_DESCRIPTION_ZH_CN ||
-        systemConfig?.BOT_DESCRIPTION_EN_US ||
-        '',
-    ).trim();
-  }
-  if (!String(runtime.BOT_SHORT_DESCRIPTION || '').trim()) {
-    runtime.BOT_SHORT_DESCRIPTION = String(
-      systemConfig?.BOT_SHORT_DESCRIPTION_DEFAULT ||
-        systemConfig?.BOT_SHORT_DESCRIPTION_ZH_CN ||
-        systemConfig?.BOT_SHORT_DESCRIPTION_EN_US ||
-        '',
-    ).trim();
-  }
-
-  return runtime;
+  return mergeRuntimeEnv(env, await getSystemConfig(env));
 }
 
 async function saveMessageHistory(env, entry) {
@@ -4197,73 +4124,7 @@ async function uploadWelcomeMediaToTelegram(env, type, file) {
 
 async function getEffectiveSystemConfig(env) {
   const config = await getSystemConfig(env);
-  const effective = { ...config };
-  const runtimeKeys = [
-    'BOT_TOKEN',
-    'ADMIN_CHAT_ID',
-    'ADMIN_IDS',
-    'ADMIN_ID',
-    'WEBHOOK_SECRET',
-    'PUBLIC_BASE_URL',
-    'VERIFY_PUBLIC_BASE_URL',
-    'WEBHOOK_PATH',
-    'TOPIC_MODE',
-    'USER_VERIFICATION',
-    'ADMIN_META_MODE',
-    'WELCOME_TYPE',
-    'WELCOME_MEDIA',
-    'BOT_DESCRIPTION',
-    'BOT_SHORT_DESCRIPTION',
-    'BOT_DESCRIPTION_DEFAULT',
-    'BOT_SHORT_DESCRIPTION_DEFAULT',
-    'BOT_DESCRIPTION_ZH_CN',
-    'BOT_SHORT_DESCRIPTION_ZH_CN',
-    'BOT_DESCRIPTION_EN_US',
-    'BOT_SHORT_DESCRIPTION_EN_US',
-    'VERIFY_EXPIRE_MS',
-    'VERIFY_FAIL_BLOCK_MS',
-    'VERIFY_TIMEOUT_BLOCK_MS',
-    'VERIFY_MAX_FAILURES',
-    'VERIFY_MATH_ENABLED',
-    'VERIFY_CAPTCHA_ENABLED',
-    'VERIFY_WEB_SESSION_EXPIRE_MS',
-    'VERIFY_RETRY_BLOCK_MS',
-    'VERIFY_STAGE_MAX_ATTEMPTS',
-    'VERIFY_MIN_SLIDER_TIME_MS',
-    'VERIFY_SLIDER_TOLERANCE',
-    'VERIFY_ROTATION_TOLERANCE',
-    'VERIFY_PROOF_SECRET',
-    'VERIFY_OBSERVE_MESSAGE_COUNT',
-    'VERIFY_FAIL_TOPIC_ID',
-    'WELCOME_TEXT',
-    'BLOCKED_TEXT',
-    'DATA_RETENTION_DAYS',
-    'DATA_CLEANUP_BATCH_SIZE',
-    'DATA_CLEANUP_AUTO',
-    'DELETED_ACCOUNT_SWEEP_AUTO',
-    'DELETED_ACCOUNT_SWEEP_BATCH_SIZE',
-    'ADMIN_API_KEY',
-    'ADMIN_PANEL_URL',
-    'ADMIN_PANEL_USER',
-    'KEYWORD_FILTERS',
-  ];
-
-  for (const key of runtimeKeys) {
-    const value = typeof env?.[key] === 'string' ? env[key].trim() : '';
-    if (value) {
-      effective[key] = value;
-    }
-  }
-
-  for (const key of runtimeKeys) {
-    const value = typeof config?.[key] === 'string' ? config[key].trim() : '';
-    if (value) {
-      effective[key] = value;
-    }
-  }
-
-  effective.updatedAt = config.updatedAt || null;
-  return effective;
+  return buildEffectiveSystemConfig(env, config);
 }
 
 async function getSystemConfig(env) {
