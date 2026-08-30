@@ -61,7 +61,11 @@ import {
   getDeletedAccountSweepBatchSize,
   parsePositiveInt,
 } from './worker-src/maintenance/config.js';
-import { createIntervalGate } from './worker-src/maintenance/schedule.js';
+import {
+  createIntervalGate,
+  runMaintenanceIfDue,
+  runScheduledMaintenance as runScheduledMaintenanceCore,
+} from './worker-src/maintenance/schedule.js';
 import { probeDeletedTelegramUser } from './worker-src/maintenance/deleted-account.js';
 import { executeDataCleanup } from './worker-src/maintenance/data-cleanup.js';
 import { executeDeletedAccountSweep } from './worker-src/maintenance/deleted-account-sweep.js';
@@ -924,26 +928,13 @@ async function setSystemConfig(env, config) {
 }
 
 async function runScheduledMaintenance(env) {
-  const tasks = [];
-  if (isDataCleanupAutoEnabled(env)) {
-    tasks.push(runDataCleanupIfDue(env));
-  }
-  if (isDeletedAccountSweepAutoEnabled(env)) {
-    tasks.push(runDeletedAccountSweepIfDue(env));
-  }
-  if (tasks.length === 0 && !(env?.BOT_KV && env?.DB)) {
-    return { ok: true, skipped: 'disabled' };
-  }
-  const results = await Promise.allSettled(tasks);
-  if (env?.BOT_KV && env?.DB) {
-    results.push(await Promise.resolve(runDirectoryIndexBackfill(env, { source: 'scheduled' }))
-      .then((value) => ({ status: 'fulfilled', value }))
-      .catch((reason) => ({ status: 'rejected', reason })));
-  }
-  return {
-    ok: true,
-    results,
-  };
+  return runScheduledMaintenanceCore(env, {
+    isDataCleanupAutoEnabled,
+    isDeletedAccountSweepAutoEnabled,
+    runDataCleanupIfDue,
+    runDeletedAccountSweepIfDue,
+    runDirectoryIndexBackfill,
+  });
 }
 
 async function runNonCriticalTask(ctx, task) {
@@ -3283,29 +3274,25 @@ async function restartUserVerification(env, userId, operator = 'unknown') {
 }
 
 async function runDataCleanupIfDue(env) {
-  if (!env?.BOT_KV) {
-    return { ok: false, skipped: 'missing_kv' };
-  }
-  const now = Date.now();
-  const lastState = (await getJson(env.BOT_KV, LAST_DATA_CLEANUP_KEY)) || {};
-  const lastRunMs = lastState?.finishedAt ? new Date(lastState.finishedAt).getTime() : 0;
-  if (lastRunMs && now - lastRunMs < DATA_CLEANUP_INTERVAL_MS) {
-    return { ok: false, skipped: 'not_due', lastFinishedAt: lastState.finishedAt || null };
-  }
-  return runDataCleanup(env, { source: 'auto' });
+  return runMaintenanceIfDue(
+    { env, intervalMs: DATA_CLEANUP_INTERVAL_MS, missingBindingReason: 'missing_kv' },
+    {
+      hasRequiredBindings: (runtimeEnv) => Boolean(runtimeEnv?.BOT_KV),
+      readLastState: (runtimeEnv) => getJson(runtimeEnv.BOT_KV, LAST_DATA_CLEANUP_KEY),
+      run: (runtimeEnv, options) => runDataCleanup(runtimeEnv, options),
+    },
+  );
 }
 
 async function runDeletedAccountSweepIfDue(env) {
-  if (!env?.BOT_KV || !env?.BOT_TOKEN) {
-    return { ok: false, skipped: 'missing_binding' };
-  }
-  const now = Date.now();
-  const lastState = (await getJson(env.BOT_KV, LAST_DELETED_ACCOUNT_SWEEP_KEY)) || {};
-  const lastRunMs = lastState?.finishedAt ? new Date(lastState.finishedAt).getTime() : 0;
-  if (lastRunMs && now - lastRunMs < DELETED_ACCOUNT_SWEEP_INTERVAL_MS) {
-    return { ok: false, skipped: 'not_due', lastFinishedAt: lastState.finishedAt || null };
-  }
-  return runDeletedAccountSweep(env, { source: 'auto' });
+  return runMaintenanceIfDue(
+    { env, intervalMs: DELETED_ACCOUNT_SWEEP_INTERVAL_MS },
+    {
+      hasRequiredBindings: (runtimeEnv) => Boolean(runtimeEnv?.BOT_KV && runtimeEnv?.BOT_TOKEN),
+      readLastState: (runtimeEnv) => getJson(runtimeEnv.BOT_KV, LAST_DELETED_ACCOUNT_SWEEP_KEY),
+      run: (runtimeEnv, options) => runDeletedAccountSweep(runtimeEnv, options),
+    },
+  );
 }
 
 async function runDataCleanup(env, options = {}) {
