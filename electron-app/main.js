@@ -7,11 +7,13 @@ const { spawn } = require('child_process')
 const crypto = require('crypto')
 const {
   ADMIN_PASSWORD_HASH_ITERATIONS,
+  buildWorkerReadinessUrl,
   isAllowedAction,
   isAdminPasswordHash,
   isSupportedAdminPasswordHash,
   normalizeAccountInput,
   normalizeExternalHttpUrl,
+  parseWorkerReadinessStatus,
   sanitizeDeploymentResumeState,
 } = require('./security.js')
 const deployUtilsPath = app.isPackaged
@@ -3053,21 +3055,22 @@ async function waitForWorkerHealth(rawUrl, onProgress, label = 'Worker custom do
 }
 
 async function getWorkerRuntimeStatus(workerUrl) {
-  const origin = getUrlOrigin(workerUrl)
-  if (!origin) return { ok: false, reason: 'missing_worker_url' }
+  const readinessUrl = buildWorkerReadinessUrl(workerUrl)
+  if (!readinessUrl) return { ok: false, reason: 'missing_worker_url' }
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
   try {
-    const response = await fetch(`${origin}/`, {
+    const response = await fetch(readinessUrl, {
       headers: { accept: 'application/json' },
       signal: controller.signal,
     })
     const data = await response.json().catch(() => null)
-    if (!response.ok || !data?.ok) {
+    const status = parseWorkerReadinessStatus(data)
+    if (!status.valid) {
       return { ok: false, reason: data?.error || `status_http_${response.status}` }
     }
-    return { ok: true, status: data }
+    return { ok: true, status }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   } finally {
@@ -3075,11 +3078,10 @@ async function getWorkerRuntimeStatus(workerUrl) {
   }
 }
 
-async function waitForWorkerBotConfig(workerUrl, expectedAdminChatId, onProgress, options = {}) {
+async function waitForWorkerBotConfig(workerUrl, onProgress, options = {}) {
   const origin = getUrlOrigin(workerUrl)
   if (!origin) return { ok: false, reason: 'missing_worker_url' }
 
-  const expectedChatId = String(expectedAdminChatId || '').trim()
   const delays = Array.isArray(options.delays) && options.delays.length > 0
     ? options.delays
     : [2000, 4000, 8000, 12000, 18000, 25000, 30000]
@@ -3090,13 +3092,12 @@ async function waitForWorkerBotConfig(workerUrl, expectedAdminChatId, onProgress
     if (result.ok) {
       const status = result.status || {}
       const hasToken = Boolean(status.hasToken)
-      const adminChatId = String(status.adminChatId || '').trim()
-      const chatIdReady = !expectedChatId || adminChatId === expectedChatId
-      if (hasToken && chatIdReady) {
-        onProgress?.(`Worker 机器人配置已生效：hasToken=true，adminChatId=${adminChatId || '已设置'}`)
+      const hasAdminChatId = Boolean(status.hasAdminChatId)
+      if (hasToken && hasAdminChatId) {
+        onProgress?.('Worker 机器人配置已生效：hasToken=true，adminChatId=已设置')
         return { ok: true, status }
       }
-      lastReason = `hasToken=${hasToken}; adminChatId=${adminChatId || 'missing'}`
+      lastReason = `hasToken=${hasToken}; adminChatId=${hasAdminChatId ? 'set' : 'missing'}`
     } else {
       lastReason = result.reason || 'unknown'
       if (stopOnNetworkFailure && isConnectivityFetchError(lastReason)) {
@@ -3620,7 +3621,6 @@ async function runAction(action, params, env) {
         if (effectiveWorkerUrl) {
           const configReady = await waitForWorkerBotConfig(
             effectiveWorkerUrl,
-            adminChatId,
             send,
             { delays: [2000, 4000], stopOnNetworkFailure: true },
           )
@@ -3694,7 +3694,6 @@ async function runAction(action, params, env) {
           if (effectiveWorkerUrl) {
             const configReady = await waitForWorkerBotConfig(
               effectiveWorkerUrl,
-              adminChatId,
               send,
               { delays: [2000, 4000], stopOnNetworkFailure: true },
             )

@@ -37,6 +37,34 @@ function normalizeExternalHttpUrl(value) {
   }
 }
 
+function buildWorkerReadinessUrl(value) {
+  const normalized = normalizeExternalHttpUrl(value)
+  if (!normalized) return ''
+  const parsed = new URL(normalized)
+  parsed.pathname = '/ready'
+  parsed.search = ''
+  parsed.hash = ''
+  return parsed.toString()
+}
+
+function parseWorkerReadinessStatus(value = {}) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const checks = source.checks && typeof source.checks === 'object' && !Array.isArray(source.checks)
+    ? source.checks
+    : null
+  const valid = Boolean(
+    checks
+    && typeof checks.botToken === 'boolean'
+    && typeof checks.adminChatId === 'boolean',
+  )
+  return {
+    valid,
+    ready: valid && source.ok === true && source.status === 'ready',
+    hasToken: valid && checks.botToken === true,
+    hasAdminChatId: valid && checks.adminChatId === true,
+  }
+}
+
 function getAdminPasswordHashIterations(value) {
   const match = /^pbkdf2-sha256\$(\d+)\$[0-9a-f]{32}\$[0-9a-f]{64}$/i.exec(String(value || ''))
   if (!match) return 0
@@ -81,11 +109,13 @@ function sanitizeDeploymentResumeState(value = {}) {
 
 module.exports = {
   ADMIN_PASSWORD_HASH_ITERATIONS,
+  buildWorkerReadinessUrl,
   getAdminPasswordHashIterations,
   isAllowedAction,
   isAdminPasswordHash,
   isSupportedAdminPasswordHash,
   normalizeAccountInput,
   normalizeExternalHttpUrl,
+  parseWorkerReadinessStatus,
   sanitizeDeploymentResumeState,
 }

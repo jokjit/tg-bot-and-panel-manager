@@ -3,12 +3,14 @@ const test = require('node:test')
 
 const {
   ADMIN_PASSWORD_HASH_ITERATIONS,
+  buildWorkerReadinessUrl,
   getAdminPasswordHashIterations,
   isAllowedAction,
   isAdminPasswordHash,
   isSupportedAdminPasswordHash,
   normalizeAccountInput,
   normalizeExternalHttpUrl,
+  parseWorkerReadinessStatus,
   sanitizeDeploymentResumeState,
 } = require('../electron-app/security.js')
 
@@ -51,6 +53,43 @@ test('Electron action and external URL allowlists reject dangerous values', () =
   assert.equal(normalizeExternalHttpUrl('https://panel.example.com/admin'), 'https://panel.example.com/admin')
   assert.equal(normalizeExternalHttpUrl('javascript:alert(1)'), '')
   assert.equal(normalizeExternalHttpUrl('file:///C:/secret.txt'), '')
+})
+
+test('Electron reads bot configuration state from the Worker readiness endpoint', () => {
+  assert.equal(
+    buildWorkerReadinessUrl('https://worker.example.com/old/path?cache=1#status'),
+    'https://worker.example.com/ready',
+  )
+  assert.equal(buildWorkerReadinessUrl('javascript:alert(1)'), '')
+
+  assert.deepEqual(parseWorkerReadinessStatus({
+    ok: true,
+    status: 'ready',
+    checks: { botToken: true, adminChatId: true, webhookSecret: true, kv: true },
+  }), {
+    valid: true,
+    ready: true,
+    hasToken: true,
+    hasAdminChatId: true,
+  })
+
+  assert.deepEqual(parseWorkerReadinessStatus({
+    ok: false,
+    status: 'not_ready',
+    checks: { botToken: true, adminChatId: true, webhookSecret: false, kv: true },
+  }), {
+    valid: true,
+    ready: false,
+    hasToken: true,
+    hasAdminChatId: true,
+  })
+
+  assert.deepEqual(parseWorkerReadinessStatus({ ok: true }), {
+    valid: false,
+    ready: false,
+    hasToken: false,
+    hasAdminChatId: false,
+  })
 })
 
 test('Electron deployment resume state never retains bootstrap credentials', () => {
