@@ -2026,39 +2026,56 @@ async function waitForWorkerHealth(workerUrl: string, onLog: (text: string) => v
 async function triggerDeployBootstrap(
   workerUrl: string,
   bootstrapToken: string,
+  onLog: (text: string) => void,
 ): Promise<{ ok: boolean; webhookUrl: string; reason: string }> {
   const origin = getUrlOrigin(workerUrl);
   if (!origin || !bootstrapToken) {
     return { ok: false, webhookUrl: '', reason: 'missing_worker_url_or_bootstrap_token' };
   }
 
-  try {
-    const response = await request(`${origin}/deploy/bootstrap`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-deploy-bootstrap-token': bootstrapToken,
-      },
-      jsonBody: { token: bootstrapToken },
-      timeoutMs: 30000,
-    });
+  const delays = [2000, 4000, 8000, 12000, 18000, 25000];
+  let lastReason = 'unknown';
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    try {
+      const response = await request(`${origin}/deploy/bootstrap`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-deploy-bootstrap-token': bootstrapToken,
+        },
+        jsonBody: {},
+        timeoutMs: 30000,
+      });
 
-    const normalized = normalizeDeployBootstrapResponse(response.status, response.json, {
-      successReasonFields: ['webhookError', 'commandsError', 'bootstrapNotifyError'],
-      failureReasonFields: ['error'],
-    });
-    return {
-      ok: normalized.ok,
-      webhookUrl: normalized.webhookUrl,
-      reason: normalized.reason,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      webhookUrl: '',
-      reason: error instanceof Error ? error.message : String(error),
-    };
+      const normalized = normalizeDeployBootstrapResponse(response.status, response.json, {
+        successReasonFields: ['webhookError', 'commandsError', 'bootstrapNotifyError'],
+        failureReasonFields: ['error'],
+      });
+      if (normalized.ok) {
+        if (normalized.consumed) {
+          onLog('Worker 部署引导已由此前完成的请求处理。');
+        } else {
+          onLog(`Worker 部署引导已完成：${normalized.webhookUrl || `${origin}/webhook`}`);
+        }
+        return {
+          ok: true,
+          webhookUrl: normalized.webhookUrl,
+          reason: '',
+        };
+      }
+      lastReason = normalized.reason;
+    } catch (error) {
+      lastReason = error instanceof Error ? error.message : String(error);
+    }
+
+    if (attempt < delays.length) {
+      const delayMs = delays[attempt];
+      onLog(`Worker 部署引导暂未完成（${lastReason}）。${Math.round(delayMs / 1000)} 秒后重试...`);
+      await sleep(delayMs);
+    }
   }
+
+  return { ok: false, webhookUrl: '', reason: lastReason };
 }
 
 async function getPagesProject(token: string, accountId: string, projectName: string): Promise<PageProjectResult> {
@@ -2632,7 +2649,7 @@ export async function runDeploy(
           onLog('部署引导将通过 workers.dev 入口执行，避免自定义域名尚未生效导致超时。');
         }
         await waitForWorkerHealth(bootstrapWorkerUrl, onLog);
-        const bootstrap = await triggerDeployBootstrap(bootstrapWorkerUrl, bootstrapToken);
+        const bootstrap = await triggerDeployBootstrap(bootstrapWorkerUrl, bootstrapToken, onLog);
         if (bootstrap.ok) {
           onLog(`Webhook 已设置: ${bootstrap.webhookUrl || `${getUrlOrigin(results.endpoint.workerUrl)}/webhook`}`);
         } else {
@@ -2645,6 +2662,8 @@ export async function runDeploy(
           } else {
             onLog(`临时 DEPLOY_BOOTSTRAP_TOKEN 清理警告：${cleanup.reason || 'unknown'}`);
           }
+        } else {
+          throw new Error(`Worker 部署引导失败：${bootstrap.reason || 'unknown'}。请从断点继续部署以重试。`);
         }
         return { bootstrap };
       },
