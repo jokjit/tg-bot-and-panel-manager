@@ -107,6 +107,7 @@ import {
   buildEffectiveSystemConfig,
   mergeRuntimeEnv,
 } from './worker-src/config/runtime.js';
+import { createSystemConfigStore } from './worker-src/config/store.js';
 import {
   buildSliderSubmitProof,
   validateSliderSubmitProof,
@@ -293,7 +294,6 @@ const DEFAULT_BLOCKED_TEXT = '你已被管理员限制联系，如有需要请�
 const ADMIN_PANEL_PATH = '/admin';
 const ADMIN_API_PREFIX = '/admin/api';
 const MAX_SCAN_KEYS = 500;
-const SYSTEM_CONFIG_KEY = 'sys:config';
 const ADMIN_SESSION_PREFIX = 'admin:session:';
 const ADMIN_LOGIN_RATE_PREFIX = 'admin:login-rate:';
 const ADMIN_BOOTSTRAP_TTL_MS = 1 * 60 * 60 * 1000;
@@ -332,7 +332,6 @@ const WELCOME_SETUP_PENDING_PREFIX = 'sys:welcome_setup:';
 const WELCOME_SETUP_PENDING_TTL_SECONDS = 10 * 60;
 const ADMIN_IMAGE_UPLOAD_PENDING_PREFIX = 'sys:admin_image_upload:';
 const ADMIN_PANEL_INPUT_PENDING_PREFIX = 'sys:admin_panel_input:';
-const SYSTEM_CONFIG_CACHE_TTL_MS = 5 * 1000;
 const GROUP_ADMIN_MEMBER_CACHE_TTL_MS = 90 * 1000;
 const GROUP_ADMIN_LIST_CACHE_TTL_MS = 60 * 1000;
 const HOT_KV_JSON_CACHE_TTL_MS = 30 * 1000;
@@ -357,7 +356,14 @@ const kvJsonCache = new Map();
 const userListSnapshotCache = new Map();
 const messageHistoryDedupeCache = new Map();
 const messageHistoryConversationCache = new Map();
-let systemConfigCache = { value: null, expiresAt: 0 };
+const systemConfigStore = createSystemConfigStore(
+  { ttlMs: 5 * 1000 },
+  {
+    readConfig: (env, key) => getJson(env.BOT_KV, key),
+    writeConfig: (env, key, config) => env.BOT_KV.put(key, JSON.stringify(config)),
+    ensureKv,
+  },
+);
 const shouldScheduleAutoCleanupCheck = createIntervalGate(DATA_CLEANUP_CHECK_MIN_INTERVAL_MS);
 const shouldScheduleDeletedAccountSweepCheck = createIntervalGate(DELETED_ACCOUNT_SWEEP_CHECK_MIN_INTERVAL_MS);
 const verificationD1Repository = createVerificationD1Repository({
@@ -905,30 +911,8 @@ function clearMessageHistoryConversationId(userId) {
   messageHistoryConversationCache.delete(String(Number(userId)));
 }
 
-function readSystemConfigCache(nowMs = Date.now()) {
-  if (!systemConfigCache?.value) {
-    return null;
-  }
-  if (!Number.isFinite(systemConfigCache.expiresAt) || systemConfigCache.expiresAt <= nowMs) {
-    systemConfigCache = { value: null, expiresAt: 0 };
-    return null;
-  }
-  return systemConfigCache.value;
-}
-
-function writeSystemConfigCache(config, nowMs = Date.now()) {
-  const normalized = config && typeof config === 'object' ? { ...config } : {};
-  systemConfigCache = {
-    value: normalized,
-    expiresAt: nowMs + SYSTEM_CONFIG_CACHE_TTL_MS,
-  };
-}
-
 async function setSystemConfig(env, config) {
-  ensureKv(env);
-  const normalized = config && typeof config === 'object' ? { ...config } : {};
-  await env.BOT_KV.put(SYSTEM_CONFIG_KEY, JSON.stringify(normalized));
-  writeSystemConfigCache(normalized);
+  return systemConfigStore.set(env, config);
 }
 
 async function runScheduledMaintenance(env) {
@@ -4057,22 +4041,7 @@ async function getEffectiveSystemConfig(env) {
 }
 
 async function getSystemConfig(env) {
-  if (!env.BOT_KV) {
-    return {};
-  }
-
-  const cached = readSystemConfigCache();
-  if (cached) {
-    return { ...cached };
-  }
-
-  const data = await getJson(env.BOT_KV, SYSTEM_CONFIG_KEY);
-  if (!data || typeof data !== 'object') {
-    writeSystemConfigCache({});
-    return {};
-  }
-  writeSystemConfigCache(data);
-  return { ...data };
+  return systemConfigStore.get(env);
 }
 
 const adminPasswordStateHandlers = {
