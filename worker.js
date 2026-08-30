@@ -78,6 +78,7 @@ import { handleAdminSystemRoute } from './worker-src/routes/admin-system.js';
 import { handleAdminImageRoute } from './worker-src/routes/admin-images.js';
 import { handlePublicMediaRoute } from './worker-src/routes/media.js';
 import { handleDeployBootstrapRequest } from './worker-src/routes/deploy-bootstrap.js';
+import { handleWebhookRequest as handleWebhookRequestCore } from './worker-src/routes/webhook.js';
 import { TOP_LEVEL_ROUTES, classifyTopLevelRoute } from './worker-src/routes/top-level.js';
 import {
   classifyVerificationApiRoute,
@@ -514,40 +515,20 @@ async function handleTopLevelRequest(request, url, env, webhookPath, publicBaseU
 }
 
 async function handleWebhookRequest(request, env, publicBaseUrl = '', ctx = null) {
-  ensureEnv(env, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
-  if (env.WEBHOOK_SECRET) {
-    const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
-    if (secret !== env.WEBHOOK_SECRET) {
-      return new Response('Forbidden', { status: 403 });
-    }
-  }
-
-  const startedAt = Date.now();
-  const requestId = getRequestId(request);
-  const update = await request.json();
-  const updateContext = getTelegramUpdateContext(update);
-  try {
-    await handleUpdate(update, env, publicBaseUrl, ctx);
-    writeStructuredLog('info', 'telegram_update_completed', {
-      requestId,
-      ...updateContext,
-      stage: 'handle_update',
-    }, {
-      durationMs: Date.now() - startedAt,
-      status: 'ok',
-    });
-  } catch (error) {
-    await runNonCriticalTask(ctx, async () => {
-      await recordWebhookError(env, error, update, {
-        requestId,
-        ...updateContext,
-        stage: 'handle_update',
-        durationMs: Date.now() - startedAt,
-      });
-      await notifyWebhookError(env, error, update);
-    });
-  }
-  return new Response('ok', { headers: corsHeaders(request, env) });
+  return handleWebhookRequestCore(
+    { request, env, publicBaseUrl, ctx },
+    {
+      ensureEnv,
+      getRequestId,
+      getTelegramUpdateContext,
+      handleUpdate,
+      writeStructuredLog,
+      runNonCriticalTask,
+      recordWebhookError,
+      notifyWebhookError,
+      corsHeaders,
+    },
+  );
 }
 
 async function handleAdminAuthRequest(request, url, env) {
