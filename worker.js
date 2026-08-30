@@ -77,12 +77,17 @@ import { handleAdminReplyRoute } from './worker-src/routes/admin-reply.js';
 import { handleAdminSystemRoute } from './worker-src/routes/admin-system.js';
 import { handleAdminImageRoute } from './worker-src/routes/admin-images.js';
 import { handlePublicMediaRoute } from './worker-src/routes/media.js';
+import { handleDeployBootstrapRequest } from './worker-src/routes/deploy-bootstrap.js';
 import { TOP_LEVEL_ROUTES, classifyTopLevelRoute } from './worker-src/routes/top-level.js';
 import {
   classifyVerificationApiRoute,
   dispatchVerificationApiRoute,
 } from './worker-src/routes/verification.js';
 import { buildDeployBootstrapConsumptionKey } from './worker-src/auth/bootstrap.js';
+import {
+  ensureAdminPasswordState as ensureAdminPasswordStateCore,
+  resetAdminBootstrapPassword,
+} from './worker-src/auth/password-state.js';
 import {
   IMAGE_MAX_BYTES,
   buildImageAssetView,
@@ -4299,109 +4304,22 @@ async function getSystemConfig(env) {
   return { ...data };
 }
 
+const adminPasswordStateHandlers = {
+  ensureKv,
+  getSystemConfig,
+  getAdminPanelUser,
+  hashPassword,
+  setSystemConfig,
+  getAdminSessionVersion,
+  createBootstrapPassword,
+  notifyBootstrapPassword,
+};
+
 async function ensureAdminPasswordState(env) {
-  ensureKv(env);
-  let config = await getSystemConfig(env);
-  const username = getAdminPanelUser(env);
-  let permanentPasswordHash = String(config.ADMIN_PANEL_PASSWORD_HASH || '').trim();
-  const permanentPassword = String(config.ADMIN_PANEL_PASSWORD || '').trim();
-
-  if (!permanentPasswordHash && permanentPassword) {
-    permanentPasswordHash = await hashPassword(permanentPassword);
-    config = {
-      ...config,
-      ADMIN_PANEL_PASSWORD_HASH: permanentPasswordHash,
-      updatedAt: new Date().toISOString(),
-    };
-    delete config.ADMIN_PANEL_PASSWORD;
-    await setSystemConfig(env, config);
-  }
-
-  if (permanentPasswordHash) {
-    return {
-      username,
-      passwordReady: true,
-      passwordMode: 'permanent',
-      passwordHash: permanentPasswordHash,
-      mustChangePassword: false,
-      bootstrapExpiresAt: null,
-    };
-  }
-
-  let bootstrapPasswordHash = String(config.ADMIN_BOOTSTRAP_PASSWORD_HASH || '').trim();
-  const bootstrapPassword = String(config.ADMIN_BOOTSTRAP_PASSWORD || '').trim();
-  const bootstrapExpiresAt = String(config.ADMIN_BOOTSTRAP_EXPIRES_AT || '').trim() || null;
-  const bootstrapExpireMs = bootstrapExpiresAt ? new Date(bootstrapExpiresAt).getTime() : 0;
-
-  if (!bootstrapPasswordHash && bootstrapPassword && bootstrapExpireMs > Date.now()) {
-    bootstrapPasswordHash = await hashPassword(bootstrapPassword);
-    config = {
-      ...config,
-      ADMIN_BOOTSTRAP_PASSWORD_HASH: bootstrapPasswordHash,
-      updatedAt: new Date().toISOString(),
-    };
-    delete config.ADMIN_BOOTSTRAP_PASSWORD;
-    await setSystemConfig(env, config);
-  }
-
-  if (bootstrapPasswordHash && bootstrapExpireMs > Date.now()) {
-    return {
-      username,
-      passwordReady: true,
-      passwordMode: 'bootstrap',
-      passwordHash: bootstrapPasswordHash,
-      mustChangePassword: true,
-      bootstrapExpiresAt,
-      bootstrapNotifyError: String(config.ADMIN_BOOTSTRAP_NOTIFY_ERROR || '').trim() || null,
-    };
-  }
-
-  if (!env.BOT_TOKEN || !env.ADMIN_CHAT_ID) {
-    return {
-      username,
-      passwordReady: false,
-      passwordMode: 'none',
-      passwordHash: '',
-      mustChangePassword: false,
-      bootstrapExpiresAt: null,
-    };
-  }
-
-  const bootstrapGeneratedPassword = createBootstrapPassword();
-  const generatedPasswordHash = await hashPassword(bootstrapGeneratedPassword);
-
-  const next = {
-    ...config,
-    ADMIN_BOOTSTRAP_PASSWORD_HASH: generatedPasswordHash,
-    ADMIN_BOOTSTRAP_EXPIRES_AT: new Date(Date.now() + ADMIN_BOOTSTRAP_TTL_MS).toISOString(),
-    ADMIN_FORCE_PASSWORD_CHANGE: 'true',
-    ADMIN_SESSION_VERSION: String(getAdminSessionVersion(config) + 1),
-    updatedAt: new Date().toISOString(),
-  };
-
-  delete next.ADMIN_PANEL_PASSWORD;
-  delete next.ADMIN_PANEL_PASSWORD_HASH;
-  delete next.ADMIN_BOOTSTRAP_PASSWORD;
-  delete next.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
-  await setSystemConfig(env, next);
-  let bootstrapNotifyError = null;
-  try {
-    await notifyBootstrapPassword(env, username, bootstrapGeneratedPassword, next.ADMIN_BOOTSTRAP_EXPIRES_AT);
-  } catch (error) {
-    bootstrapNotifyError = formatErrorMessage(error);
-    next.ADMIN_BOOTSTRAP_NOTIFY_ERROR = bootstrapNotifyError;
-    await setSystemConfig(env, next);
-  }
-
-  return {
-    username,
-    passwordReady: true,
-    passwordMode: 'bootstrap',
-    passwordHash: generatedPasswordHash,
-    mustChangePassword: true,
-    bootstrapExpiresAt: next.ADMIN_BOOTSTRAP_EXPIRES_AT,
-    bootstrapNotifyError,
-  };
+  return ensureAdminPasswordStateCore(
+    { env, bootstrapTtlMs: ADMIN_BOOTSTRAP_TTL_MS },
+    adminPasswordStateHandlers,
+  );
 }
 
 async function resendBootstrapPassword(env) {
@@ -4432,49 +4350,10 @@ async function resendBootstrapPassword(env) {
 }
 
 async function resetBootstrapPassword(env) {
-  ensureKv(env);
-  if (!env.BOT_TOKEN || !env.ADMIN_CHAT_ID) {
-    return {
-      ok: false,
-      message: '当前还无法重置面板密码，请先确保 BOT_TOKEN 与 ADMIN_CHAT_ID 已正确配置。',
-    };
-  }
-
-  const config = await getSystemConfig(env);
-  const username = getAdminPanelUser(env);
-  const bootstrapGeneratedPassword = createBootstrapPassword();
-  const bootstrapPasswordHash = await hashPassword(bootstrapGeneratedPassword);
-  const expiresAt = new Date(Date.now() + ADMIN_BOOTSTRAP_TTL_MS).toISOString();
-  const next = {
-    ...config,
-    ADMIN_BOOTSTRAP_PASSWORD_HASH: bootstrapPasswordHash,
-    ADMIN_BOOTSTRAP_EXPIRES_AT: expiresAt,
-    ADMIN_FORCE_PASSWORD_CHANGE: 'true',
-    ADMIN_SESSION_VERSION: String(getAdminSessionVersion(config) + 1),
-    updatedAt: new Date().toISOString(),
-  };
-
-  delete next.ADMIN_PANEL_PASSWORD;
-  delete next.ADMIN_PANEL_PASSWORD_HASH;
-  delete next.ADMIN_BOOTSTRAP_PASSWORD;
-  delete next.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
-  await setSystemConfig(env, next);
-  try {
-    await notifyBootstrapPassword(env, username, bootstrapGeneratedPassword, expiresAt);
-  } catch (error) {
-    next.ADMIN_BOOTSTRAP_NOTIFY_ERROR = formatErrorMessage(error);
-    await setSystemConfig(env, next);
-    return {
-      ok: false,
-      message: `新的临时密码已生成，但发送到 Telegram 失败：${next.ADMIN_BOOTSTRAP_NOTIFY_ERROR}`,
-    };
-  }
-
-  return {
-    ok: true,
-    message: `新的临时密码已生成并发送到管理员会话。有效期至：${expiresAt}`,
-    expiresAt,
-  };
+  return resetAdminBootstrapPassword(
+    { env, bootstrapTtlMs: ADMIN_BOOTSTRAP_TTL_MS },
+    adminPasswordStateHandlers,
+  );
 }
 
 function getAdminSessionVersion(config = {}) {
@@ -4754,105 +4633,18 @@ function formatErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function readDeployBootstrapToken(request) {
-  const url = new URL(request.url);
-  const authorization = request.headers.get('authorization') || '';
-  const bearerToken = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
-  const headerToken = request.headers.get('x-deploy-bootstrap-token') || '';
-  const queryToken = url.searchParams.get('token') || '';
-  let bodyToken = '';
-
-  try {
-    const contentType = request.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
-      const body = await request.json();
-      bodyToken = String(body?.token || '').trim();
-    }
-  } catch (error) {
-    // ignore malformed optional body
-  }
-
-  return String(headerToken || bearerToken || bodyToken || queryToken || '').trim();
-}
-
 async function handleDeployBootstrap(request, env, webhookPath, publicBaseUrl) {
-  const expectedToken = String(env.DEPLOY_BOOTSTRAP_TOKEN || '').trim();
-  if (!expectedToken) {
-    throw new AppError(404, 'deploy_bootstrap_disabled');
-  }
-
-  const providedToken = await readDeployBootstrapToken(request);
-  if (!timingSafeEqualText(providedToken, expectedToken)) {
-    throw new AppError(403, 'forbidden');
-  }
-
-  ensureEnv(env, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
-  ensureKv(env);
-  const consumedKey = await buildDeployBootstrapConsumptionKey(expectedToken);
-  if (await env.BOT_KV.get(consumedKey)) {
-    throw new AppError(410, 'deploy_bootstrap_consumed');
-  }
-
-  const webhookUrl = `${publicBaseUrl}${webhookPath}`;
-  const webhookPayload = { url: webhookUrl };
-  if (env.WEBHOOK_SECRET) webhookPayload.secret_token = env.WEBHOOK_SECRET;
-
-  let webhook = null;
-  let webhookError = null;
-  try {
-    webhook = await telegram(env, 'setWebhook', webhookPayload);
-  } catch (error) {
-    webhookError = formatErrorMessage(error);
-  }
-
-  let commands = null;
-  let commandsError = null;
-  try {
-    commands = await syncTelegramCommands(env);
-  } catch (error) {
-    commandsError = formatErrorMessage(error);
-  }
-
-  const passwordState = await ensureAdminPasswordState(env);
-  const bootstrapNotifyError = passwordState.bootstrapNotifyError || null;
-  const ok = Boolean(!webhookError && !commandsError && passwordState.passwordReady && !bootstrapNotifyError);
-  const deploymentHealth = buildDeploymentHealthRecord({
-    ok,
-    webhookUrl,
-    webhookError,
-    commandsError,
-    passwordReady: passwordState.passwordReady,
-    bootstrapNotifyError,
-  });
-  try {
-    await env.BOT_KV.put(DEPLOYMENT_HEALTH_KEY, JSON.stringify(deploymentHealth));
-  } catch (error) {
-    writeStructuredLog('warn', 'deployment_health_persist_failed', {
-      stage: 'deploy_bootstrap',
-    }, {
-      error: formatErrorMessage(error),
-    });
-  }
-  if (ok) {
-    await env.BOT_KV.put(consumedKey, JSON.stringify({ consumedAt: new Date().toISOString() }));
-  }
-
-  return json(
+  return handleDeployBootstrapRequest(
+    { request, env, webhookPath, publicBaseUrl },
     {
-      ok,
-      webhookUrl,
-      webhook,
-      webhookError,
-      commands,
-      commandsError,
-      passwordReady: Boolean(passwordState.passwordReady),
-      passwordMode: passwordState.passwordMode || 'none',
-      bootstrapNotifyError,
-      deploymentHealth,
+      createError: (status, message) => new AppError(status, message),
+      ensureEnv,
+      ensureKv,
+      telegram,
+      syncTelegramCommands,
+      ensureAdminPasswordState,
+      json,
     },
-    200,
-    {},
-    request,
   );
 }
 
@@ -5470,7 +5262,7 @@ function corsHeaders(request = null, env = null) {
   return {
     'access-control-allow-origin': allowOrigin,
     'access-control-allow-methods': 'GET,HEAD,POST,DELETE,OPTIONS',
-    'access-control-allow-headers': 'Content-Type, Authorization, X-Admin-Key, X-CSRF-Token',
+    'access-control-allow-headers': 'Content-Type, Authorization, X-Admin-Key, X-CSRF-Token, X-Deploy-Bootstrap-Token',
     'access-control-allow-credentials': 'true',
     vary: 'Origin',
   };
