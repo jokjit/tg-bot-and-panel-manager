@@ -41,7 +41,7 @@ export async function handleTelegramUpdate(context = {}, handlers = {}) {
 
   if (!isPrivateChat) return;
 
-  const verificationEnabled = handlers.isUserVerificationEnabled(env);
+  const verificationEnabled = handlers.isUserVerificationEnabled(env) && !authorizedAdmin;
   if (topicModeEnabled || verificationEnabled) handlers.ensureKv(env);
 
   await handlers.upsertUserProfile(env, message, {
@@ -64,7 +64,7 @@ export async function handleTelegramUpdate(context = {}, handlers = {}) {
   }
 
   const verificationStateRef = { value: null };
-  const verified = await handlers.ensureUserVerifiedOrPrompt(message, env, publicBaseUrl, {
+  const verified = authorizedAdmin || await handlers.ensureUserVerifiedOrPrompt(message, env, publicBaseUrl, {
     stateRef: verificationStateRef,
   });
   if (!verified) return;

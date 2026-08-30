@@ -75,8 +75,16 @@ test('Telegram update routes authorized private ordinary messages through user r
     { update: messageUpdate(), env: { ADMIN_CHAT_ID: '-100' } },
     handlers,
   );
-  assert.deepEqual(calls, ['profile:true', 'verify', 'observe:verified', 'relay']);
+  assert.deepEqual(calls, ['profile:true', 'observe:none', 'relay']);
 });
+
+test('Telegram update does not challenge authorized admins when relaying ordinary private messages', async () => {
+  const { handlers, calls } = createUpdateHandlers({ authorizedAdmin: true, topicMode: true, verificationEnabled: true });
+  await handleTelegramUpdate(
+    { update: messageUpdate(), env: { ADMIN_CHAT_ID: '-100' } },
+    handlers,
+  );
+  assert.deepEqual(calls, ['ensureKv', 'profile:true', 'observe:none', 'relay']);
 
 test('Telegram update preserves admin handling for private pending panel input', async () => {
   const { handlers, calls } = createUpdateHandlers({ authorizedAdmin: true, pendingAdminInteraction: true });
