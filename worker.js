@@ -4547,8 +4547,8 @@ async function handleAdminChangePassword(request, env) {
   const body = await readJsonBody(request);
   const newPassword = String(body.newPassword || '').trim();
 
-  if (newPassword.length < 10) {
-    throw new AppError(400, '新密码至少需要 10 位');
+  if (!newPassword) {
+    throw new AppError(400, '新密码不能为空');
   }
 
   const current = await getSystemConfig(env);

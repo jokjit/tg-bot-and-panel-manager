@@ -92,8 +92,8 @@ const form = reactive({
 });
 
 async function savePassword() {
-  if (form.newPassword.trim().length < 10) {
-    message.warning(t('password.passwordTooShort'));
+  if (!form.newPassword.trim()) {
+    message.warning(t('password.passwordRequired'));
     return;
   }
 

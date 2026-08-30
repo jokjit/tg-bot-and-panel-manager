@@ -205,6 +205,19 @@ test('Miniflare runs the bundled Worker with KV and D1 bindings', async (t) => {
     });
     assert.equal(missingCsrf.status, 403);
 
+    const emptyPassword = await mf.dispatchFetch('https://bot.example.com/admin/api/auth/change-password', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie,
+        origin: 'https://panel.example.com',
+        'x-csrf-token': login.csrfToken,
+      },
+      body: JSON.stringify({ newPassword: '   ' }),
+    });
+    assert.equal(emptyPassword.status, 400);
+    assert.equal((await emptyPassword.json()).error, '新密码不能为空');
+
     const changeResponse = await mf.dispatchFetch('https://bot.example.com/admin/api/auth/change-password', {
       method: 'POST',
       headers: {
@@ -213,7 +226,7 @@ test('Miniflare runs the bundled Worker with KV and D1 bindings', async (t) => {
         origin: 'https://panel.example.com',
         'x-csrf-token': login.csrfToken,
       },
-      body: JSON.stringify({ newPassword: 'new-permanent-password-456' }),
+      body: JSON.stringify({ newPassword: 'x' }),
     });
     assert.equal(changeResponse.status, 200);
     const changed = await changeResponse.json();
@@ -234,6 +247,16 @@ test('Miniflare runs the bundled Worker with KV and D1 bindings', async (t) => {
       },
     });
     assert.equal(logoutResponse.status, 200);
+
+    const shortPasswordLogin = await mf.dispatchFetch('https://bot.example.com/admin/login', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://panel.example.com',
+      },
+      body: JSON.stringify({ username: 'admin', password: 'x' }),
+    });
+    assert.equal(shortPasswordLogin.status, 200);
 
     const queryKeyResponse = await mf.dispatchFetch(`https://bot.example.com/admin/api/users?key=${adminKey}`);
     assert.equal(queryKeyResponse.status, 401);
