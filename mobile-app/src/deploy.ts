@@ -55,12 +55,19 @@ const {
 };
 
 const {
+  buildDeploymentWorkerSecrets,
   deleteWorkerSecret: deleteWorkerSecretCore,
   ensurePagesProject: ensurePagesProjectCore,
   normalizeDeployBootstrapResponse,
   runDeploymentSteps,
   syncWorkerSecrets,
 } = deploymentCore as {
+  buildDeploymentWorkerSecrets: (values: {
+    botToken: string;
+    adminChatId: string;
+    webhookSecret: string;
+    bootstrapToken: string;
+  }) => Record<string, string>;
   deleteWorkerSecret: (options: {
     accountId: string;
     workerName: string;
@@ -2598,15 +2605,17 @@ export async function runDeploy(
       run: async ({ results }) => {
         onLog('步骤 7/7: 更新 Worker Secrets + 触发部署引导');
         const bootstrapToken = randomHex(24);
+        const webhookSecret = randomHex(32);
         await upsertWorkerSecrets(
           token,
           accountId,
           workerName,
-          {
-            BOT_TOKEN: form.botToken,
-            ADMIN_CHAT_ID: form.adminChatId,
-            DEPLOY_BOOTSTRAP_TOKEN: bootstrapToken,
-          },
+          buildDeploymentWorkerSecrets({
+            botToken: form.botToken,
+            adminChatId: form.adminChatId,
+            webhookSecret,
+            bootstrapToken,
+          }),
           onLog,
         );
         const bootstrapWorkerUrl = results.endpoint.workersDevUrl || results.endpoint.workerUrl;

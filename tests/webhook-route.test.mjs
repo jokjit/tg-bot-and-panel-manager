@@ -44,6 +44,23 @@ test('webhook route rejects an invalid Telegram secret before parsing the update
   assert.equal(calls.some(([name]) => name === 'handleUpdate'), false);
 });
 
+test('webhook route fails closed when Telegram secret authentication is not configured', async () => {
+  const { handlers, calls } = createHandlers();
+  const request = new Request('https://bot.example.com/webhook', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ update_id: 7 }),
+  });
+
+  const response = await handleWebhookRequest(
+    { request, env: { BOT_TOKEN: 'bot', ADMIN_CHAT_ID: '11' } },
+    handlers,
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(calls.some(([name]) => name === 'handleUpdate'), false);
+});
+
 test('webhook route handles updates and returns CORS headers', async () => {
   const { handlers, calls } = createHandlers();
   const request = new Request('https://bot.example.com/webhook', {
@@ -70,12 +87,12 @@ test('webhook route records and notifies processing errors without failing the r
   });
   const request = new Request('https://bot.example.com/webhook', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-telegram-bot-api-secret-token': 'expected' },
     body: JSON.stringify({ update_id: 7 }),
   });
 
   const response = await handleWebhookRequest(
-    { request, env: { BOT_TOKEN: 'bot', ADMIN_CHAT_ID: '11' } },
+    { request, env: { BOT_TOKEN: 'bot', ADMIN_CHAT_ID: '11', WEBHOOK_SECRET: 'expected' } },
     handlers,
   );
 

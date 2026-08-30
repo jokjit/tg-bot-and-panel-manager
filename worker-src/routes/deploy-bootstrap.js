@@ -37,7 +37,7 @@ export async function handleDeployBootstrapRequest(context = {}, handlers = {}) 
     throw handlers.createError(403, 'forbidden');
   }
 
-  handlers.ensureEnv(env, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
+  handlers.ensureEnv(env, ['BOT_TOKEN', 'ADMIN_CHAT_ID', 'WEBHOOK_SECRET']);
   handlers.ensureKv(env);
   return withDeployBootstrapLock(expectedToken, async () => {
     const consumedKey = await buildDeployBootstrapConsumptionKey(expectedToken);

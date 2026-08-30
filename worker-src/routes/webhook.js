@@ -1,3 +1,5 @@
+import { timingSafeEqualText } from '../auth/crypto.js';
+
 export async function handleWebhookRequest(context = {}, handlers = {}) {
   const {
     request,
@@ -6,11 +8,13 @@ export async function handleWebhookRequest(context = {}, handlers = {}) {
     ctx = null,
   } = context;
   handlers.ensureEnv(env, ['BOT_TOKEN', 'ADMIN_CHAT_ID']);
-  if (env.WEBHOOK_SECRET) {
-    const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
-    if (secret !== env.WEBHOOK_SECRET) {
-      return new Response('Forbidden', { status: 403 });
-    }
+  const expectedSecret = String(env.WEBHOOK_SECRET || '').trim();
+  if (!expectedSecret) {
+    return new Response('Webhook authentication is not configured', { status: 503 });
+  }
+  const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
+  if (!timingSafeEqualText(secret, expectedSecret)) {
+    return new Response('Forbidden', { status: 403 });
   }
 
   const startedAt = handlers.nowMs?.() ?? Date.now();

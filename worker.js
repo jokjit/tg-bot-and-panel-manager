@@ -507,9 +507,13 @@ async function handleTopLevelRequest(request, url, env, webhookPath, publicBaseU
 
   switch (route) {
     case TOP_LEVEL_ROUTES.STATUS:
-      return json(await getAdminStatus(url, env, webhookPath, publicBaseUrl), 200, {}, request, env);
+      return json(getPublicStatus(), 200, {}, request, env);
     case TOP_LEVEL_ROUTES.HEALTH:
-      return json({ ok: true, now: new Date().toISOString() }, 200, {}, request, env);
+      return json({ ok: true, status: 'alive', now: new Date().toISOString() }, 200, {}, request, env);
+    case TOP_LEVEL_ROUTES.READY: {
+      const readiness = getReadinessStatus(env);
+      return json(readiness, readiness.ok ? 200 : 503, {}, request, env);
+    }
     case TOP_LEVEL_ROUTES.VERIFY_IMAGE:
       return serveVerificationImage(url, request);
     case TOP_LEVEL_ROUTES.VERIFY_WEB:
@@ -734,7 +738,7 @@ async function handleAuthorizedAdminRequest(request, url, env) {
 async function handleWebhookManagementRequest(request, url, env, webhookPath, publicBaseUrl) {
   if (request.method === 'POST' && url.pathname === '/setWebhook') {
     await requireHttpAdmin(request, env);
-    ensureEnv(env, ['BOT_TOKEN']);
+    ensureEnv(env, ['BOT_TOKEN', 'WEBHOOK_SECRET']);
     const webhookUrl = `${publicBaseUrl}${webhookPath}`;
     const payload = { url: webhookUrl };
     if (env.WEBHOOK_SECRET) payload.secret_token = env.WEBHOOK_SECRET;
@@ -891,11 +895,13 @@ function invalidateD1VerificationStatusCache(userId) {
 function shouldSkipDuplicateMessageHistory(entry, userId) {
   const key = buildMessageHistoryDedupeKey(entry, userId);
   if (!key) return false;
-  if (readTimedCacheValue(messageHistoryDedupeCache, key)) {
-    return true;
-  }
+  return Boolean(readTimedCacheValue(messageHistoryDedupeCache, key));
+}
+
+function markMessageHistorySaved(entry, userId) {
+  const key = buildMessageHistoryDedupeKey(entry, userId);
+  if (!key) return;
   writeTimedCacheValue(messageHistoryDedupeCache, key, true, MESSAGE_HISTORY_DEDUPE_TTL_MS);
-  return false;
 }
 
 function readMessageHistoryConversationId(userId) {
@@ -1902,6 +1908,30 @@ async function getAdminStatus(url, env, webhookPath, publicBaseUrl) {
     webhookErrorStats,
     deploymentHealth,
     directoryIndexBackfill,
+  };
+}
+
+function getPublicStatus() {
+  return {
+    ok: true,
+    service: 'telegram-private-chatbot',
+    now: new Date().toISOString(),
+  };
+}
+
+function getReadinessStatus(env = {}) {
+  const checks = {
+    botToken: Boolean(env.BOT_TOKEN),
+    adminChatId: Boolean(env.ADMIN_CHAT_ID),
+    webhookSecret: Boolean(env.WEBHOOK_SECRET),
+    kv: Boolean(env.BOT_KV),
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return {
+    ok,
+    status: ok ? 'ready' : 'not_ready',
+    checks,
+    now: new Date().toISOString(),
   };
 }
 
@@ -3553,7 +3583,7 @@ async function saveMessageHistory(env, entry) {
     }
 
     await env.DB.prepare(
-      `INSERT INTO messages (
+      `INSERT OR IGNORE INTO messages (
         conversation_id, user_id, telegram_message_id, direction, sender_role, message_type,
         text_content, media_file_id, raw_payload, created_at
       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
@@ -3571,8 +3601,16 @@ async function saveMessageHistory(env, entry) {
         nowIso,
       )
       .run();
+    markMessageHistorySaved(entry, userId);
   } catch (error) {
-    // ignore D1 write failures to avoid blocking message flow
+    writeStructuredLog('error', 'message_history_write_failed', {
+      userId: Number.isFinite(Number(entry?.userId)) ? Number(entry.userId) : null,
+      stage: 'message_history',
+    }, {
+      direction: String(entry?.direction || '') || null,
+      telegramMessageId: Number(entry?.telegramMessageId) || null,
+      error: formatErrorMessage(error),
+    });
   }
 }
 
@@ -4211,7 +4249,11 @@ async function updateSystemConfig(env, payload) {
     } catch (error) {
       const errorText = formatErrorMessage(error);
       metaSync = { synced: false, error: errorText };
-      throw new AppError(400, `机器人简介同步失败：${errorText}`);
+      writeStructuredLog('warn', 'telegram_profile_meta_sync_failed', {
+        stage: 'system_config_update',
+      }, {
+        error: errorText,
+      });
     }
   }
 
@@ -4984,6 +5026,7 @@ function html(content, status = 200, request = null, extraHeaders = {}, env = nu
     headers: {
       'content-type': 'text/html; charset=UTF-8',
       ...corsHeaders(request, env),
+      'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob: https:; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
       ...extraHeaders,
     },
   });
@@ -5012,6 +5055,10 @@ function corsHeaders(request = null, env = null) {
     'access-control-allow-methods': 'GET,HEAD,POST,DELETE,OPTIONS',
     'access-control-allow-headers': 'Content-Type, Authorization, X-Admin-Key, X-CSRF-Token, X-Deploy-Bootstrap-Token',
     'access-control-allow-credentials': 'true',
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer',
+    'permissions-policy': 'camera=(), microphone=(), geolocation=()',
     vary: 'Origin',
   };
 }
@@ -6589,4 +6636,6 @@ export {
   classifyVerificationApiRoute,
   dispatchVerificationApiRoute,
   resolveWelcomeTextForSetup,
+  saveMessageHistory,
+  updateSystemConfig,
 };

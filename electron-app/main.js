@@ -45,6 +45,7 @@ const {
   suggestImageBucketName,
 } = require(deployUtilsPath)
 const {
+  buildDeploymentWorkerSecrets,
   createDeploymentRun,
   deleteWorkerSecret: deleteWorkerSecretCore,
   ensurePagesProject: ensurePagesProjectCore,
@@ -1755,7 +1756,7 @@ async function triggerDeployBootstrapFallbackViaApis(env, configPath, options = 
     workerUrl: publicBaseUrl,
     publicBaseUrl,
     webhookPath,
-    webhookSecret: vars.WEBHOOK_SECRET,
+    webhookSecret: options.webhookSecret || vars.WEBHOOK_SECRET,
     vars,
   }, onProgress)
 
@@ -3499,11 +3500,13 @@ async function runAction(action, params, env) {
         completedSteps: resumeState.completedSteps,
       })
       const deployBootstrapToken = crypto.randomBytes(24).toString('hex')
-      const workerSecrets = {
-        BOT_TOKEN: botToken,
-        ADMIN_CHAT_ID: adminChatId,
-        DEPLOY_BOOTSTRAP_TOKEN: deployBootstrapToken,
-      }
+      const webhookSecret = crypto.randomBytes(32).toString('hex')
+      const workerSecrets = buildDeploymentWorkerSecrets({
+        botToken,
+        adminChatId,
+        webhookSecret,
+        bootstrapToken: deployBootstrapToken,
+      })
       await deployment.run('merge_config', async () => {
         send('步骤 1/4：合并配置...')
         await runScript('merge-wrangler-config.mjs', [], env)
@@ -3690,6 +3693,7 @@ async function runAction(action, params, env) {
           const fallback = await triggerDeployBootstrapFallbackViaApis(env, workerConfigPath, {
             botToken,
             adminChatId,
+            webhookSecret,
             workerUrl: effectiveWorkerUrl,
             panelUrl: finalPanelUrl,
           }, send)

@@ -1,6 +1,7 @@
 export const TOP_LEVEL_ROUTES = Object.freeze({
   STATUS: 'status',
   HEALTH: 'health',
+  READY: 'ready',
   VERIFY_IMAGE: 'verify_image',
   VERIFY_WEB: 'verify_web',
   VERIFY_API: 'verify_api',
@@ -12,6 +13,7 @@ export const TOP_LEVEL_ROUTES = Object.freeze({
 export function classifyTopLevelRoute(method, pathname, paths) {
   if (method === 'GET' && pathname === '/') return TOP_LEVEL_ROUTES.STATUS;
   if (method === 'GET' && pathname === '/health') return TOP_LEVEL_ROUTES.HEALTH;
+  if (method === 'GET' && pathname === '/ready') return TOP_LEVEL_ROUTES.READY;
   if (method === 'GET' && pathname === paths.verifyImage) return TOP_LEVEL_ROUTES.VERIFY_IMAGE;
   if (method === 'GET' && pathname === paths.verifyWeb) return TOP_LEVEL_ROUTES.VERIFY_WEB;
   if (method === 'POST' && pathname.startsWith(paths.verifyApiPrefix)) return TOP_LEVEL_ROUTES.VERIFY_API;

@@ -26,9 +26,11 @@ async function createWorkerRuntime() {
           BOT_KV: { type: 'kv' },
           DB: { type: 'd1' },
           IMAGE_BUCKET: { type: 'r2' },
+          BOT_TOKEN: { type: 'text', value: 'integration-bot-token' },
           ADMIN_API_KEY: { type: 'text', value: adminKey },
           DEPLOY_BOOTSTRAP_TOKEN: { type: 'text', value: 'integration-bootstrap-token' },
           ADMIN_CHAT_ID: { type: 'text', value: '-100123' },
+          WEBHOOK_SECRET: { type: 'text', value: 'integration-webhook-secret' },
           ADMIN_PANEL_URL: { type: 'text', value: 'https://panel.example.com' },
           PUBLIC_BASE_URL: { type: 'text', value: 'https://bot.example.com' },
           TOPIC_MODE: { type: 'text', value: 'false' },
@@ -52,27 +54,77 @@ test('Miniflare runs the bundled Worker with KV and D1 bindings', async (t) => {
     ADMIN_SESSION_VERSION: '1',
   }));
 
-  await t.test('health and status routes expose runtime binding state', async () => {
+  await t.test('public health is minimal while readiness and authenticated status expose runtime state', async () => {
     await kv.put('sys:deployment_health', JSON.stringify({ status: 'healthy', source: 'integration' }));
     const healthResponse = await mf.dispatchFetch('https://bot.example.com/health');
     assert.equal(healthResponse.status, 200);
-    assert.equal((await healthResponse.json()).ok, true);
+    assert.equal((await healthResponse.json()).status, 'alive');
+    assert.equal(healthResponse.headers.get('x-frame-options'), 'DENY');
+
+    const readyResponse = await mf.dispatchFetch('https://bot.example.com/ready');
+    assert.equal(readyResponse.status, 200);
+    assert.equal((await readyResponse.json()).status, 'ready');
 
     const statusResponse = await mf.dispatchFetch('https://bot.example.com/');
     assert.equal(statusResponse.status, 200);
     const status = await statusResponse.json();
-    assert.equal(status.hasKv, true);
-    assert.equal(status.hasD1, true);
-    assert.equal(status.hasR2, true);
-    assert.equal(status.imagePublicBaseUrl, null);
-    assert.equal(status.imageDeliveryMode, 'worker-fallback');
-    assert.equal(status.deploymentHealth.source, 'integration');
+    assert.deepEqual(Object.keys(status).sort(), ['now', 'ok', 'service']);
+    assert.equal(status.adminChatId, undefined);
+
+    const adminStatusResponse = await mf.dispatchFetch('https://bot.example.com/admin/api/status', {
+      headers: { 'x-admin-key': adminKey },
+    });
+    assert.equal(adminStatusResponse.status, 200);
+    const adminStatus = await adminStatusResponse.json();
+    assert.equal(adminStatus.hasKv, true);
+    assert.equal(adminStatus.hasD1, true);
+    assert.equal(adminStatus.hasR2, true);
+    assert.equal(adminStatus.imagePublicBaseUrl, null);
+    assert.equal(adminStatus.imageDeliveryMode, 'worker-fallback');
+    assert.equal(adminStatus.deploymentHealth.source, 'integration');
   });
 
   await t.test('admin routes reject missing API credentials', async () => {
     const response = await mf.dispatchFetch('https://bot.example.com/admin/api/users');
     assert.equal(response.status, 401);
     assert.deepEqual(await response.json(), { ok: false, error: 'Unauthorized' });
+  });
+
+  await t.test('message history migration removes duplicates and enforces Telegram identity uniqueness', async () => {
+    const baseSql = (await readFile('migrations/0001_message_history.sql', 'utf8'))
+      .replace(/\s+/g, ' ')
+      .trim();
+    await db.exec(baseSql);
+    await db.prepare(
+      `INSERT INTO conversations (user_id, chat_type, created_at, updated_at)
+       VALUES (?1, 'private', ?2, ?2)`,
+    ).bind(88001, '2026-08-30T00:00:00.000Z').run();
+    const conversation = await db.prepare('SELECT id FROM conversations WHERE user_id = ?1')
+      .bind(88001)
+      .first();
+    const insertSql = `INSERT INTO messages (
+      conversation_id, user_id, telegram_message_id, direction, sender_role, message_type, created_at
+    ) VALUES (?1, ?2, ?3, ?4, 'user', 'text', ?5)`;
+    await db.prepare(insertSql)
+      .bind(conversation.id, 88001, 99001, 'user_to_admin', '2026-08-30T00:00:00.000Z')
+      .run();
+    await db.prepare(insertSql)
+      .bind(conversation.id, 88001, 99001, 'user_to_admin', '2026-08-30T00:00:01.000Z')
+      .run();
+
+    const migrationSql = (await readFile('migrations/0006_message_history_idempotency.sql', 'utf8'))
+      .replace(/\s+/g, ' ')
+      .trim();
+    await db.exec(migrationSql);
+    await db.prepare(insertSql.replace('INSERT INTO messages', 'INSERT OR IGNORE INTO messages'))
+      .bind(conversation.id, 88001, 99001, 'user_to_admin', '2026-08-30T00:00:02.000Z')
+      .run();
+
+    const count = await db.prepare(
+      `SELECT COUNT(*) AS total FROM messages
+       WHERE user_id = ?1 AND direction = ?2 AND telegram_message_id = ?3`,
+    ).bind(88001, 'user_to_admin', 99001).first();
+    assert.equal(Number(count.total), 1);
   });
 
   await t.test('deploy bootstrap rejects tokens supplied in query strings', async () => {

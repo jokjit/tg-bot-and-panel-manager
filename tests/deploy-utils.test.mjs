@@ -18,6 +18,7 @@ import {
   suggestPagesProjectName,
 } from '../shared/deploy-utils.cjs';
 import {
+  buildDeploymentWorkerSecrets,
   buildWorkerSecretsResource,
   createDeploymentRun,
   deleteWorkerSecret,
@@ -143,6 +144,21 @@ test('shared deployment core normalizes deployment bootstrap responses', () => {
 });
 
 test('shared deployment core normalizes Worker secrets and resource paths', () => {
+  assert.deepEqual(buildDeploymentWorkerSecrets({
+    botToken: ' bot-token ',
+    adminChatId: ' 123 ',
+    webhookSecret: ' webhook-secret ',
+    bootstrapToken: ' bootstrap-token ',
+  }), {
+    BOT_TOKEN: 'bot-token',
+    ADMIN_CHAT_ID: '123',
+    WEBHOOK_SECRET: 'webhook-secret',
+    DEPLOY_BOOTSTRAP_TOKEN: 'bootstrap-token',
+  });
+  assert.throws(
+    () => buildDeploymentWorkerSecrets({ botToken: 'bot-token' }),
+    /ADMIN_CHAT_ID,WEBHOOK_SECRET,DEPLOY_BOOTSTRAP_TOKEN/,
+  );
   assert.deepEqual(normalizeWorkerSecretEntries({
     ' BOT_TOKEN ': ' token ',
     EMPTY: ' ',

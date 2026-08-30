@@ -185,7 +185,7 @@ async function load(force = false) {
 async function save() {
   saving.value = true;
   try {
-    await saveSystemConfig({
+    const result = await saveSystemConfig({
       WELCOME_TYPE: form.WELCOME_TYPE,
       WELCOME_MEDIA: form.WELCOME_MEDIA,
       WELCOME_TEXT: form.WELCOME_TEXT,
@@ -194,6 +194,11 @@ async function save() {
       BLOCKED_TEXT: form.BLOCKED_TEXT,
     });
     message.success(t('messages.saveSuccess'));
+    if (result?.profileMetaSyncError) {
+      message.warning(t('messages.profileMetaSyncWarning', {
+        error: result.profileMetaSyncError,
+      }));
+    }
     await load(true);
   } catch (error) {
     message.error(error.message || t('messages.saveFailed'));

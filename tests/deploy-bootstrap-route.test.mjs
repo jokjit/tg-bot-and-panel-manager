@@ -10,6 +10,7 @@ function createHarness(overrides = {}) {
     DEPLOY_BOOTSTRAP_TOKEN: 'bootstrap-token',
     BOT_TOKEN: 'bot-token',
     ADMIN_CHAT_ID: '123',
+    WEBHOOK_SECRET: 'webhook-secret',
     BOT_KV: {
       get: async () => null,
       put: async (...args) => kvWrites.push(args),

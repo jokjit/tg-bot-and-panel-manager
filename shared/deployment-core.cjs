@@ -67,6 +67,22 @@ function normalizeWorkerSecretEntries(secrets = {}) {
     .filter(([name, value]) => name && value);
 }
 
+function buildDeploymentWorkerSecrets(values = {}) {
+  const secrets = {
+    BOT_TOKEN: String(values.botToken || '').trim(),
+    ADMIN_CHAT_ID: String(values.adminChatId || '').trim(),
+    WEBHOOK_SECRET: String(values.webhookSecret || '').trim(),
+    DEPLOY_BOOTSTRAP_TOKEN: String(values.bootstrapToken || '').trim(),
+  };
+  const missing = Object.entries(secrets)
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+  if (missing.length > 0) {
+    throw new Error(`deployment_worker_secrets_required:${missing.join(',')}`);
+  }
+  return secrets;
+}
+
 function buildWorkerSecretsResource(accountId, workerName, secretName = '') {
   const account = String(accountId || '').trim();
   const worker = String(workerName || '').trim();
@@ -322,6 +338,7 @@ function createDeploymentRun(options = {}) {
 }
 
 module.exports = {
+  buildDeploymentWorkerSecrets,
   buildWorkerSecretsResource,
   createDeploymentRun,
   deleteWorkerSecret,

@@ -579,6 +579,91 @@ test('tracks rolling webhook errors and deployment health', async () => {
   }
 });
 
+test('system config remains saved when Telegram profile synchronization fails', async () => {
+  const { module, cleanup } = await loadWorkerModule();
+  const originalFetch = globalThis.fetch;
+  const writes = new Map();
+  const logLines = [];
+  const originalWarn = console.warn;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      ok: false,
+      description: 'Telegram unavailable',
+    }), {
+      status: 502,
+      headers: { 'content-type': 'application/json' },
+    });
+    console.warn = (...args) => logLines.push(args.join(' '));
+
+    const result = await module.updateSystemConfig({
+      BOT_TOKEN: 'test-token',
+      BOT_KV: {
+        get: async (key) => writes.get(key) || null,
+        put: async (key, value) => writes.set(key, value),
+      },
+    }, {
+      BOT_DESCRIPTION: 'Saved description',
+      BOT_SHORT_DESCRIPTION: 'Saved short description',
+    });
+
+    const stored = JSON.parse(writes.get('sys:config'));
+    assert.equal(stored.BOT_DESCRIPTION, 'Saved description');
+    assert.equal(result.metaSync.synced, false);
+    assert.equal(result.metaSync.error, 'Telegram unavailable');
+    assert.ok(logLines.some((line) => JSON.parse(line).event === 'telegram_profile_meta_sync_failed'));
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+    await cleanup();
+  }
+});
+
+test('message history writes idempotently and logs D1 failures without throwing', async () => {
+  const { module, cleanup } = await loadWorkerModule();
+  const statements = [];
+  const originalError = console.error;
+  const logLines = [];
+  try {
+    const db = {
+      prepare(sql) {
+        statements.push(sql);
+        return {
+          bind() { return this; },
+          async run() { return { success: true }; },
+          async first() { return { id: 101 }; },
+        };
+      },
+    };
+    await module.saveMessageHistory({ DB: db }, {
+      userId: 81001,
+      telegramMessageId: 91001,
+      direction: 'user_to_admin',
+      senderRole: 'user',
+      messageType: 'text',
+      textContent: 'hello',
+    });
+    assert.ok(statements.some((sql) => /INSERT OR IGNORE INTO messages/.test(sql)));
+
+    console.error = (...args) => logLines.push(args.join(' '));
+    await module.saveMessageHistory({
+      DB: { prepare() { throw new Error('D1 unavailable'); } },
+    }, {
+      userId: 81002,
+      telegramMessageId: 91002,
+      direction: 'user_to_admin',
+      senderRole: 'user',
+      messageType: 'text',
+    });
+    const failure = logLines.map((line) => JSON.parse(line)).find((record) => record.event === 'message_history_write_failed');
+    assert.equal(failure.userId, 81002);
+    assert.equal(failure.telegramMessageId, 91002);
+    assert.equal(failure.error, 'D1 unavailable');
+  } finally {
+    console.error = originalError;
+    await cleanup();
+  }
+});
+
 test('classifies top-level routes and preserves admin handler order', async () => {
   const { module, cleanup } = await loadWorkerModule();
   try {
@@ -590,6 +675,7 @@ test('classifies top-level routes and preserves admin handler order', async () =
       adminPanel: '/admin',
     };
     assert.equal(module.classifyTopLevelRoute('GET', '/health', paths), 'health');
+    assert.equal(module.classifyTopLevelRoute('GET', '/ready', paths), 'ready');
     assert.equal(module.classifyTopLevelRoute('POST', '/verify/api/choice', paths), 'verify_api');
     assert.equal(module.classifyTopLevelRoute('GET', '/media/2026/07/image.png', paths), 'media');
     assert.equal(module.classifyTopLevelRoute('HEAD', '/media/2026/07/image.png', paths), 'media');
