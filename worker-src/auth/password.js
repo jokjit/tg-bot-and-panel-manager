@@ -3,7 +3,8 @@ import { bytesToHex, createRandomToken, timingSafeEqualText } from './crypto.js'
 const PASSWORD_HASH_ALGORITHM = 'PBKDF2';
 const PASSWORD_HASH_DIGEST = 'SHA-256';
 const PASSWORD_HASH_PREFIX = 'pbkdf2-sha256';
-const PASSWORD_HASH_ITERATIONS = 210000;
+const PASSWORD_HASH_ITERATIONS = 100000;
+const PASSWORD_HASH_MAX_ITERATIONS = 100000;
 const PASSWORD_HASH_BYTES = 32;
 
 function parseHashRecord(value) {
@@ -36,6 +37,9 @@ function hexToBytes(value) {
 }
 
 async function derivePasswordDigest(password, saltHex, iterations) {
+  if (iterations > PASSWORD_HASH_MAX_ITERATIONS) {
+    throw new Error('password_hash_iterations_unsupported');
+  }
   const material = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(String(password || '')),
@@ -60,12 +64,22 @@ export function isPasswordHash(value) {
   return Boolean(parseHashRecord(value));
 }
 
+export function isPasswordHashSupported(value) {
+  const record = parseHashRecord(value);
+  return Boolean(record && record.iterations <= PASSWORD_HASH_MAX_ITERATIONS);
+}
+
 export async function hashPassword(password, options = {}) {
   const normalized = String(password || '');
   if (!normalized) throw new Error('password_required');
   const iterations = Number(options.iterations || PASSWORD_HASH_ITERATIONS);
   const saltHex = String(options.saltHex || createRandomToken(16)).toLowerCase();
-  if (!Number.isInteger(iterations) || iterations < 100000 || !/^[0-9a-f]{32}$/i.test(saltHex)) {
+  if (
+    !Number.isInteger(iterations)
+    || iterations < 100000
+    || iterations > PASSWORD_HASH_MAX_ITERATIONS
+    || !/^[0-9a-f]{32}$/i.test(saltHex)
+  ) {
     throw new Error('password_hash_options_invalid');
   }
   const digestHex = await derivePasswordDigest(normalized, saltHex, iterations);
@@ -81,5 +95,9 @@ export async function verifyPassword(password, encodedHash) {
 
 export function passwordHashNeedsUpgrade(encodedHash) {
   const record = parseHashRecord(encodedHash);
-  return Boolean(record && record.iterations < PASSWORD_HASH_ITERATIONS);
+  return Boolean(
+    record
+    && record.iterations <= PASSWORD_HASH_MAX_ITERATIONS
+    && record.iterations < PASSWORD_HASH_ITERATIONS,
+  );
 }

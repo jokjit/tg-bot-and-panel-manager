@@ -18,6 +18,7 @@ function createHarness(initialConfig = {}, options = {}) {
     getSystemConfig: async () => ({ ...config }),
     getAdminPanelUser: () => 'admin',
     hashPassword: async (password) => `hash:${password}`,
+    isPasswordHashSupported: (hash) => !options.unsupportedHashes?.includes(hash),
     setSystemConfig: async (_env, next) => {
       config = { ...next };
       writes.push({ ...next });
@@ -78,6 +79,27 @@ test('admin password state persists generated credentials before notification fa
   assert.equal(harness.getConfig().ADMIN_SESSION_VERSION, '4');
   assert.equal(harness.getConfig().ADMIN_BOOTSTRAP_NOTIFY_ERROR, 'telegram unavailable');
   assert.equal(harness.writes.length, 2);
+});
+
+test('admin password state replaces an incompatible permanent hash with a bootstrap password', async () => {
+  const harness = createHarness(
+    {
+      ADMIN_PANEL_PASSWORD_HASH: 'old-incompatible-hash',
+      ADMIN_SESSION_VERSION: '5',
+    },
+    { unsupportedHashes: ['old-incompatible-hash'] },
+  );
+  const env = { BOT_TOKEN: 'bot-token', ADMIN_CHAT_ID: '123' };
+  const result = await ensureAdminPasswordState(
+    { env, bootstrapTtlMs: TTL_MS },
+    harness.handlers,
+  );
+
+  assert.equal(result.passwordMode, 'bootstrap');
+  assert.equal(result.passwordHash, 'hash:generated-password');
+  assert.equal(harness.getConfig().ADMIN_SESSION_VERSION, '6');
+  assert.equal('ADMIN_PANEL_PASSWORD_HASH' in harness.getConfig(), false);
+  assert.equal(harness.notifications.length, 1);
 });
 
 test('admin bootstrap reset rotates the password and session version', async () => {

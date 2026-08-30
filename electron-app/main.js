@@ -6,7 +6,10 @@ const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
 const {
+  ADMIN_PASSWORD_HASH_ITERATIONS,
   isAllowedAction,
+  isAdminPasswordHash,
+  isSupportedAdminPasswordHash,
   normalizeAccountInput,
   normalizeExternalHttpUrl,
   sanitizeDeploymentResumeState,
@@ -1305,13 +1308,9 @@ function createBootstrapPassword(length = 12) {
 
 function hashAdminPassword(password) {
   const salt = crypto.randomBytes(16)
-  const iterations = 210000
+  const iterations = ADMIN_PASSWORD_HASH_ITERATIONS
   const digest = crypto.pbkdf2Sync(String(password || ''), salt, iterations, 32, 'sha256')
   return `pbkdf2-sha256$${iterations}$${salt.toString('hex')}$${digest.toString('hex')}`
-}
-
-function isAdminPasswordHash(value) {
-  return /^pbkdf2-sha256\$\d+\$[0-9a-f]{32}\$[0-9a-f]{64}$/i.test(String(value || ''))
 }
 
 function getAdminSessionVersion(config = {}) {
@@ -1602,7 +1601,7 @@ async function ensureAdminPasswordStateViaKvApi(env, options = {}, onProgress) {
 
   let config = configResult.config || {}
   const permanentPasswordHash = String(config.ADMIN_PANEL_PASSWORD_HASH || '').trim()
-  if (isAdminPasswordHash(permanentPasswordHash)) {
+  if (isSupportedAdminPasswordHash(permanentPasswordHash)) {
     onProgress?.('直连 Cloudflare KV：检测到已存在永久面板密码，跳过临时密码重建')
     return {
       ok: true,
@@ -1612,6 +1611,9 @@ async function ensureAdminPasswordStateViaKvApi(env, options = {}, onProgress) {
       bootstrapNotifyError: null,
       config,
     }
+  }
+  if (isAdminPasswordHash(permanentPasswordHash)) {
+    onProgress?.('直连 Cloudflare KV：检测到旧版不兼容密码哈希，将轮换为新的临时密码')
   }
 
   const permanentPassword = String(config.ADMIN_PANEL_PASSWORD || '').trim()
@@ -1657,7 +1659,7 @@ async function ensureAdminPasswordStateViaKvApi(env, options = {}, onProgress) {
   const bootstrapExpireMs = bootstrapExpiresAt ? new Date(bootstrapExpiresAt).getTime() : 0
 
   const bootstrapNotifyError = String(config.ADMIN_BOOTSTRAP_NOTIFY_ERROR || '').trim()
-  if (isAdminPasswordHash(bootstrapPasswordHash) && bootstrapExpireMs > Date.now() && !bootstrapNotifyError) {
+  if (isSupportedAdminPasswordHash(bootstrapPasswordHash) && bootstrapExpireMs > Date.now() && !bootstrapNotifyError) {
     onProgress?.('直连 Cloudflare KV：检测到仍有效的临时密码；为避免泄露，不读取或重复发送密码')
     return {
       ok: true,
@@ -1667,6 +1669,9 @@ async function ensureAdminPasswordStateViaKvApi(env, options = {}, onProgress) {
       bootstrapNotifyError: null,
       config,
     }
+  }
+  if (isAdminPasswordHash(bootstrapPasswordHash) && !isSupportedAdminPasswordHash(bootstrapPasswordHash)) {
+    onProgress?.('直连 Cloudflare KV：检测到旧版不兼容临时密码，将立即重新生成')
   }
 
   let password = bootstrapPassword

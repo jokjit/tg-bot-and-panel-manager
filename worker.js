@@ -220,6 +220,7 @@ import {
 } from './worker-src/auth/crypto.js';
 import {
   hashPassword,
+  isPasswordHashSupported,
   passwordHashNeedsUpgrade,
   verifyPassword,
 } from './worker-src/auth/password.js';
@@ -4094,6 +4095,7 @@ const adminPasswordStateHandlers = {
   getSystemConfig,
   getAdminPanelUser,
   hashPassword,
+  isPasswordHashSupported,
   setSystemConfig,
   getAdminSessionVersion,
   createBootstrapPassword,
@@ -4540,6 +4542,10 @@ async function handleAdminLogin(request, env) {
 
   if (!passwordState.passwordReady) {
     throw new AppError(500, '请先配置 BOT_TOKEN 与 ADMIN_CHAT_ID，系统会自动生成首次临时密码并发送到管理员会话');
+  }
+
+  if (!isPasswordHashSupported(passwordState.passwordHash)) {
+    throw new AppError(409, '当前密码哈希与 Cloudflare 运行环境不兼容，请在 Telegram 管理员会话发送 /panelreset 重置密码，或使用最新版部署工具重新部署');
   }
 
   const passwordMatches = await verifyPassword(password, passwordState.passwordHash);

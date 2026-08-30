@@ -13,6 +13,9 @@ export async function ensureAdminPasswordState(context = {}, handlers = {}) {
   let config = await handlers.getSystemConfig(env);
   const username = handlers.getAdminPanelUser(env);
   const nowMs = handlers.nowMs?.() ?? Date.now();
+  const isPasswordHashSupported = typeof handlers.isPasswordHashSupported === 'function'
+    ? handlers.isPasswordHashSupported
+    : () => true;
   let permanentPasswordHash = String(config.ADMIN_PANEL_PASSWORD_HASH || '').trim();
   const permanentPassword = String(config.ADMIN_PANEL_PASSWORD || '').trim();
 
@@ -27,7 +30,7 @@ export async function ensureAdminPasswordState(context = {}, handlers = {}) {
     await handlers.setSystemConfig(env, config);
   }
 
-  if (permanentPasswordHash) {
+  if (permanentPasswordHash && isPasswordHashSupported(permanentPasswordHash)) {
     return {
       username,
       passwordReady: true,
@@ -54,7 +57,11 @@ export async function ensureAdminPasswordState(context = {}, handlers = {}) {
     await handlers.setSystemConfig(env, config);
   }
 
-  if (bootstrapPasswordHash && bootstrapExpireMs > nowMs) {
+  if (
+    bootstrapPasswordHash
+    && bootstrapExpireMs > nowMs
+    && isPasswordHashSupported(bootstrapPasswordHash)
+  ) {
     return {
       username,
       passwordReady: true,

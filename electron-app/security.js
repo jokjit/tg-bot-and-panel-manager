@@ -8,6 +8,7 @@ const ALLOWED_ACTIONS = new Set([
   'deploy-all',
   'first-deploy',
 ])
+const ADMIN_PASSWORD_HASH_ITERATIONS = 100000
 
 function normalizeText(value, maxLength) {
   return String(value || '').trim().slice(0, maxLength)
@@ -34,6 +35,22 @@ function normalizeExternalHttpUrl(value) {
   } catch {
     return ''
   }
+}
+
+function getAdminPasswordHashIterations(value) {
+  const match = /^pbkdf2-sha256\$(\d+)\$[0-9a-f]{32}\$[0-9a-f]{64}$/i.exec(String(value || ''))
+  if (!match) return 0
+  const iterations = Number(match[1])
+  return Number.isInteger(iterations) && iterations >= 100000 ? iterations : 0
+}
+
+function isAdminPasswordHash(value) {
+  return getAdminPasswordHashIterations(value) > 0
+}
+
+function isSupportedAdminPasswordHash(value) {
+  const iterations = getAdminPasswordHashIterations(value)
+  return iterations > 0 && iterations <= ADMIN_PASSWORD_HASH_ITERATIONS
 }
 
 function sanitizeDeploymentResumeState(value = {}) {
@@ -63,7 +80,11 @@ function sanitizeDeploymentResumeState(value = {}) {
 }
 
 module.exports = {
+  ADMIN_PASSWORD_HASH_ITERATIONS,
+  getAdminPasswordHashIterations,
   isAllowedAction,
+  isAdminPasswordHash,
+  isSupportedAdminPasswordHash,
   normalizeAccountInput,
   normalizeExternalHttpUrl,
   sanitizeDeploymentResumeState,

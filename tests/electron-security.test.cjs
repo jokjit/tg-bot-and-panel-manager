@@ -2,11 +2,29 @@ const assert = require('node:assert/strict')
 const test = require('node:test')
 
 const {
+  ADMIN_PASSWORD_HASH_ITERATIONS,
+  getAdminPasswordHashIterations,
   isAllowedAction,
+  isAdminPasswordHash,
+  isSupportedAdminPasswordHash,
   normalizeAccountInput,
   normalizeExternalHttpUrl,
   sanitizeDeploymentResumeState,
 } = require('../electron-app/security.js')
+
+test('Electron accepts only Cloudflare-compatible admin password hashes', () => {
+  const salt = '00'.repeat(16)
+  const digest = '11'.repeat(32)
+  const supported = `pbkdf2-sha256$${ADMIN_PASSWORD_HASH_ITERATIONS}$${salt}$${digest}`
+  const incompatible = `pbkdf2-sha256$210000$${salt}$${digest}`
+
+  assert.equal(getAdminPasswordHashIterations(supported), 100000)
+  assert.equal(isAdminPasswordHash(supported), true)
+  assert.equal(isSupportedAdminPasswordHash(supported), true)
+  assert.equal(isAdminPasswordHash(incompatible), true)
+  assert.equal(isSupportedAdminPasswordHash(incompatible), false)
+  assert.equal(isAdminPasswordHash('invalid'), false)
+})
 
 test('Electron account input keeps only bounded expected fields', () => {
   const result = normalizeAccountInput({
