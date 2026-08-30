@@ -8,16 +8,16 @@ import {
 } from '../scripts/check-version-consistency.mjs';
 
 test('repository application and Android versions are consistent', () => {
-  assert.deepEqual(assertVersionConsistency(), { version: '2.6.2', versionCode: 33 });
+  assert.deepEqual(assertVersionConsistency(), { version: '2.6.3', versionCode: 34 });
 });
 
 test('release tags must match the application version exactly', () => {
-  assert.equal(assertReleaseTagVersion('v2.6.2', '2.6.2'), 'v2.6.2');
+  assert.equal(assertReleaseTagVersion('v2.6.3', '2.6.3'), 'v2.6.3');
   assert.throws(
-    () => assertReleaseTagVersion('v2.6.1', '2.6.2'),
-    /Release tag v2\.6\.1 differs from application version v2\.6\.2/,
+    () => assertReleaseTagVersion('v2.6.2', '2.6.3'),
+    /Release tag v2\.6\.2 differs from application version v2\.6\.3/,
   );
-  assert.throws(() => assertReleaseTagVersion('', '2.6.2'), /Release tag is required/);
+  assert.throws(() => assertReleaseTagVersion('', '2.6.3'), /Release tag is required/);
 });
 
 test('Android version parser rejects missing or duplicate declarations', () => {
