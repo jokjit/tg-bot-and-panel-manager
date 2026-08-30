@@ -122,6 +122,10 @@ import {
 } from './worker-src/auth/web-challenge.js';
 import { createOrRefreshVerificationWebSessionState } from './worker-src/auth/web-session.js';
 import {
+  handleTelegramCallbackQuery,
+  handleTelegramUpdate,
+} from './worker-src/telegram/update.js';
+import {
   repairVerificationStateFromProfileState,
   resetVerificationStateAfterProfileRevocationState,
 } from './worker-src/auth/profile-state.js';
@@ -996,96 +1000,34 @@ async function getAdminChatMembers(env, chatId) {
 }
 
 async function handleUpdate(update, env, publicBaseUrl = '', ctx = null) {
-  if (update.callback_query) {
-    await handleCallbackQuery(update.callback_query, env, publicBaseUrl, ctx);
-    return;
-  }
-
-  const message = update.message || update.edited_message;
-  if (!message || !message.chat) return;
-
-  const adminChatId = toChatId(env.ADMIN_CHAT_ID);
-  const senderId = message.from?.id ? Number(message.from.id) : null;
-  const authorizedAdmin = senderId ? await isAuthorizedAdmin(env, senderId) : false;
-  const isAdminChat = Number(message.chat.id) === adminChatId;
-  const privateRelayAdminIds = isTopicModeEnabled(env) ? [] : await getPrivateRelayAdminUserIds(env);
-  const isPrivateRelayAdminChat = !isTopicModeEnabled(env) && privateRelayAdminIds.includes(Number(message.chat.id));
-
-  if (authorizedAdmin || isAdminChat || isPrivateRelayAdminChat) {
-    await handleAdminMessage(message, env, adminChatId, authorizedAdmin, publicBaseUrl, ctx);
-    return;
-  }
-
-  if (message.chat.type !== 'private') {
-    return;
-  }
-
-  if (isTopicModeEnabled(env) || isUserVerificationEnabled(env)) {
-    ensureKv(env);
-  }
-
-  const verificationEnabled = isUserVerificationEnabled(env);
-  await upsertUserProfile(env, message, {
-    recordMessageActivity: !verificationEnabled,
-  });
-
-  const blacklistEntry = await getBlacklistEntry(env, message.chat.id);
-  if (blacklistEntry) {
-    await telegram(env, 'sendMessage', {
-      chat_id: message.chat.id,
-      text: env.BLOCKED_TEXT || DEFAULT_BLOCKED_TEXT,
-    });
-    return;
-  }
-
-  if (isUserPrivateCommand(message)) {
-    await handleUserPrivateCommand(message, env, publicBaseUrl);
-    return;
-  }
-
-  const verificationStateRef = { value: null };
-  const verified = await ensureUserVerifiedOrPrompt(message, env, publicBaseUrl, {
-    stateRef: verificationStateRef,
-  });
-  if (!verified) {
-    return;
-  }
-
-  if (verificationEnabled) {
-    await upsertUserProfile(env, message);
-  }
-
-  const observationAllowed = await applyPostVerifyObservationLayer(
-    message,
-    env,
-    adminChatId,
-    verificationStateRef.value,
+  return handleTelegramUpdate(
+    { update, env, publicBaseUrl, ctx, defaultBlockedText: DEFAULT_BLOCKED_TEXT },
+    {
+      handleCallbackQuery,
+      toChatId,
+      isAuthorizedAdmin,
+      isTopicModeEnabled,
+      getPrivateRelayAdminUserIds,
+      handleAdminMessage,
+      isUserVerificationEnabled,
+      ensureKv,
+      upsertUserProfile,
+      getBlacklistEntry,
+      sendBlockedMessage: (runtimeEnv, chatId, text) => telegram(runtimeEnv, 'sendMessage', { chat_id: chatId, text }),
+      isUserPrivateCommand,
+      handleUserPrivateCommand,
+      ensureUserVerifiedOrPrompt,
+      applyPostVerifyObservationLayer,
+      handleUserMessage,
+    },
   );
-  if (!observationAllowed) {
-    return;
-  }
-
-  await handleUserMessage(message, env, adminChatId, ctx);
 }
 
 async function handleCallbackQuery(callbackQuery, env, publicBaseUrl = '', ctx = null) {
-  const data = String(callbackQuery.data || '');
-  if (!data) {
-    await answerCallback(env, callbackQuery.id, '未识别的操作');
-    return;
-  }
-
-  if (data.startsWith('verify:')) {
-    await answerCallback(env, callbackQuery.id, '旧版验证已下线，请重新打开新的网页验证入口。', true);
-    return;
-  }
-
-  if (data.startsWith('adm:') || isAdminCommandPanelCallback(data)) {
-    await handleAdminActionCallback(callbackQuery, env, publicBaseUrl, ctx);
-    return;
-  }
-
-  await answerCallback(env, callbackQuery.id, '未识别的操作');
+  return handleTelegramCallbackQuery(
+    { callbackQuery, env, publicBaseUrl, ctx },
+    { answerCallback, isAdminCommandPanelCallback, handleAdminActionCallback },
+  );
 }
 
 async function handleUserMessage(message, env, adminChatId, ctx = null) {
