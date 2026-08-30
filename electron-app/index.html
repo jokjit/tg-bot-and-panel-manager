@@ -2,6 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; connect-src https: http:; frame-src https: http:; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>TG Bot Deploy Tool</title>
 <style>
 :root {
@@ -1141,7 +1142,7 @@ body[data-theme="dark"] {
         </div>
       </div>
       <div class="panel-empty" id="embedded-panel-empty">No panel URL for this account. Deploy Pages first or set panel URL in first deploy.</div>
-      <iframe id="embedded-panel-frame" class="hidden" src="about:blank" loading="eager"></iframe>
+      <iframe id="embedded-panel-frame" class="hidden" src="about:blank" loading="eager" sandbox="allow-forms allow-scripts allow-same-origin allow-popups" referrerpolicy="no-referrer"></iframe>
     </div>
   </section>
 
@@ -2609,13 +2610,13 @@ panelRefreshBtn.addEventListener("click", () => {
   openEmbeddedPanel(true)
 })
 
-panelOpenExternalBtn.addEventListener("click", () => {
+panelOpenExternalBtn.addEventListener("click", async () => {
   const panelUrl = getActivePanelUrl()
   if (!panelUrl) {
     alert(t("no_panel_url_alert"))
     return
   }
-  window.open(panelUrl)
+  await window.api.openExternal(panelUrl)
 })
 
 byId("open-add-account").addEventListener("click", () => {
@@ -2647,6 +2648,57 @@ byId("confirm-add").addEventListener("click", async () => {
   await renderAccounts()
 })
 
+function createAccountListItem(account, activeId) {
+  const accountId = String(account.accountId || "").trim()
+  const shortId = accountId ? `${accountId.slice(0, 6)}...${accountId.slice(-4)}` : ""
+  const identity = [account.email, shortId].filter(Boolean).join(" | ")
+  const label = account.name || t("unnamed_account")
+  const item = document.createElement("div")
+  item.className = `account-item${account.id === activeId ? " active" : ""}`
+  item.dataset.id = account.id
+  item.setAttribute("role", "button")
+  item.tabIndex = 0
+  item.setAttribute("aria-label", label)
+
+  const avatar = document.createElement("div")
+  avatar.className = "account-avatar"
+  avatar.textContent = (account.name || "?")[0].toUpperCase()
+
+  const info = document.createElement("div")
+  info.className = "account-info"
+  const head = document.createElement("div")
+  head.className = "account-head"
+  const name = document.createElement("div")
+  name.className = "account-name"
+  name.title = label
+  name.textContent = label
+  head.append(name)
+  const meta = document.createElement("div")
+  meta.className = "account-meta"
+  const id = document.createElement("div")
+  id.className = "account-id"
+  id.title = accountId
+  id.textContent = identity
+  meta.append(id)
+  info.append(head, meta)
+
+  const tokenHint = document.createElement("span")
+  tokenHint.className = "account-token-hint"
+  tokenHint.textContent = account.hasApiToken ? t("token_saved_hint") : ""
+  const clear = document.createElement("span")
+  clear.className = "account-clear"
+  clear.dataset.clear = account.id
+  clear.title = t("clear_credentials")
+  clear.textContent = "⌫"
+  const remove = document.createElement("span")
+  remove.className = "account-del"
+  remove.dataset.del = account.id
+  remove.title = t("delete_title")
+  remove.textContent = "x"
+  item.append(avatar, info, tokenHint, clear, remove)
+  return item
+}
+
 async function renderAccounts() {
   const [accounts, storedActiveId, activePrefs] = await Promise.all([
     window.api.accounts.list(),
@@ -2664,27 +2716,7 @@ async function renderAccounts() {
   currentActiveAccount = accounts.find((a) => a.id === activeId) || null
   if (currentActiveAccount) currentActiveAccount.deployPrefs = activePrefs || {}
 
-  list.innerHTML = accounts
-    .map((a) => {
-      const accountId = String(a.accountId || "").trim()
-      const shortId = accountId ? `${accountId.slice(0, 6)}...${accountId.slice(-4)}` : ""
-      const identity = [a.email, shortId].filter(Boolean).join(" | ")
-      const label = a.name || t("unnamed_account")
-      return `
-    <div class="account-item ${a.id === activeId ? "active" : ""}" data-id="${a.id}" role="button" tabindex="0" aria-label="${label}">
-      <div class="account-avatar">${(a.name || "?")[0].toUpperCase()}</div>
-      <div class="account-info">
-        <div class="account-head"><div class="account-name" title="${label}">${label}</div></div>
-        <div class="account-meta">
-          <div class="account-id" title="${accountId}">${identity}</div>
-        </div>
-      </div>
-      <span class="account-token-hint">${a.hasApiToken ? t("token_saved_hint") : ""}</span>
-      <span class="account-clear" data-clear="${a.id}" title="${t("clear_credentials")}">⌫</span>
-      <span class="account-del" data-del="${a.id}" title="${t("delete_title")}">x</span>
-    </div>`
-    })
-    .join("")
+  list.replaceChildren(...accounts.map((account) => createAccountListItem(account, activeId)))
 
   list.querySelectorAll(".account-item").forEach((el) => {
     el.addEventListener("click", async (e) => {

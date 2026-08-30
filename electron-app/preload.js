@@ -1,12 +1,19 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
-contextBridge.exposeInMainWorld('api', {
+if (process.isMainFrame) {
+  const api = Object.freeze({
   runAction: (action, params) => ipcRenderer.invoke('run-action', action, params),
   dashboardSnapshot: () => ipcRenderer.invoke('dashboard:snapshot'),
-  onOutput: (cb) => ipcRenderer.on('output', (_, data) => cb(data)),
+  onOutput: (cb) => {
+    if (typeof cb !== 'function') return () => {}
+    const listener = (_, data) => cb(data)
+    ipcRenderer.on('output', listener)
+    return () => ipcRenderer.removeListener('output', listener)
+  },
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
   getRepoRoot: () => ipcRenderer.invoke('get-repo-root'),
   clearData: () => ipcRenderer.invoke('data:clear'),
-  accounts: {
+  accounts: Object.freeze({
     list: () => ipcRenderer.invoke('accounts:list'),
     add: (account) => ipcRenderer.invoke('accounts:add', account),
     delete: (id) => ipcRenderer.invoke('accounts:delete', id),
@@ -15,5 +22,8 @@ contextBridge.exposeInMainWorld('api', {
     getDeployPrefs: () => ipcRenderer.invoke('accounts:getDeployPrefs'),
     saveDeployPrefs: (prefs, accountId) => ipcRenderer.invoke('accounts:saveDeployPrefs', prefs, accountId),
     clearCredentials: (id) => ipcRenderer.invoke('accounts:clearCredentials', id),
-  }
-})
+  }),
+  })
+
+  contextBridge.exposeInMainWorld('api', api)
+}

@@ -1,9 +1,15 @@
-const { app, BrowserWindow, ipcMain, safeStorage } = require('electron')
+const { app, BrowserWindow, ipcMain, safeStorage, shell } = require('electron')
 const path = require('path')
+const { pathToFileURL } = require('url')
 const fs = require('fs')
 const os = require('os')
 const { spawn } = require('child_process')
 const crypto = require('crypto')
+const {
+  isAllowedAction,
+  normalizeAccountInput,
+  normalizeExternalHttpUrl,
+} = require('./security.js')
 const deployUtilsPath = app.isPackaged
   ? path.join(process.resourcesPath, 'shared', 'deploy-utils.cjs')
   : path.join(__dirname, '..', 'shared', 'deploy-utils.cjs')
@@ -1255,6 +1261,22 @@ function createBootstrapPassword(length = 12) {
   return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('')
 }
 
+function hashAdminPassword(password) {
+  const salt = crypto.randomBytes(16)
+  const iterations = 210000
+  const digest = crypto.pbkdf2Sync(String(password || ''), salt, iterations, 32, 'sha256')
+  return `pbkdf2-sha256$${iterations}$${salt.toString('hex')}$${digest.toString('hex')}`
+}
+
+function isAdminPasswordHash(value) {
+  return /^pbkdf2-sha256\$\d+\$[0-9a-f]{32}\$[0-9a-f]{64}$/i.test(String(value || ''))
+}
+
+function getAdminSessionVersion(config = {}) {
+  const value = Number(config.ADMIN_SESSION_VERSION || 1)
+  return Number.isInteger(value) && value > 0 ? value : 1
+}
+
 async function telegramApiRequest(botToken, method, payload = {}) {
   const token = String(botToken || '').trim()
   const apiMethod = String(method || '').trim()
@@ -1536,15 +1558,41 @@ async function ensureAdminPasswordStateViaKvApi(env, options = {}, onProgress) {
     return { ok: false, reason: configResult.reason || 'system_config_read_failed', passwordReady: false, passwordMode: 'none' }
   }
 
-  const config = configResult.config || {}
-  const permanentPassword = String(config.ADMIN_PANEL_PASSWORD || '').trim()
-  if (permanentPassword) {
+  let config = configResult.config || {}
+  const permanentPasswordHash = String(config.ADMIN_PANEL_PASSWORD_HASH || '').trim()
+  if (isAdminPasswordHash(permanentPasswordHash)) {
     onProgress?.('直连 Cloudflare KV：检测到已存在永久面板密码，跳过临时密码重建')
     return {
       ok: true,
       passwordReady: true,
       passwordMode: 'permanent',
-      password: permanentPassword,
+      bootstrapExpiresAt: null,
+      bootstrapNotifyError: null,
+      config,
+    }
+  }
+
+  const permanentPassword = String(config.ADMIN_PANEL_PASSWORD || '').trim()
+  if (permanentPassword) {
+    config = {
+      ...config,
+      ADMIN_PANEL_PASSWORD_HASH: hashAdminPassword(permanentPassword),
+      ADMIN_SESSION_VERSION: String(getAdminSessionVersion(config)),
+      updatedAt: new Date().toISOString(),
+    }
+    delete config.ADMIN_PANEL_PASSWORD
+    delete config.ADMIN_BOOTSTRAP_PASSWORD
+    delete config.ADMIN_BOOTSTRAP_PASSWORD_HASH
+    delete config.ADMIN_BOOTSTRAP_EXPIRES_AT
+    const saved = await putSystemConfigViaKvApi(env, namespaceId, config)
+    if (!saved.ok) {
+      return { ok: false, reason: saved.reason || 'system_config_write_failed', passwordReady: false, passwordMode: 'none', config }
+    }
+    onProgress?.('直连 Cloudflare KV：检测到已存在永久面板密码，跳过临时密码重建')
+    return {
+      ok: true,
+      passwordReady: true,
+      passwordMode: 'permanent',
       bootstrapExpiresAt: null,
       bootstrapNotifyError: null,
       config,
@@ -1561,26 +1609,43 @@ async function ensureAdminPasswordStateViaKvApi(env, options = {}, onProgress) {
     }
   }
 
+  const bootstrapPasswordHash = String(config.ADMIN_BOOTSTRAP_PASSWORD_HASH || '').trim()
   const bootstrapPassword = String(config.ADMIN_BOOTSTRAP_PASSWORD || '').trim()
   const bootstrapExpiresAt = String(config.ADMIN_BOOTSTRAP_EXPIRES_AT || '').trim() || null
   const bootstrapExpireMs = bootstrapExpiresAt ? new Date(bootstrapExpiresAt).getTime() : 0
 
+  const bootstrapNotifyError = String(config.ADMIN_BOOTSTRAP_NOTIFY_ERROR || '').trim()
+  if (isAdminPasswordHash(bootstrapPasswordHash) && bootstrapExpireMs > Date.now() && !bootstrapNotifyError) {
+    onProgress?.('直连 Cloudflare KV：检测到仍有效的临时密码；为避免泄露，不读取或重复发送密码')
+    return {
+      ok: true,
+      passwordReady: true,
+      passwordMode: 'bootstrap',
+      bootstrapExpiresAt,
+      bootstrapNotifyError: null,
+      config,
+    }
+  }
+
   let password = bootstrapPassword
   let expiresAt = bootstrapExpiresAt
   let nextConfig = { ...config }
-  let notifyMode = 'resent'
+  let notifyMode = 'migrated'
 
   if (!(bootstrapPassword && bootstrapExpireMs > Date.now())) {
     password = createBootstrapPassword()
     expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString()
     nextConfig = {
       ...config,
-      ADMIN_BOOTSTRAP_PASSWORD: password,
+      ADMIN_BOOTSTRAP_PASSWORD_HASH: hashAdminPassword(password),
       ADMIN_BOOTSTRAP_EXPIRES_AT: expiresAt,
       ADMIN_FORCE_PASSWORD_CHANGE: 'true',
+      ADMIN_SESSION_VERSION: String(getAdminSessionVersion(config) + 1),
       updatedAt: new Date().toISOString(),
     }
     delete nextConfig.ADMIN_PANEL_PASSWORD
+    delete nextConfig.ADMIN_PANEL_PASSWORD_HASH
+    delete nextConfig.ADMIN_BOOTSTRAP_PASSWORD
     delete nextConfig.ADMIN_BOOTSTRAP_NOTIFY_ERROR
     const saved = await putSystemConfigViaKvApi(env, namespaceId, nextConfig)
     if (!saved.ok) {
@@ -1593,6 +1658,23 @@ async function ensureAdminPasswordStateViaKvApi(env, options = {}, onProgress) {
       }
     }
     notifyMode = 'created'
+  } else {
+    nextConfig = {
+      ...config,
+      ADMIN_BOOTSTRAP_PASSWORD_HASH: hashAdminPassword(password),
+      updatedAt: new Date().toISOString(),
+    }
+    delete nextConfig.ADMIN_BOOTSTRAP_PASSWORD
+    const saved = await putSystemConfigViaKvApi(env, namespaceId, nextConfig)
+    if (!saved.ok) {
+      return {
+        ok: false,
+        reason: saved.reason || 'system_config_write_failed',
+        passwordReady: false,
+        passwordMode: 'none',
+        config,
+      }
+    }
   }
 
   try {
@@ -1612,13 +1694,12 @@ async function ensureAdminPasswordStateViaKvApi(env, options = {}, onProgress) {
     onProgress?.(
       notifyMode === 'created'
         ? '直连 Cloudflare KV：已生成后台临时密码并发送到 Telegram'
-        : '直连 Cloudflare KV：已重发当前有效的后台临时密码到 Telegram',
+        : '直连 Cloudflare KV：已迁移旧临时密码并发送到 Telegram',
     )
     return {
       ok: true,
       passwordReady: true,
       passwordMode: 'bootstrap',
-      password,
       bootstrapExpiresAt: expiresAt,
       bootstrapNotifyError: null,
       config: nextConfig,
@@ -1633,7 +1714,6 @@ async function ensureAdminPasswordStateViaKvApi(env, options = {}, onProgress) {
       reason: notifyError,
       passwordReady: true,
       passwordMode: 'bootstrap',
-      password,
       bootstrapExpiresAt: expiresAt,
       bootstrapNotifyError: notifyError,
       saveWarning: saved.ok ? null : saved.reason || 'system_config_write_failed',
@@ -3666,18 +3746,70 @@ async function runAction(action, params, env) {
 }
 
 // window
+let mainWindow = null
+const mainWindowUrl = pathToFileURL(path.join(__dirname, 'index.html')).href
+
+function assertTrustedIpcEvent(event) {
+  const senderFrame = event?.senderFrame
+  if (
+    !mainWindow
+    || event?.sender !== mainWindow.webContents
+    || !senderFrame
+    || senderFrame !== mainWindow.webContents.mainFrame
+    || senderFrame.url !== mainWindowUrl
+  ) {
+    throw new Error('untrusted_ipc_sender')
+  }
+}
+
+function handleTrustedIpc(channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    assertTrustedIpcEvent(event)
+    return handler(event, ...args)
+  })
+}
+
+async function openExternalHttpUrl(value) {
+  const url = normalizeExternalHttpUrl(value)
+  if (!url) throw new Error('invalid_external_url')
+  await shell.openExternal(url)
+  return true
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1100, height: 720,
     title: 'TG Bot Deploy Tool',
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true }
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+    }
+  })
+  mainWindow = win
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalHttpUrl(url).catch(() => {})
+    return { action: 'deny' }
+  })
+  win.webContents.on('will-navigate', (event, url) => {
+    if (url === mainWindowUrl) return
+    event.preventDefault()
+    openExternalHttpUrl(url).catch(() => {})
+  })
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null
   })
   win.loadFile(path.join(__dirname, 'index.html'))
   win.setMenu(null)
 }
 
 // IPC
-ipcMain.handle('run-action', async (_, action, params) => {
+handleTrustedIpc('run-action', async (_, action, params) => {
+  if (!isAllowedAction(action)) throw new Error('unsupported_action')
+  if (!params || typeof params !== 'object' || Array.isArray(params)) throw new Error('invalid_action_params')
   const account = getActiveAccount()
   const env = buildEnv(account)
   const accountKey = String(account?.id || account?.accountId || 'default')
@@ -3719,7 +3851,7 @@ ipcMain.handle('run-action', async (_, action, params) => {
   }
 })
 
-ipcMain.handle('dashboard:snapshot', async () => {
+handleTrustedIpc('dashboard:snapshot', async () => {
   const account = getActiveAccount()
   if (!account) {
     return { ok: false, reason: 'no_active_account', snapshot: null }
@@ -3737,10 +3869,14 @@ ipcMain.handle('dashboard:snapshot', async () => {
   }
 })
 
-ipcMain.handle('accounts:list', () => publicAccounts(loadAccounts()))
-ipcMain.handle('accounts:add', (_, account) => {
+handleTrustedIpc('accounts:list', () => publicAccounts(loadAccounts()))
+handleTrustedIpc('accounts:add', (_, account) => {
+  const normalizedAccount = normalizeAccountInput(account)
+  if (!normalizedAccount.name || !normalizedAccount.apiToken || !normalizedAccount.accountId) {
+    throw new Error('invalid_account')
+  }
   const accounts = loadAccounts()
-  const newAccount = { ...account, id: crypto.randomUUID(), deployPrefs: normalizeDeployPrefs(account?.deployPrefs) }
+  const newAccount = { ...normalizedAccount, id: crypto.randomUUID(), deployPrefs: normalizeDeployPrefs({}) }
   accounts.push(newAccount)
   saveAccounts(accounts)
   if (!activeAccountId) {
@@ -3749,7 +3885,7 @@ ipcMain.handle('accounts:add', (_, account) => {
   }
   return publicAccounts(accounts)
 })
-ipcMain.handle('accounts:delete', (_, id) => {
+handleTrustedIpc('accounts:delete', (_, id) => {
   deploymentResumeByAccountId.delete(String(id || ''))
   const before = loadAccounts()
   const removed = before.find(a => a.id === id)
@@ -3765,20 +3901,23 @@ ipcMain.handle('accounts:delete', (_, id) => {
   }
   return publicAccounts(accounts)
 })
-ipcMain.handle('accounts:setActive', (_, id) => {
-  activeAccountId = id
-  fs.writeFileSync(activeFile(), id)
-  return id
+handleTrustedIpc('accounts:setActive', (_, id) => {
+  const normalizedId = String(id || '')
+  if (!loadAccounts().some((account) => account.id === normalizedId)) throw new Error('account_not_found')
+  activeAccountId = normalizedId
+  fs.writeFileSync(activeFile(), normalizedId)
+  return normalizedId
 })
-ipcMain.handle('accounts:getActive', () => activeAccountId)
-ipcMain.handle('accounts:getDeployPrefs', () => {
+handleTrustedIpc('accounts:getActive', () => activeAccountId)
+handleTrustedIpc('accounts:getDeployPrefs', () => {
   const account = getActiveAccount()
   return account ? normalizeDeployPrefs(account.deployPrefs || {}) : null
 })
-ipcMain.handle('accounts:saveDeployPrefs', (_, prefs, accountId) => {
+handleTrustedIpc('accounts:saveDeployPrefs', (_, prefs, accountId) => {
+  if (!prefs || typeof prefs !== 'object' || Array.isArray(prefs)) throw new Error('invalid_deploy_preferences')
   return saveActiveDeployPrefsPatch(prefs, accountId)
 })
-ipcMain.handle('accounts:clearCredentials', (_, id) => {
+handleTrustedIpc('accounts:clearCredentials', (_, id) => {
   deploymentResumeByAccountId.delete(String(id || ''))
   const accounts = loadAccounts()
   const index = accounts.findIndex((item) => item.id === id)
@@ -3792,7 +3931,7 @@ ipcMain.handle('accounts:clearCredentials', (_, id) => {
   saveAccounts(accounts)
   return publicAccounts(accounts)
 })
-ipcMain.handle('data:clear', () => {
+handleTrustedIpc('data:clear', () => {
   const dir = app.getPath('userData')
   try { fs.rmSync(path.join(dir, 'accounts.json'), { force: true }) } catch {}
   try { fs.rmSync(path.join(dir, 'active-account.txt'), { force: true }) } catch {}
@@ -3800,7 +3939,8 @@ ipcMain.handle('data:clear', () => {
   activeAccountId = null
   volatileAccounts = null
 })
-ipcMain.handle('get-repo-root', () => getRepoRoot())
+handleTrustedIpc('get-repo-root', () => getRepoRoot())
+handleTrustedIpc('open-external', (_, url) => openExternalHttpUrl(url))
 
 app.whenReady().then(() => {
   try { activeAccountId = fs.readFileSync(activeFile(), 'utf8').trim() } catch {}
