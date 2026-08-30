@@ -85,6 +85,7 @@ test('Telegram update does not challenge authorized admins when relaying ordinar
     handlers,
   );
   assert.deepEqual(calls, ['ensureKv', 'profile:true', 'observe:none', 'relay']);
+});
 
 test('Telegram update preserves admin handling for private pending panel input', async () => {
   const { handlers, calls } = createUpdateHandlers({ authorizedAdmin: true, pendingAdminInteraction: true });
