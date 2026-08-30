@@ -22,6 +22,45 @@ function normalizeDeploymentResumeState(input = {}) {
   return { results, completedSteps };
 }
 
+function normalizeDeployBootstrapResponse(status, data, options = {}) {
+  const httpStatus = Number(status) || 0;
+  const payload = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  const webhookUrl = String(payload.webhookUrl || '').trim();
+  if (httpStatus === 410 && payload.error === 'deploy_bootstrap_consumed') {
+    return {
+      ok: true,
+      consumed: true,
+      webhookUrl,
+      reason: 'already_consumed',
+      data: payload,
+    };
+  }
+
+  const successfulStatus = httpStatus >= 200 && httpStatus < 300;
+  if (successfulStatus && payload.ok) {
+    return { ok: true, consumed: false, webhookUrl, reason: '', data: payload };
+  }
+
+  const defaultReasonFields = ['error', 'webhookError', 'bootstrapNotifyError', 'commandsError'];
+  const configuredReasonFields = successfulStatus
+    ? options.successReasonFields
+    : options.failureReasonFields;
+  const reasonFields = Array.isArray(configuredReasonFields)
+    ? configuredReasonFields
+    : defaultReasonFields;
+  const reason = reasonFields
+    .map((field) => String(payload[field] || '').trim())
+    .find(Boolean);
+  const httpReasonPrefix = String(options.httpReasonPrefix || 'http_');
+  return {
+    ok: false,
+    consumed: false,
+    webhookUrl,
+    reason: reason || `${httpReasonPrefix}${httpStatus}`,
+    data: payload,
+  };
+}
+
 function normalizeWorkerSecretEntries(secrets = {}) {
   return Object.entries(secrets && typeof secrets === 'object' ? secrets : {})
     .map(([name, value]) => [String(name || '').trim(), String(value || '').trim()])
@@ -287,6 +326,7 @@ module.exports = {
   createDeploymentRun,
   deleteWorkerSecret,
   ensurePagesProject,
+  normalizeDeployBootstrapResponse,
   normalizeDeploymentResumeState,
   normalizeWorkerSecretEntries,
   runDeploymentSteps,

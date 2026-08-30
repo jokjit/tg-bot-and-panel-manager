@@ -22,6 +22,7 @@ import {
   createDeploymentRun,
   deleteWorkerSecret,
   ensurePagesProject,
+  normalizeDeployBootstrapResponse,
   normalizeDeploymentResumeState,
   normalizeWorkerSecretEntries,
   runDeploymentSteps,
@@ -94,6 +95,51 @@ test('builds deterministic Worker upload metadata', () => {
       { type: 'r2_bucket', name: 'IMAGE_BUCKET', bucket_name: 'test-worker-images' },
     ],
   });
+});
+
+test('shared deployment core normalizes deployment bootstrap responses', () => {
+  assert.deepEqual(
+    normalizeDeployBootstrapResponse(200, { ok: true, webhookUrl: ' https://bot.example.com/webhook ' }),
+    {
+      ok: true,
+      consumed: false,
+      webhookUrl: 'https://bot.example.com/webhook',
+      reason: '',
+      data: { ok: true, webhookUrl: ' https://bot.example.com/webhook ' },
+    },
+  );
+  assert.deepEqual(
+    normalizeDeployBootstrapResponse(410, {
+      ok: false,
+      error: 'deploy_bootstrap_consumed',
+      webhookUrl: 'https://bot.example.com/webhook',
+    }),
+    {
+      ok: true,
+      consumed: true,
+      webhookUrl: 'https://bot.example.com/webhook',
+      reason: 'already_consumed',
+      data: {
+        ok: false,
+        error: 'deploy_bootstrap_consumed',
+        webhookUrl: 'https://bot.example.com/webhook',
+      },
+    },
+  );
+
+  const partial = normalizeDeployBootstrapResponse(200, {
+    ok: false,
+    commandsError: 'commands_failed',
+    bootstrapNotifyError: 'notify_failed',
+  }, {
+    successReasonFields: ['commandsError', 'bootstrapNotifyError'],
+  });
+  assert.equal(partial.ok, false);
+  assert.equal(partial.reason, 'commands_failed');
+  assert.equal(
+    normalizeDeployBootstrapResponse(503, null, { httpReasonPrefix: 'bootstrap_http_' }).reason,
+    'bootstrap_http_503',
+  );
 });
 
 test('shared deployment core normalizes Worker secrets and resource paths', () => {

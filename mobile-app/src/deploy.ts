@@ -57,6 +57,7 @@ const {
 const {
   deleteWorkerSecret: deleteWorkerSecretCore,
   ensurePagesProject: ensurePagesProjectCore,
+  normalizeDeployBootstrapResponse,
   runDeploymentSteps,
   syncWorkerSecrets,
 } = deploymentCore as {
@@ -76,6 +77,21 @@ const {
     onProgress: (text: string) => void;
     messages: Record<string, (context: any) => string>;
   }) => Promise<{ project: any; created: boolean }>;
+  normalizeDeployBootstrapResponse: (
+    status: number,
+    data: unknown,
+    options?: {
+      httpReasonPrefix?: string;
+      successReasonFields?: string[];
+      failureReasonFields?: string[];
+    },
+  ) => {
+    ok: boolean;
+    consumed: boolean;
+    webhookUrl: string;
+    reason: string;
+    data: Record<string, any>;
+  };
   runDeploymentSteps: (
     steps: Array<{
       id: string;
@@ -2011,23 +2027,14 @@ async function triggerDeployBootstrap(
       timeoutMs: 30000,
     });
 
-    const data = response.json || {};
-    const webhookUrl = String(data?.webhookUrl || '').trim();
-    if (response.status === 410 && data?.error === 'deploy_bootstrap_consumed') {
-      return { ok: true, webhookUrl, reason: 'already_consumed' };
-    }
-    if (response.status >= 200 && response.status < 300 && data) {
-      const ok = Boolean(data.ok);
-      const reason = ok
-        ? ''
-        : String(data.webhookError || data.commandsError || data.bootstrapNotifyError || `http_${response.status}`);
-      return { ok, webhookUrl, reason };
-    }
-
+    const normalized = normalizeDeployBootstrapResponse(response.status, response.json, {
+      successReasonFields: ['webhookError', 'commandsError', 'bootstrapNotifyError'],
+      failureReasonFields: ['error'],
+    });
     return {
-      ok: false,
-      webhookUrl,
-      reason: String(data?.error || `http_${response.status}`),
+      ok: normalized.ok,
+      webhookUrl: normalized.webhookUrl,
+      reason: normalized.reason,
     };
   } catch (error) {
     return {

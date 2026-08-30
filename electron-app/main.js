@@ -48,6 +48,7 @@ const {
   createDeploymentRun,
   deleteWorkerSecret: deleteWorkerSecretCore,
   ensurePagesProject: ensurePagesProjectCore,
+  normalizeDeployBootstrapResponse,
   normalizeDeploymentResumeState,
   runDeploymentSteps,
   syncWorkerSecrets,
@@ -3096,21 +3097,19 @@ async function triggerDeployBootstrap(workerUrl, bootstrapToken, onProgress, opt
         signal: controller.signal,
       })
       const data = await response.json().catch(() => null)
-      if (response.ok && data?.ok) {
-        onProgress?.(`Worker 部署引导已完成：${data.webhookUrl || `${origin}/webhook`}`)
-        return { ok: true, data }
-      }
-
-      if (response.status === 410 && data?.error === 'deploy_bootstrap_consumed') {
+      const normalized = normalizeDeployBootstrapResponse(response.status, data, {
+        httpReasonPrefix: 'bootstrap_http_',
+      })
+      if (normalized.ok && normalized.consumed) {
         onProgress?.('Worker bootstrap token was already consumed by a completed request.')
-        return { ok: true, consumed: true, data }
+        return { ok: true, consumed: true, data: normalized.data }
+      }
+      if (normalized.ok) {
+        onProgress?.(`Worker 部署引导已完成：${normalized.webhookUrl || `${origin}/webhook`}`)
+        return { ok: true, data: normalized.data }
       }
 
-      lastReason = data?.error ||
-        data?.webhookError ||
-        data?.bootstrapNotifyError ||
-        data?.commandsError ||
-        `bootstrap_http_${response.status}`
+      lastReason = normalized.reason
       if (response.ok && data?.passwordReady && data?.bootstrapNotifyError) {
         onProgress?.(`后台临时密码已生成，但 Telegram 通知失败：${data.bootstrapNotifyError}`)
         return { ok: false, reason: data.bootstrapNotifyError, data }
