@@ -16,8 +16,9 @@ export function parseCookies(cookieHeader) {
   return cookies;
 }
 
-export function buildSessionCookie(token) {
-  return `admin_session=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=${ADMIN_SESSION_TTL_SECONDS}`;
+export function buildSessionCookie(token, options = {}) {
+  const sameSite = options.crossSite === false ? 'Strict' : 'None';
+  return `admin_session=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=${sameSite}; Max-Age=${ADMIN_SESSION_TTL_SECONDS}`;
 }
 
 export function buildExpiredSessionCookie() {

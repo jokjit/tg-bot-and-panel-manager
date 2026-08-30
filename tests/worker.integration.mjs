@@ -17,6 +17,7 @@ async function createWorkerRuntime() {
     bindings: {
       ADMIN_API_KEY: adminKey,
       ADMIN_CHAT_ID: '-100123',
+      ADMIN_PANEL_URL: 'https://panel.example.com',
       PUBLIC_BASE_URL: 'https://bot.example.com',
       TOPIC_MODE: 'false',
       USER_VERIFICATION: 'false',
@@ -36,6 +37,10 @@ test('Miniflare runs the bundled Worker with KV and D1 bindings', async (t) => {
   const kv = await mf.getKVNamespace('BOT_KV');
   const db = await mf.getD1Database('DB');
   const imageBucket = await mf.getR2Bucket('IMAGE_BUCKET');
+  await kv.put('sys:config', JSON.stringify({
+    ADMIN_PANEL_PASSWORD: 'legacy-password-123',
+    ADMIN_SESSION_VERSION: '1',
+  }));
 
   await t.test('health and status routes expose runtime binding state', async () => {
     await kv.put('sys:deployment_health', JSON.stringify({ status: 'healthy', source: 'integration' }));
@@ -124,6 +129,91 @@ test('Miniflare runs the bundled Worker with KV and D1 bindings', async (t) => {
     const list = await listResponse.json();
     assert.equal(list.source, 'd1');
     assert.equal(list.blacklist[0].reason, 'integration-test');
+  });
+
+  await t.test('admin password login migrates plaintext and protects session writes with CSRF', async () => {
+    const preflight = await mf.dispatchFetch('https://bot.example.com/admin/login', {
+      method: 'OPTIONS',
+      headers: { origin: 'https://panel.example.com' },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), 'https://panel.example.com');
+    assert.match(preflight.headers.get('access-control-allow-headers'), /X-CSRF-Token/i);
+
+    const rejectedOrigin = await mf.dispatchFetch('https://bot.example.com/admin/login', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://attacker.example.com',
+      },
+      body: JSON.stringify({ username: 'admin', password: 'legacy-password-123' }),
+    });
+    assert.equal(rejectedOrigin.status, 403);
+
+    const loginResponse = await mf.dispatchFetch('https://bot.example.com/admin/login', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://panel.example.com',
+      },
+      body: JSON.stringify({ username: 'admin', password: 'legacy-password-123' }),
+    });
+    assert.equal(loginResponse.status, 200);
+    const login = await loginResponse.json();
+    assert.match(login.csrfToken, /^[0-9a-f]{48}$/);
+    const cookie = loginResponse.headers.get('set-cookie').split(';')[0];
+
+    const migrated = JSON.parse(await kv.get('sys:config'));
+    assert.equal('ADMIN_PANEL_PASSWORD' in migrated, false);
+    assert.match(migrated.ADMIN_PANEL_PASSWORD_HASH, /^pbkdf2-sha256\$/);
+
+    const missingCsrf = await mf.dispatchFetch('https://bot.example.com/admin/logout', {
+      method: 'POST',
+      headers: { cookie, origin: 'https://panel.example.com' },
+    });
+    assert.equal(missingCsrf.status, 403);
+
+    const changeResponse = await mf.dispatchFetch('https://bot.example.com/admin/api/auth/change-password', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie,
+        origin: 'https://panel.example.com',
+        'x-csrf-token': login.csrfToken,
+      },
+      body: JSON.stringify({ newPassword: 'new-permanent-password-456' }),
+    });
+    assert.equal(changeResponse.status, 200);
+    const changed = await changeResponse.json();
+    assert.match(changed.csrfToken, /^[0-9a-f]{48}$/);
+    const newCookie = changeResponse.headers.get('set-cookie').split(';')[0];
+
+    const oldSession = await mf.dispatchFetch('https://bot.example.com/admin/api/users', {
+      headers: { cookie, origin: 'https://panel.example.com' },
+    });
+    assert.equal(oldSession.status, 401);
+
+    const logoutResponse = await mf.dispatchFetch('https://bot.example.com/admin/logout', {
+      method: 'POST',
+      headers: {
+        cookie: newCookie,
+        origin: 'https://panel.example.com',
+        'x-csrf-token': changed.csrfToken,
+      },
+    });
+    assert.equal(logoutResponse.status, 200);
+
+    const queryKeyResponse = await mf.dispatchFetch(`https://bot.example.com/admin/api/users?key=${adminKey}`);
+    assert.equal(queryKeyResponse.status, 401);
+  });
+
+  await t.test('webhook mutations reject legacy GET requests', async () => {
+    for (const path of ['/setWebhook', '/deleteWebhook', '/setCommands']) {
+      const response = await mf.dispatchFetch(`https://bot.example.com${path}`, {
+        headers: { 'x-admin-key': adminKey },
+      });
+      assert.equal(response.status, 404);
+    }
   });
 
   await t.test('image hosting uploads to R2, indexes in D1, serves publicly, and deletes', async () => {

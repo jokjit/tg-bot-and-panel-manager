@@ -69,10 +69,10 @@ function resolveRuntimeWorkerBaseUrl() {
 
 const runtimeOrigin = resolveRuntimeWorkerBaseUrl();
 const baseURL = import.meta.env.VITE_WORKER_BASE_URL?.replace(/\/$/, '') || runtimeOrigin;
-const ADMIN_KEY_STORAGE = 'tg_admin_api_key';
 const apiReadCache = new Map();
 const apiInflightReads = new Map();
 let apiReadCacheVersion = 0;
+let csrfToken = '';
 
 const READ_CACHE_TTL = {
   auth: 5 * 1000,
@@ -88,19 +88,8 @@ export const api = axios.create({
   timeout: 15000,
 });
 
-export function getAdminApiKey() {
-  return localStorage.getItem(ADMIN_KEY_STORAGE) || '';
-}
-
-export function setAdminApiKey(value) {
-  const next = String(value || '').trim();
-  if (!next) {
-    localStorage.removeItem(ADMIN_KEY_STORAGE);
-    clearCachedGets();
-    return;
-  }
-  localStorage.setItem(ADMIN_KEY_STORAGE, next);
-  clearCachedGets();
+function setCsrfToken(value = '') {
+  csrfToken = String(value || '').trim();
 }
 
 export function resolveApiUrl(path = '') {
@@ -115,24 +104,14 @@ export function resolveApiUrl(path = '') {
 }
 
 export function resolveProtectedMediaUrl(path = '') {
-  const resolved = resolveApiUrl(path);
-  if (!resolved) return '';
-
-  const key = getAdminApiKey();
-  if (!key) return resolved;
-
-  const url = new URL(resolved);
-  if (!url.searchParams.has('key')) {
-    url.searchParams.set('key', key);
-  }
-  return url.toString();
+  return resolveApiUrl(path);
 }
 
 api.interceptors.request.use((config) => {
-  const key = getAdminApiKey();
-  if (key) {
+  const method = String(config.method || 'get').toLowerCase();
+  if (csrfToken && !['get', 'head', 'options'].includes(method)) {
     config.headers = config.headers || {};
-    config.headers['x-admin-key'] = key;
+    config.headers['x-csrf-token'] = csrfToken;
   }
   return config;
 });
@@ -140,6 +119,9 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (resp) => resp,
   (error) => {
+    if (error?.response?.status === 401) {
+      setCsrfToken('');
+    }
     const message = error?.response?.data?.error || error?.message || '请求失败';
     return Promise.reject(new Error(message));
   },
@@ -220,7 +202,10 @@ function cachedGet(path, options = {}) {
 }
 
 export function fetchAuthState() {
-  return cachedGet('/admin/api/auth/me', { ttlMs: READ_CACHE_TTL.auth });
+  return cachedGet('/admin/api/auth/me', { ttlMs: READ_CACHE_TTL.auth }).then((data) => {
+    setCsrfToken(data?.authenticated ? data?.csrfToken : '');
+    return data;
+  });
 }
 
 export function loginWithPassword(password) {
@@ -229,7 +214,11 @@ export function loginWithPassword(password) {
       username: 'admin',
       password: String(password || '').trim(),
     })
-    .then((r) => r.data);
+    .then((r) => {
+      setCsrfToken(r.data?.csrfToken);
+      clearCachedGets();
+      return r.data;
+    });
 }
 
 export function changeAdminPassword(newPassword) {
@@ -238,16 +227,16 @@ export function changeAdminPassword(newPassword) {
       newPassword: String(newPassword || '').trim(),
     })
     .then((r) => {
+      setCsrfToken(r.data?.csrfToken);
       clearCachedGets();
       return r.data;
     });
 }
 
 export function logout() {
-  setAdminApiKey('');
-  return api.post('/admin/logout').then((r) => {
+  return api.post('/admin/logout').then((r) => r.data).finally(() => {
+    setCsrfToken('');
     clearCachedGets();
-    return r.data;
   });
 }
 
@@ -369,14 +358,14 @@ export function runDirectoryIndexBackfill(payload = {}) {
 }
 
 export function setWebhook() {
-  return api.get('/setWebhook').then((r) => {
+  return api.post('/setWebhook').then((r) => {
     clearCachedGets(['/admin/api/status']);
     return r.data;
   });
 }
 
 export function deleteWebhook() {
-  return api.get('/deleteWebhook').then((r) => {
+  return api.post('/deleteWebhook').then((r) => {
     clearCachedGets(['/admin/api/status']);
     return r.data;
   });
@@ -387,7 +376,7 @@ export function getWebhookInfo() {
 }
 
 export function syncBotCommands() {
-  return api.get('/setCommands').then((r) => {
+  return api.post('/setCommands').then((r) => {
     clearCachedGets(['/admin/api/status']);
     return r.data;
   });

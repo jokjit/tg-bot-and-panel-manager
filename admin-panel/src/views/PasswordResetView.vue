@@ -58,7 +58,7 @@ const form = reactive({
 });
 
 async function handleSubmit() {
-  if (form.newPassword.trim().length < 6) {
+  if (form.newPassword.trim().length < 10) {
     message.warning(t('auth.passwordTooShort'));
     return;
   }

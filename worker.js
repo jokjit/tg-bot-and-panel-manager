@@ -194,9 +194,21 @@ import {
 } from './worker-src/telegram/format.js';
 import {
   createChallengeToken,
+  createRandomToken,
   createSessionToken,
+  sha256Hex,
   timingSafeEqualText,
 } from './worker-src/auth/crypto.js';
+import {
+  hashPassword,
+  passwordHashNeedsUpgrade,
+  verifyPassword,
+} from './worker-src/auth/password.js';
+import {
+  ADMIN_LOGIN_BLOCK_MS,
+  isLoginRateBlocked,
+  recordLoginFailure,
+} from './worker-src/auth/login-rate-limit.js';
 import {
   createSeededRandom,
   drawLine,
@@ -265,6 +277,7 @@ const ADMIN_API_PREFIX = '/admin/api';
 const MAX_SCAN_KEYS = 500;
 const SYSTEM_CONFIG_KEY = 'sys:config';
 const ADMIN_SESSION_PREFIX = 'admin:session:';
+const ADMIN_LOGIN_RATE_PREFIX = 'admin:login-rate:';
 const ADMIN_BOOTSTRAP_TTL_MS = 1 * 60 * 60 * 1000;
 const PROFILE_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_ADMIN_PANEL_EXTERNAL_URL = '';
@@ -342,16 +355,17 @@ export default {
   async fetch(request, env, ctx) {
     const startedAt = Date.now();
     const requestId = getRequestId(request);
+    let runtimeEnv = env;
     try {
+      const url = new URL(request.url);
+      runtimeEnv = await getRuntimeEnv(env);
       if (request.method === 'OPTIONS') {
         return new Response(null, {
           status: 204,
-          headers: corsHeaders(request),
+          headers: corsHeaders(request, runtimeEnv),
         });
       }
 
-      const url = new URL(request.url);
-      const runtimeEnv = await getRuntimeEnv(env);
       const webhookPath = normalizeWebhookPath(runtimeEnv.WEBHOOK_PATH);
       const publicBaseUrl = getPublicBaseUrl(url, runtimeEnv);
       if (ctx?.waitUntil && isDataCleanupAutoEnabled(runtimeEnv) && shouldScheduleAutoCleanupCheck()) {
@@ -384,7 +398,7 @@ export default {
         return await handleWebhookRequest(request, runtimeEnv, publicBaseUrl, ctx);
       }
 
-      return new Response('Not Found', { status: 404, headers: corsHeaders(request) });
+      return new Response('Not Found', { status: 404, headers: corsHeaders(request, runtimeEnv) });
     } catch (error) {
       const status = error instanceof AppError ? error.status : 500;
       writeStructuredLog('error', 'http_request_failed', {
@@ -405,6 +419,7 @@ export default {
         status,
         {},
         request,
+        runtimeEnv,
       );
     }
   },
@@ -461,9 +476,9 @@ async function handleTopLevelRequest(request, url, env, webhookPath, publicBaseU
 
   switch (route) {
     case TOP_LEVEL_ROUTES.STATUS:
-      return json(await getAdminStatus(url, env, webhookPath, publicBaseUrl), 200, {}, request);
+      return json(await getAdminStatus(url, env, webhookPath, publicBaseUrl), 200, {}, request, env);
     case TOP_LEVEL_ROUTES.HEALTH:
-      return json({ ok: true, now: new Date().toISOString() }, 200, {}, request);
+      return json({ ok: true, now: new Date().toISOString() }, 200, {}, request, env);
     case TOP_LEVEL_ROUTES.VERIFY_IMAGE:
       return serveVerificationImage(url, request);
     case TOP_LEVEL_ROUTES.VERIFY_WEB:
@@ -527,7 +542,7 @@ async function handleWebhookRequest(request, env, publicBaseUrl = '', ctx = null
       await notifyWebhookError(env, error, update);
     });
   }
-  return new Response('ok', { headers: corsHeaders(request) });
+  return new Response('ok', { headers: corsHeaders(request, env) });
 }
 
 async function handleAdminAuthRequest(request, url, env) {
@@ -564,7 +579,7 @@ async function handleAdminSystemRequest(request, url, env, webhookPath, publicBa
     runDataCleanup: (options) => runDataCleanup(env, options),
     runDeletedAccountSweep: (options) => runDeletedAccountSweep(env, options),
     runDirectoryIndexBackfill: (options) => runDirectoryIndexBackfill(env, options),
-    json,
+    json: (data, status, headers, value) => json(data, status, headers, value, env),
   });
 }
 
@@ -592,7 +607,7 @@ async function handleAdminUserRequest(request, url, env) {
     approveVerification: (userId, operator, options) => adminApproveUserVerification(env, userId, operator, options),
     purgeUser: (userId) => purgeDeletedUserData(env, userId),
     createError: (status, message) => new AppError(status, message),
-    json,
+    json: (data, status, headers, value) => json(data, status, headers, value, env),
   });
 }
 
@@ -607,7 +622,7 @@ async function handleAdminReplyRequest(request, url, env) {
     saveMessageHistory: (entry) => saveMessageHistory(env, entry),
     getOperator: getHttpAdminOperator,
     createError: (status, message) => new AppError(status, message),
-    json,
+    json: (data, status, headers, value) => json(data, status, headers, value, env),
   });
 }
 
@@ -625,7 +640,7 @@ async function handleAdminBlacklistRequest(request, url, env) {
     addEntry: (userId, entry) => setBlacklistEntry(env, userId, entry),
     deleteEntry: (userId) => deleteBlacklistEntry(env, userId),
     createError: (status, message) => new AppError(status, message),
-    json,
+    json: (data, status, headers, value) => json(data, status, headers, value, env),
   });
 }
 
@@ -643,7 +658,7 @@ async function handleAdminTrustRequest(request, url, env) {
     addEntry: (userId, entry) => setTrustEntry(env, userId, entry),
     deleteEntry: (userId) => deleteTrustEntry(env, userId),
     createError: (status, message) => new AppError(status, message),
-    json,
+    json: (data, status, headers, value) => json(data, status, headers, value, env),
   });
 }
 
@@ -684,7 +699,7 @@ async function handleAdminImageRequest(request, url, env, publicBaseUrl) {
     isValidId: (id) => /^[a-f0-9-]{20,64}$/i.test(String(id || '')),
     mapUploadError: mapImageUploadError,
     createError: (status, message) => new AppError(status, message),
-    json,
+    json: (data, status, headers, value) => json(data, status, headers, value, env),
   });
 }
 
@@ -701,40 +716,40 @@ async function handleAuthorizedAdminRequest(request, url, env) {
     setAdmin: (userId, entry) => setAuthorizedAdmin(env, userId, entry),
     deleteAdmin: (userId) => deleteAuthorizedAdmin(env, userId),
     createError: (status, message) => new AppError(status, message),
-    json,
+    json: (data, status, headers, value) => json(data, status, headers, value, env),
   });
 }
 
 async function handleWebhookManagementRequest(request, url, env, webhookPath, publicBaseUrl) {
-  if (request.method === 'GET' && url.pathname === '/setWebhook') {
+  if (request.method === 'POST' && url.pathname === '/setWebhook') {
     await requireHttpAdmin(request, env);
     ensureEnv(env, ['BOT_TOKEN']);
     const webhookUrl = `${publicBaseUrl}${webhookPath}`;
     const payload = { url: webhookUrl };
     if (env.WEBHOOK_SECRET) payload.secret_token = env.WEBHOOK_SECRET;
     const result = await telegram(env, 'setWebhook', payload);
-    return json({ ok: true, webhookUrl, telegram: result }, 200, {}, request);
+    return json({ ok: true, webhookUrl, telegram: result }, 200, {}, request, env);
   }
 
-  if (request.method === 'GET' && url.pathname === '/deleteWebhook') {
+  if (request.method === 'POST' && url.pathname === '/deleteWebhook') {
     await requireHttpAdmin(request, env);
     ensureEnv(env, ['BOT_TOKEN']);
     const result = await telegram(env, 'deleteWebhook', { drop_pending_updates: false });
-    return json({ ok: true, telegram: result }, 200, {}, request);
+    return json({ ok: true, telegram: result }, 200, {}, request, env);
   }
 
   if (request.method === 'GET' && url.pathname === '/getWebhookInfo') {
     await requireHttpAdmin(request, env);
     ensureEnv(env, ['BOT_TOKEN']);
     const result = await telegram(env, 'getWebhookInfo', {});
-    return json({ ok: true, telegram: result }, 200, {}, request);
+    return json({ ok: true, telegram: result }, 200, {}, request, env);
   }
 
-  if (request.method === 'GET' && url.pathname === '/setCommands') {
+  if (request.method === 'POST' && url.pathname === '/setCommands') {
     await requireHttpAdmin(request, env);
     ensureEnv(env, ['BOT_TOKEN']);
     const result = await syncTelegramCommands(env);
-    return json({ ok: true, ...result }, 200, {}, request);
+    return json({ ok: true, ...result }, 200, {}, request, env);
   }
 
   return null;
@@ -4286,31 +4301,55 @@ async function getSystemConfig(env) {
 
 async function ensureAdminPasswordState(env) {
   ensureKv(env);
-  const config = await getSystemConfig(env);
+  let config = await getSystemConfig(env);
   const username = getAdminPanelUser(env);
+  let permanentPasswordHash = String(config.ADMIN_PANEL_PASSWORD_HASH || '').trim();
   const permanentPassword = String(config.ADMIN_PANEL_PASSWORD || '').trim();
 
-  if (permanentPassword) {
+  if (!permanentPasswordHash && permanentPassword) {
+    permanentPasswordHash = await hashPassword(permanentPassword);
+    config = {
+      ...config,
+      ADMIN_PANEL_PASSWORD_HASH: permanentPasswordHash,
+      updatedAt: new Date().toISOString(),
+    };
+    delete config.ADMIN_PANEL_PASSWORD;
+    await setSystemConfig(env, config);
+  }
+
+  if (permanentPasswordHash) {
     return {
       username,
       passwordReady: true,
       passwordMode: 'permanent',
-      password: permanentPassword,
+      passwordHash: permanentPasswordHash,
       mustChangePassword: false,
       bootstrapExpiresAt: null,
     };
   }
 
+  let bootstrapPasswordHash = String(config.ADMIN_BOOTSTRAP_PASSWORD_HASH || '').trim();
   const bootstrapPassword = String(config.ADMIN_BOOTSTRAP_PASSWORD || '').trim();
   const bootstrapExpiresAt = String(config.ADMIN_BOOTSTRAP_EXPIRES_AT || '').trim() || null;
   const bootstrapExpireMs = bootstrapExpiresAt ? new Date(bootstrapExpiresAt).getTime() : 0;
 
-  if (bootstrapPassword && bootstrapExpireMs > Date.now()) {
+  if (!bootstrapPasswordHash && bootstrapPassword && bootstrapExpireMs > Date.now()) {
+    bootstrapPasswordHash = await hashPassword(bootstrapPassword);
+    config = {
+      ...config,
+      ADMIN_BOOTSTRAP_PASSWORD_HASH: bootstrapPasswordHash,
+      updatedAt: new Date().toISOString(),
+    };
+    delete config.ADMIN_BOOTSTRAP_PASSWORD;
+    await setSystemConfig(env, config);
+  }
+
+  if (bootstrapPasswordHash && bootstrapExpireMs > Date.now()) {
     return {
       username,
       passwordReady: true,
       passwordMode: 'bootstrap',
-      password: bootstrapPassword,
+      passwordHash: bootstrapPasswordHash,
       mustChangePassword: true,
       bootstrapExpiresAt,
       bootstrapNotifyError: String(config.ADMIN_BOOTSTRAP_NOTIFY_ERROR || '').trim() || null,
@@ -4322,23 +4361,27 @@ async function ensureAdminPasswordState(env) {
       username,
       passwordReady: false,
       passwordMode: 'none',
-      password: '',
+      passwordHash: '',
       mustChangePassword: false,
       bootstrapExpiresAt: null,
     };
   }
 
   const bootstrapGeneratedPassword = createBootstrapPassword();
+  const generatedPasswordHash = await hashPassword(bootstrapGeneratedPassword);
 
   const next = {
     ...config,
-    ADMIN_BOOTSTRAP_PASSWORD: bootstrapGeneratedPassword,
+    ADMIN_BOOTSTRAP_PASSWORD_HASH: generatedPasswordHash,
     ADMIN_BOOTSTRAP_EXPIRES_AT: new Date(Date.now() + ADMIN_BOOTSTRAP_TTL_MS).toISOString(),
     ADMIN_FORCE_PASSWORD_CHANGE: 'true',
+    ADMIN_SESSION_VERSION: String(getAdminSessionVersion(config) + 1),
     updatedAt: new Date().toISOString(),
   };
 
   delete next.ADMIN_PANEL_PASSWORD;
+  delete next.ADMIN_PANEL_PASSWORD_HASH;
+  delete next.ADMIN_BOOTSTRAP_PASSWORD;
   delete next.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
   await setSystemConfig(env, next);
   let bootstrapNotifyError = null;
@@ -4354,7 +4397,7 @@ async function ensureAdminPasswordState(env) {
     username,
     passwordReady: true,
     passwordMode: 'bootstrap',
-    password: bootstrapGeneratedPassword,
+    passwordHash: generatedPasswordHash,
     mustChangePassword: true,
     bootstrapExpiresAt: next.ADMIN_BOOTSTRAP_EXPIRES_AT,
     bootstrapNotifyError,
@@ -4379,23 +4422,12 @@ async function resendBootstrapPassword(env) {
     };
   }
 
-  try {
-    await notifyBootstrapPassword(env, state.username, state.password, state.bootstrapExpiresAt);
-    const config = await getSystemConfig(env);
-    if (config.ADMIN_BOOTSTRAP_NOTIFY_ERROR) {
-      delete config.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
-      config.updatedAt = new Date().toISOString();
-      await setSystemConfig(env, config);
-    }
-  } catch (error) {
-    return {
-      ok: false,
-      message: `临时密码已存在，但发送到 Telegram 失败：${formatErrorMessage(error)}`,
-    };
-  }
+  const result = await resetBootstrapPassword(env);
   return {
-    ok: true,
-    message: `当前有效的临时密码已重新发送到管理员会话。有效期至：${state.bootstrapExpiresAt}`,
+    ...result,
+    message: result.ok
+      ? `出于安全考虑，旧临时密码已作废；新的临时密码已发送到管理员会话。${result.expiresAt ? `有效期至：${result.expiresAt}` : ''}`
+      : result.message,
   };
 }
 
@@ -4411,16 +4443,20 @@ async function resetBootstrapPassword(env) {
   const config = await getSystemConfig(env);
   const username = getAdminPanelUser(env);
   const bootstrapGeneratedPassword = createBootstrapPassword();
+  const bootstrapPasswordHash = await hashPassword(bootstrapGeneratedPassword);
   const expiresAt = new Date(Date.now() + ADMIN_BOOTSTRAP_TTL_MS).toISOString();
   const next = {
     ...config,
-    ADMIN_BOOTSTRAP_PASSWORD: bootstrapGeneratedPassword,
+    ADMIN_BOOTSTRAP_PASSWORD_HASH: bootstrapPasswordHash,
     ADMIN_BOOTSTRAP_EXPIRES_AT: expiresAt,
     ADMIN_FORCE_PASSWORD_CHANGE: 'true',
+    ADMIN_SESSION_VERSION: String(getAdminSessionVersion(config) + 1),
     updatedAt: new Date().toISOString(),
   };
 
   delete next.ADMIN_PANEL_PASSWORD;
+  delete next.ADMIN_PANEL_PASSWORD_HASH;
+  delete next.ADMIN_BOOTSTRAP_PASSWORD;
   delete next.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
   await setSystemConfig(env, next);
   try {
@@ -4437,10 +4473,16 @@ async function resetBootstrapPassword(env) {
   return {
     ok: true,
     message: `新的临时密码已生成并发送到管理员会话。有效期至：${expiresAt}`,
+    expiresAt,
   };
 }
 
-function buildAdminAuthPayload(passwordState, authenticated = false) {
+function getAdminSessionVersion(config = {}) {
+  const value = Number(config.ADMIN_SESSION_VERSION || 1);
+  return Number.isInteger(value) && value > 0 ? value : 1;
+}
+
+function buildAdminAuthPayload(passwordState, authenticated = false, options = {}) {
   return {
     ok: true,
     authenticated,
@@ -4450,6 +4492,7 @@ function buildAdminAuthPayload(passwordState, authenticated = false) {
     passwordMode: passwordState.passwordMode || 'none',
     bootstrapExpiresAt: passwordState.bootstrapExpiresAt || null,
     bootstrapNotifyError: passwordState.bootstrapNotifyError || null,
+    csrfToken: authenticated ? String(options.csrfToken || '') || null : null,
   };
 }
 
@@ -4818,61 +4861,144 @@ async function getAdminSession(env, request) {
   const cookies = parseCookies(request.headers.get('cookie'));
   const token = cookies.admin_session;
   if (!token) return null;
-  return getJson(env.BOT_KV, `${ADMIN_SESSION_PREFIX}${token}`);
+  const session = await getJson(env.BOT_KV, `${ADMIN_SESSION_PREFIX}${token}`);
+  if (!session || typeof session !== 'object') return null;
+
+  const expireAtMs = new Date(session.expireAt || '').getTime();
+  if (!Number.isFinite(expireAtMs) || expireAtMs <= Date.now()) {
+    await env.BOT_KV.delete(`${ADMIN_SESSION_PREFIX}${token}`);
+    return null;
+  }
+
+  const config = await getSystemConfig(env);
+  if (Number(session.sessionVersion || 0) !== getAdminSessionVersion(config)) {
+    await env.BOT_KV.delete(`${ADMIN_SESSION_PREFIX}${token}`);
+    return null;
+  }
+
+  return { ...session, token };
+}
+
+async function createAdminSession(env, username, sessionVersion) {
+  const token = createSessionToken();
+  const csrfToken = createRandomToken(24);
+  const now = new Date();
+  const expireAt = new Date(Date.now() + ADMIN_SESSION_TTL_SECONDS * 1000).toISOString();
+  const session = {
+    username,
+    loginAt: now.toISOString(),
+    expireAt,
+    sessionVersion,
+    csrfToken,
+  };
+  await env.BOT_KV.put(
+    `${ADMIN_SESSION_PREFIX}${token}`,
+    JSON.stringify(session),
+    { expirationTtl: ADMIN_SESSION_TTL_SECONDS },
+  );
+  return { ...session, token };
+}
+
+function getAdminLoginClientAddress(request) {
+  const forwarded = String(request.headers.get('x-forwarded-for') || '').split(',')[0].trim();
+  return String(request.headers.get('cf-connecting-ip') || forwarded || 'unknown').trim().toLowerCase();
+}
+
+async function getAdminLoginRateKey(request) {
+  return `${ADMIN_LOGIN_RATE_PREFIX}${await sha256Hex(getAdminLoginClientAddress(request))}`;
+}
+
+function isUnsafeHttpMethod(method = '') {
+  return !['GET', 'HEAD', 'OPTIONS'].includes(String(method || '').toUpperCase());
+}
+
+function isAdminPanelCrossSite(request, env) {
+  const requestOrigin = getRequestOrigin(request);
+  const panelOrigin = getUrlOrigin(env.ADMIN_PANEL_URL || env.ADMIN_PANEL_ENTRY_URL || '');
+  return Boolean(panelOrigin && requestOrigin && panelOrigin !== requestOrigin);
 }
 
 async function handleAdminAuthMe(request, env) {
   ensureKv(env);
+  validateAdminOrigin(request, env);
   const passwordState = await ensureAdminPasswordState(env);
   const session = await getAdminSession(env, request);
-  const url = new URL(request.url);
   const authorization = request.headers.get('authorization') || '';
   const bearerToken = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
-  const key = request.headers.get('x-admin-key') || bearerToken || url.searchParams.get('key') || '';
-  const authenticatedByKey = Boolean(env.ADMIN_API_KEY && key && key === env.ADMIN_API_KEY);
+  const key = request.headers.get('x-admin-key') || bearerToken || '';
+  const authenticatedByKey = Boolean(
+    env.ADMIN_API_KEY && key && timingSafeEqualText(key, env.ADMIN_API_KEY),
+  );
 
-  return json(buildAdminAuthPayload(passwordState, authenticatedByKey || Boolean(session)), 200, {}, request);
+  return json(
+    buildAdminAuthPayload(passwordState, authenticatedByKey || Boolean(session), {
+      csrfToken: session?.csrfToken,
+    }),
+    200,
+    {},
+    request,
+    env,
+  );
 }
 
 async function handleAdminLogin(request, env) {
   ensureKv(env);
+  validateAdminOrigin(request, env);
   const body = await readJsonBody(request);
   const username = String(body.username || '').trim() || 'admin';
   const password = String(body.password || '').trim();
   const expectedUser = getAdminPanelUser(env);
   const passwordState = await ensureAdminPasswordState(env);
+  const rateKey = await getAdminLoginRateKey(request);
+  const rateState = await getJson(env.BOT_KV, rateKey);
+
+  if (isLoginRateBlocked(rateState)) {
+    throw new AppError(429, '登录尝试过于频繁，请稍后再试');
+  }
 
   if (!passwordState.passwordReady) {
     throw new AppError(500, '请先配置 BOT_TOKEN 与 ADMIN_CHAT_ID，系统会自动生成首次临时密码并发送到管理员会话');
   }
 
-  if (username !== expectedUser || password !== passwordState.password) {
+  const passwordMatches = await verifyPassword(password, passwordState.passwordHash);
+  if (!timingSafeEqualText(username, expectedUser) || !passwordMatches) {
+    const nextRateState = recordLoginFailure(rateState);
+    await env.BOT_KV.put(rateKey, JSON.stringify(nextRateState), {
+      expirationTtl: Math.ceil((ADMIN_LOGIN_BLOCK_MS * 2) / 1000),
+    });
+    if (isLoginRateBlocked(nextRateState)) {
+      throw new AppError(429, '登录尝试过于频繁，请稍后再试');
+    }
     throw new AppError(401, '账号或密码错误');
   }
 
-  const token = createSessionToken();
-  const now = new Date();
-  const expireAt = new Date(Date.now() + ADMIN_SESSION_TTL_SECONDS * 1000).toISOString();
-  await env.BOT_KV.put(
-    `${ADMIN_SESSION_PREFIX}${token}`,
-    JSON.stringify({
-      username,
-      loginAt: now.toISOString(),
-      expireAt,
-    }),
-    { expirationTtl: ADMIN_SESSION_TTL_SECONDS },
-  );
+  await env.BOT_KV.delete(rateKey);
+  const config = await getSystemConfig(env);
+  if (passwordHashNeedsUpgrade(passwordState.passwordHash)) {
+    const upgradedHash = await hashPassword(password);
+    const next = { ...config, updatedAt: new Date().toISOString() };
+    if (passwordState.passwordMode === 'bootstrap') {
+      next.ADMIN_BOOTSTRAP_PASSWORD_HASH = upgradedHash;
+    } else {
+      next.ADMIN_PANEL_PASSWORD_HASH = upgradedHash;
+    }
+    await setSystemConfig(env, next);
+  }
+  const session = await createAdminSession(env, username, getAdminSessionVersion(config));
 
   return json(
     {
-      ...buildAdminAuthPayload(passwordState, true),
-      expireAt,
+      ...buildAdminAuthPayload(passwordState, true, { csrfToken: session.csrfToken }),
+      expireAt: session.expireAt,
     },
     200,
     {
-      'set-cookie': buildSessionCookie(token),
+      'set-cookie': buildSessionCookie(session.token, {
+        crossSite: isAdminPanelCrossSite(request, env),
+      }),
     },
     request,
+    env,
   );
 }
 
@@ -4881,21 +5007,33 @@ async function handleAdminChangePassword(request, env) {
   const body = await readJsonBody(request);
   const newPassword = String(body.newPassword || '').trim();
 
-  if (newPassword.length < 6) {
-    throw new AppError(400, '新密码至少需要 6 位');
+  if (newPassword.length < 10) {
+    throw new AppError(400, '新密码至少需要 10 位');
   }
 
   const current = await getSystemConfig(env);
+  const nextSessionVersion = getAdminSessionVersion(current) + 1;
   const next = {
     ...current,
-    ADMIN_PANEL_PASSWORD: newPassword,
+    ADMIN_PANEL_PASSWORD_HASH: await hashPassword(newPassword),
     ADMIN_FORCE_PASSWORD_CHANGE: 'false',
+    ADMIN_SESSION_VERSION: String(nextSessionVersion),
     updatedAt: new Date().toISOString(),
   };
 
+  delete next.ADMIN_PANEL_PASSWORD;
   delete next.ADMIN_BOOTSTRAP_PASSWORD;
+  delete next.ADMIN_BOOTSTRAP_PASSWORD_HASH;
   delete next.ADMIN_BOOTSTRAP_EXPIRES_AT;
+  delete next.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
   await setSystemConfig(env, next);
+
+  const cookies = parseCookies(request.headers.get('cookie'));
+  const oldToken = cookies.admin_session;
+  if (oldToken) {
+    await env.BOT_KV.delete(`${ADMIN_SESSION_PREFIX}${oldToken}`);
+  }
+  const session = await createAdminSession(env, getAdminPanelUser(env), nextSessionVersion);
 
   return json(
     {
@@ -4906,10 +5044,17 @@ async function handleAdminChangePassword(request, env) {
       passwordReady: true,
       passwordMode: 'permanent',
       bootstrapExpiresAt: null,
+      csrfToken: session.csrfToken,
+      expireAt: session.expireAt,
     },
     200,
-    {},
+    {
+      'set-cookie': buildSessionCookie(session.token, {
+        crossSite: isAdminPanelCrossSite(request, env),
+      }),
+    },
     request,
+    env,
   );
 }
 
@@ -4929,35 +5074,40 @@ async function handleAdminLogout(request, env) {
       'set-cookie': buildExpiredSessionCookie(),
     },
     request,
+    env,
   );
 }
 
 async function requireHttpAdmin(request, env) {
-  const url = new URL(request.url);
+  validateAdminOrigin(request, env);
   const authorization = request.headers.get('authorization') || '';
   const bearerToken = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
-  const key = request.headers.get('x-admin-key') || bearerToken || url.searchParams.get('key') || '';
+  const key = request.headers.get('x-admin-key') || bearerToken || '';
 
-  if (env.ADMIN_API_KEY && key && key === env.ADMIN_API_KEY) {
-    return;
+  if (env.ADMIN_API_KEY && key && timingSafeEqualText(key, env.ADMIN_API_KEY)) {
+    return { authType: 'api-key' };
   }
 
   const session = await getAdminSession(env, request);
   if (session) {
-    return;
+    if (
+      isUnsafeHttpMethod(request.method)
+      && !timingSafeEqualText(request.headers.get('x-csrf-token') || '', session.csrfToken || '')
+    ) {
+      throw new AppError(403, 'CSRF token invalid');
+    }
+    return { authType: 'session', session };
   }
 
   throw new AppError(401, 'Unauthorized');
 }
 
 function getHttpAdminOperator(request) {
-  const url = new URL(request.url);
   const authorization = request.headers.get('authorization') || '';
   const hasBearer = authorization.startsWith('Bearer ');
   if (request.headers.get('x-admin-key')) return 'http:x-admin-key';
   if (hasBearer) return 'http:bearer';
-  if (url.searchParams.get('key')) return 'http:query';
-  return 'http:unknown';
+  return 'http:session';
 }
 
 function formatAdminOperator(sender) {
@@ -5288,61 +5438,56 @@ function getPublicBaseUrl(url, env) {
   }
 }
 
-function html(content, status = 200, request = null, extraHeaders = {}) {
+function html(content, status = 200, request = null, extraHeaders = {}, env = null) {
   return new Response(content, {
     status,
     headers: {
       'content-type': 'text/html; charset=UTF-8',
-      ...corsHeaders(request),
+      ...corsHeaders(request, env),
       ...extraHeaders,
     },
   });
 }
 
-function json(data, status = 200, extraHeaders = {}, request = null) {
+function json(data, status = 200, extraHeaders = {}, request = null, env = null) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       'content-type': 'application/json; charset=UTF-8',
-      ...corsHeaders(request),
+      ...corsHeaders(request, env),
       ...extraHeaders,
     },
   });
 }
 
-function corsHeaders(request = null) {
+function corsHeaders(request = null, env = null) {
   const origin =
     typeof request === 'string'
       ? request
       : request?.headers?.get?.('origin') || request?.headers?.get?.('Origin') || '';
-  const allowOrigin = resolveAllowedOrigin(origin, request);
+  const allowOrigin = resolveAllowedOrigin(origin, request, env);
 
   return {
     'access-control-allow-origin': allowOrigin,
     'access-control-allow-methods': 'GET,HEAD,POST,DELETE,OPTIONS',
-    'access-control-allow-headers': 'Content-Type, Authorization, X-Admin-Key',
+    'access-control-allow-headers': 'Content-Type, Authorization, X-Admin-Key, X-CSRF-Token',
     'access-control-allow-credentials': 'true',
     vary: 'Origin',
   };
 }
 
-function resolveAllowedOrigin(origin, request = null) {
+function resolveAllowedOrigin(origin, request = null, env = null) {
   const requestOrigin = getRequestOrigin(request);
-  const fallback = requestOrigin || origin || '*';
+  const fallback = requestOrigin || 'null';
   if (!origin) return fallback;
 
   try {
     const url = new URL(origin);
-    const host = url.hostname.toLowerCase();
-    const requestHost = requestOrigin ? new URL(requestOrigin).hostname.toLowerCase() : '';
-    const isLocalhost = host === 'localhost' || host === '127.0.0.1';
-    const isPages = host.endsWith('.pages.dev');
     const isSameOrigin = Boolean(requestOrigin && url.origin === requestOrigin);
-    const isSiblingCustomDomain = Boolean(
-      requestHost && getBaseDomain(host) && getBaseDomain(host) === getBaseDomain(requestHost),
-    );
+    const configuredPanelOrigin = getUrlOrigin(env?.ADMIN_PANEL_URL || '');
+    const isConfiguredPanel = Boolean(configuredPanelOrigin && url.origin === configuredPanelOrigin);
 
-    if (isLocalhost || isPages || isSameOrigin || isSiblingCustomDomain) {
+    if (isSameOrigin || isConfiguredPanel) {
       return origin;
     }
   } catch (error) {
@@ -5350,6 +5495,13 @@ function resolveAllowedOrigin(origin, request = null) {
   }
 
   return fallback;
+}
+
+function validateAdminOrigin(request, env) {
+  const origin = String(request?.headers?.get?.('origin') || '').trim();
+  if (!origin) return;
+  if (resolveAllowedOrigin(origin, request, env) === origin) return;
+  throw new AppError(403, 'Origin not allowed');
 }
 
 function getRequestOrigin(request = null) {
@@ -5372,17 +5524,6 @@ function getUrlOrigin(value = '') {
   } catch (error) {
     return '';
   }
-}
-
-function getBaseDomain(host = '') {
-  const normalized = String(host || '').trim().toLowerCase();
-  if (!normalized) return '';
-  if (normalized === 'localhost' || normalized === '127.0.0.1') return normalized;
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(normalized)) return normalized;
-
-  const parts = normalized.split('.').filter(Boolean);
-  if (parts.length < 2) return normalized;
-  return parts.slice(-2).join('.');
 }
 
 function renderVerificationWebPage() {

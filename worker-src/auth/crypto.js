@@ -29,6 +29,14 @@ export async function hmacSha256Hex(secret, payload) {
   return bytesToHex(new Uint8Array(signature));
 }
 
+export async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(String(value || '')),
+  );
+  return bytesToHex(new Uint8Array(digest));
+}
+
 export function timingSafeEqualText(left, right) {
   const a = String(left || '');
   const b = String(right || '');
