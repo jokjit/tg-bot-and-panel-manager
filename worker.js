@@ -174,6 +174,7 @@ import {
 import { handleAuthorizedAdminMessage } from './worker-src/telegram/admin-message.js';
 import {
   ADMIN_IMAGE_UPLOAD_TTL_SECONDS,
+  getAdminImageUploadScopeKey,
   tryHandleAdminImageUploadMessage,
 } from './worker-src/telegram/admin-image-upload.js';
 import {
@@ -1007,6 +1008,7 @@ async function handleUpdate(update, env, publicBaseUrl = '', ctx = null) {
       isTopicModeEnabled,
       getPrivateRelayAdminUserIds,
       handleAdminMessage,
+      hasPendingAdminInteraction,
       isUserVerificationEnabled,
       ensureKv,
       upsertUserProfile,
@@ -1019,6 +1021,23 @@ async function handleUpdate(update, env, publicBaseUrl = '', ctx = null) {
       handleUserMessage,
     },
   );
+}
+
+async function hasPendingAdminInteraction(message, env) {
+  if (!env?.BOT_KV || message?.chat?.type !== 'private') return false;
+
+  const welcomeScopeKey = getWelcomeSetupScopeKey(message);
+  const imageScopeKey = getAdminImageUploadScopeKey(message);
+  const panelScopeKey = getAdminPanelInputScopeKey(message);
+  const keys = [
+    welcomeScopeKey && `${WELCOME_SETUP_PENDING_PREFIX}${welcomeScopeKey}`,
+    imageScopeKey && `${ADMIN_IMAGE_UPLOAD_PENDING_PREFIX}${imageScopeKey}`,
+    panelScopeKey && `${ADMIN_PANEL_INPUT_PENDING_PREFIX}${panelScopeKey}`,
+  ].filter(Boolean);
+  if (!keys.length) return false;
+
+  const pending = await Promise.all(keys.map((key) => getJson(env.BOT_KV, key)));
+  return pending.some(Boolean);
 }
 
 async function handleCallbackQuery(callbackQuery, env, publicBaseUrl = '', ctx = null) {

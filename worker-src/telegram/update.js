@@ -19,15 +19,27 @@ export async function handleTelegramUpdate(context = {}, handlers = {}) {
   const authorizedAdmin = senderId ? await handlers.isAuthorizedAdmin(env, senderId) : false;
   const isAdminChat = Number(message.chat.id) === adminChatId;
   const topicModeEnabled = handlers.isTopicModeEnabled(env);
-  const privateRelayAdminIds = topicModeEnabled ? [] : await handlers.getPrivateRelayAdminUserIds(env);
-  const isPrivateRelayAdminChat = !topicModeEnabled && privateRelayAdminIds.includes(Number(message.chat.id));
+  const configuredPrivateRelayAdminIds = topicModeEnabled
+    ? []
+    : String(env.ADMIN_IDS || env.ADMIN_ID || '')
+      .split(/[\s,;]+/)
+      .map((value) => Number(value))
+      .filter((value) => Number.isSafeInteger(value) && value > 0);
+  const isPrivateRelayAdminChat = !topicModeEnabled
+    && configuredPrivateRelayAdminIds.includes(Number(message.chat.id));
+  const isPrivateChat = message.chat.type === 'private';
+  const isAdminPrivateInteraction = isPrivateChat && (
+    handlers.isUserPrivateCommand(message)
+    || Boolean(message.reply_to_message)
+    || Boolean(await handlers.hasPendingAdminInteraction?.(message, env))
+  );
 
-  if (authorizedAdmin || isAdminChat || isPrivateRelayAdminChat) {
+  if (isAdminChat || isPrivateRelayAdminChat || (authorizedAdmin && (!isPrivateChat || isAdminPrivateInteraction))) {
     await handlers.handleAdminMessage(message, env, adminChatId, authorizedAdmin, publicBaseUrl, ctx);
     return;
   }
 
-  if (message.chat.type !== 'private') return;
+  if (!isPrivateChat) return;
 
   const verificationEnabled = handlers.isUserVerificationEnabled(env);
   if (topicModeEnabled || verificationEnabled) handlers.ensureKv(env);

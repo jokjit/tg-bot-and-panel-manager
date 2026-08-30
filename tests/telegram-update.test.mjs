@@ -14,6 +14,7 @@ function createUpdateHandlers(options = {}) {
     isAuthorizedAdmin: async () => Boolean(options.authorizedAdmin),
     isTopicModeEnabled: () => Boolean(options.topicMode),
     getPrivateRelayAdminUserIds: async () => options.privateRelayAdminUserIds || [],
+    hasPendingAdminInteraction: async () => Boolean(options.pendingAdminInteraction),
     handleAdminMessage: async () => calls.push('admin'),
     isUserVerificationEnabled: () => Boolean(options.verificationEnabled),
     ensureKv: () => calls.push('ensureKv'),
@@ -22,7 +23,7 @@ function createUpdateHandlers(options = {}) {
     },
     getBlacklistEntry: async () => options.blacklisted ? { reason: 'blocked' } : null,
     sendBlockedMessage: async (_env, _chatId, text) => calls.push(`blocked:${text}`),
-    isUserPrivateCommand: () => Boolean(options.privateCommand),
+    isUserPrivateCommand: (message) => options.privateCommand ?? /^\/\S+/.test(String(message?.text || '').trim()),
     handleUserPrivateCommand: async () => calls.push('command'),
     ensureUserVerifiedOrPrompt: async (_message, _env, _baseUrl, verifyOptions) => {
       calls.push('verify');
@@ -59,10 +60,37 @@ test('Telegram update delegates callback queries before message handling', async
   assert.deepEqual(calls, ['callback']);
 });
 
-test('Telegram update routes authorized senders to admin handling', async () => {
+test('Telegram update routes authorized private commands to admin handling', async () => {
+  const { handlers, calls } = createUpdateHandlers({ authorizedAdmin: true });
+  await handleTelegramUpdate(
+    { update: messageUpdate({ text: '/users' }), env: { ADMIN_CHAT_ID: '-100' } },
+    handlers,
+  );
+  assert.deepEqual(calls, ['admin']);
+});
+
+test('Telegram update routes authorized private ordinary messages through user relay', async () => {
   const { handlers, calls } = createUpdateHandlers({ authorizedAdmin: true });
   await handleTelegramUpdate(
     { update: messageUpdate(), env: { ADMIN_CHAT_ID: '-100' } },
+    handlers,
+  );
+  assert.deepEqual(calls, ['profile:true', 'verify', 'observe:verified', 'relay']);
+});
+
+test('Telegram update preserves admin handling for private pending panel input', async () => {
+  const { handlers, calls } = createUpdateHandlers({ authorizedAdmin: true, pendingAdminInteraction: true });
+  await handleTelegramUpdate(
+    { update: messageUpdate({ text: '123' }), env: { ADMIN_CHAT_ID: '-100' } },
+    handlers,
+  );
+  assert.deepEqual(calls, ['admin']);
+});
+
+test('Telegram update keeps configured private relay admins in admin handling', async () => {
+  const { handlers, calls } = createUpdateHandlers({ authorizedAdmin: true });
+  await handleTelegramUpdate(
+    { update: messageUpdate(), env: { ADMIN_CHAT_ID: '-100', ADMIN_IDS: '7' } },
     handlers,
   );
   assert.deepEqual(calls, ['admin']);
