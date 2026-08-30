@@ -29,6 +29,18 @@ function assertSemanticVersion(version, source) {
   }
 }
 
+export function assertReleaseTagVersion(tag, version) {
+  const releaseTag = String(tag || '').trim();
+  const expectedTag = `v${String(version || '').trim()}`;
+  if (!releaseTag) {
+    throw new Error('Release tag is required');
+  }
+  if (releaseTag !== expectedTag) {
+    throw new Error(`Release tag ${releaseTag} differs from application version ${expectedTag}`);
+  }
+  return releaseTag;
+}
+
 function readLockVersion(packagePath) {
   const lockPath = packagePath.replace(/package\.json$/, 'package-lock.json');
   const lock = readJson(lockPath);
@@ -67,5 +79,7 @@ export function assertVersionConsistency() {
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   const result = assertVersionConsistency();
+  const releaseTag = String(process.env.RELEASE_TAG || '').trim();
+  if (releaseTag) assertReleaseTagVersion(releaseTag, result.version);
   console.log(`Versions OK: ${result.version} (Android versionCode ${result.versionCode})`);
 }
