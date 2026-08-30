@@ -15,6 +15,8 @@
 9. 写入 Worker Secrets：`BOT_TOKEN`、`ADMIN_CHAT_ID`、`DEPLOY_BOOTSTRAP_TOKEN`
 10. 调用 `/deploy/bootstrap` 完成 Webhook / 命令 / 面板初始密码链路
 
+部署引导成功（或已确认被完成请求消费）后，客户端会自动删除临时 `DEPLOY_BOOTSTRAP_TOKEN`；引导失败时会保留它以便恢复或重试。
+
 部署配置中的“图床独立域名”对应 `IMAGE_PUBLIC_BASE_URL`。默认开启一键配置：部署器会自动识别 Zone、把域名绑定到 R2 bucket、创建一年 Edge TTL 的缓存规则并轮询证书状态。图片访客流量直接走 R2/CDN，不经过 Worker。Token 需要 R2 Edit、Zone Read 和 Cache Rules Edit 权限；若域名已经手工配置，可关闭自动配置选项。
 
 ## 本地开发

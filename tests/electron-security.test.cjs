@@ -5,6 +5,7 @@ const {
   isAllowedAction,
   normalizeAccountInput,
   normalizeExternalHttpUrl,
+  sanitizeDeploymentResumeState,
 } = require('../electron-app/security.js')
 
 test('Electron account input keeps only bounded expected fields', () => {
@@ -32,4 +33,19 @@ test('Electron action and external URL allowlists reject dangerous values', () =
   assert.equal(normalizeExternalHttpUrl('https://panel.example.com/admin'), 'https://panel.example.com/admin')
   assert.equal(normalizeExternalHttpUrl('javascript:alert(1)'), '')
   assert.equal(normalizeExternalHttpUrl('file:///C:/secret.txt'), '')
+})
+
+test('Electron deployment resume state never retains bootstrap credentials', () => {
+  const state = sanitizeDeploymentResumeState({
+    results: {
+      prepare: { deployBootstrapToken: 'old-token' },
+      worker: { workerUrl: 'https://worker.example.com', deployBootstrapToken: 'leaked-token' },
+    },
+    completedSteps: ['prepare', 'worker'],
+  })
+
+  assert.deepEqual(state, {
+    results: { worker: { workerUrl: 'https://worker.example.com' } },
+    completedSteps: ['worker'],
+  })
 })

@@ -36,8 +36,31 @@ function normalizeExternalHttpUrl(value) {
   }
 }
 
+function sanitizeDeploymentResumeState(value = {}) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const sourceResults = source.results && typeof source.results === 'object' && !Array.isArray(source.results)
+    ? source.results
+    : {}
+  const results = {}
+  for (const [id, result] of Object.entries(sourceResults)) {
+    if (id === 'prepare') continue
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      const sanitizedResult = { ...result }
+      delete sanitizedResult.deployBootstrapToken
+      results[id] = sanitizedResult
+    } else {
+      results[id] = result
+    }
+  }
+  const completedSteps = Array.isArray(source.completedSteps)
+    ? source.completedSteps.filter((step) => String(step || '').trim() !== 'prepare')
+    : []
+  return { results, completedSteps }
+}
+
 module.exports = {
   isAllowedAction,
   normalizeAccountInput,
   normalizeExternalHttpUrl,
+  sanitizeDeploymentResumeState,
 }

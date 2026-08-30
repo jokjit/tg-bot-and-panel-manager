@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import test from 'node:test';
 
 import { Miniflare } from 'miniflare';
@@ -7,25 +8,34 @@ import { Miniflare } from 'miniflare';
 const adminKey = 'integration-admin-key';
 
 async function createWorkerRuntime() {
+  const workerScript = await readFile('worker.bundle.js', 'utf8');
   const mf = new Miniflare({
-    modules: true,
-    scriptPath: 'worker.bundle.js',
-    compatibilityDate: '2025-07-18',
-    kvNamespaces: ['BOT_KV'],
-    d1Databases: ['DB'],
-    r2Buckets: ['IMAGE_BUCKET'],
-    bindings: {
-      ADMIN_API_KEY: adminKey,
-      ADMIN_CHAT_ID: '-100123',
-      ADMIN_PANEL_URL: 'https://panel.example.com',
-      PUBLIC_BASE_URL: 'https://bot.example.com',
-      TOPIC_MODE: 'false',
-      USER_VERIFICATION: 'false',
-    },
-    outboundService: () => new Response(JSON.stringify({ ok: false, description: 'unexpected outbound request' }), {
-      status: 502,
-      headers: { 'content-type': 'application/json' },
-    }),
+    workers: [{
+      config: {
+        name: 'tg-bot-integration',
+        type: 'worker',
+        compatibilityDate: '2025-07-18',
+        manifest: {
+          mainModule: 'worker.bundle.js',
+          modulesRoot: resolve('.'),
+          modules: {
+            'worker.bundle.js': { type: 'esm', contents: workerScript },
+          },
+        },
+        env: {
+          BOT_KV: { type: 'kv' },
+          DB: { type: 'd1' },
+          IMAGE_BUCKET: { type: 'r2' },
+          ADMIN_API_KEY: { type: 'text', value: adminKey },
+          DEPLOY_BOOTSTRAP_TOKEN: { type: 'text', value: 'integration-bootstrap-token' },
+          ADMIN_CHAT_ID: { type: 'text', value: '-100123' },
+          ADMIN_PANEL_URL: { type: 'text', value: 'https://panel.example.com' },
+          PUBLIC_BASE_URL: { type: 'text', value: 'https://bot.example.com' },
+          TOPIC_MODE: { type: 'text', value: 'false' },
+          USER_VERIFICATION: { type: 'text', value: 'false' },
+        },
+      },
+    }],
   });
   await mf.ready;
   return mf;
@@ -63,6 +73,28 @@ test('Miniflare runs the bundled Worker with KV and D1 bindings', async (t) => {
     const response = await mf.dispatchFetch('https://bot.example.com/admin/api/users');
     assert.equal(response.status, 401);
     assert.deepEqual(await response.json(), { ok: false, error: 'Unauthorized' });
+  });
+
+  await t.test('deploy bootstrap rejects tokens supplied in query strings', async () => {
+    const response = await mf.dispatchFetch(
+      'https://bot.example.com/deploy/bootstrap?token=integration-bootstrap-token',
+      { method: 'POST' },
+    );
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), { ok: false, error: 'forbidden' });
+  });
+
+  await t.test('deploy bootstrap CORS allows the header-based token flow', async () => {
+    const response = await mf.dispatchFetch('https://bot.example.com/deploy/bootstrap', {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'https://panel.example.com',
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': 'content-type,x-deploy-bootstrap-token',
+      },
+    });
+    assert.equal(response.status, 204);
+    assert.match(response.headers.get('access-control-allow-headers'), /X-Deploy-Bootstrap-Token/i);
   });
 
   await t.test('D1 directory pagination is served through the authenticated Worker route', async () => {
@@ -224,7 +256,8 @@ test('Miniflare runs the bundled Worker with KV and D1 bindings', async (t) => {
     const pngBytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
     const form = new FormData();
     form.set('file', new Blob([pngBytes], { type: 'image/png' }), 'integration.png');
-    const uploadResponse = await mf.dispatchFetch('https://bot.example.com/admin/api/images', {
+    const runtimeUrl = await mf.ready;
+    const uploadResponse = await fetch(new URL('/admin/api/images', runtimeUrl), {
       method: 'POST',
       headers: { 'x-admin-key': adminKey },
       body: form,

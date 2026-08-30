@@ -9,6 +9,7 @@ const {
   isAllowedAction,
   normalizeAccountInput,
   normalizeExternalHttpUrl,
+  sanitizeDeploymentResumeState,
 } = require('./security.js')
 const deployUtilsPath = app.isPackaged
   ? path.join(process.resourcesPath, 'shared', 'deploy-utils.cjs')
@@ -2040,6 +2041,13 @@ async function putWorkerSecretViaApi(env, workerName, name, value) {
   })
 }
 
+async function deleteWorkerSecretViaApi(env, workerName, name) {
+  const { accountId } = getCfTokenAndAccount(env)
+  return cfApiRequest(env, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/secrets/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  })
+}
+
 async function listWorkerSecretsViaApi(env, workerName) {
   const { accountId } = getCfTokenAndAccount(env)
   return cfApiRequest(env, `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/secrets`)
@@ -3507,15 +3515,14 @@ async function runAction(action, params, env) {
       const runtimeVarUpdates = buildRuntimeVarUpdates(params)
       let effectivePanelUrl = normalizePanelUrl(panelUrl || '')
       const deployImageHosting = params?.deployImageHosting !== false
-      const resumeState = normalizeDeploymentResumeState(params?.deploymentState || {})
+      const resumeState = sanitizeDeploymentResumeState(
+        normalizeDeploymentResumeState(params?.deploymentState || {}),
+      )
       const deployment = createDeploymentRun({
         initialResults: resumeState.results,
         completedSteps: resumeState.completedSteps,
       })
-      const prepareStage = await deployment.run('prepare', async () => ({
-        deployBootstrapToken: crypto.randomBytes(24).toString('hex'),
-      }))
-      const deployBootstrapToken = prepareStage.deployBootstrapToken
+      const deployBootstrapToken = crypto.randomBytes(24).toString('hex')
       const workerSecrets = {
         BOT_TOKEN: botToken,
         ADMIN_CHAT_ID: adminChatId,
@@ -3700,6 +3707,7 @@ async function runAction(action, params, env) {
           send,
           { delays: [2000, 4000], stopOnNetworkFailure: true },
         )
+        let bootstrapCompleted = bootstrap.ok
         if (!bootstrap.ok) {
           send(`Worker \u90e8\u7f72\u5f15\u5bfc\u4e3b\u94fe\u8def\u5931\u8d25\uff1a${bootstrap.reason || 'unknown'}`)
           send('\u6b63\u5728\u5207\u6362\u5230 Cloudflare API + Telegram API \u515c\u5e95\u521d\u59cb\u5316...')
@@ -3711,6 +3719,18 @@ async function runAction(action, params, env) {
           }, send)
           if (!fallback.ok) {
             send(`Worker \u90e8\u7f72\u5f15\u5bfc\u8b66\u544a\uff1a${fallback.reason || bootstrap.reason || 'unknown'}`)
+          }
+          bootstrapCompleted = fallback.ok
+        }
+        if (bootstrapCompleted) {
+          const workerNameForCleanup = getWorkerNameFromConfig(workerConfigPath)
+          if (workerNameForCleanup) {
+            const cleanup = await deleteWorkerSecretViaApi(env, workerNameForCleanup, 'DEPLOY_BOOTSTRAP_TOKEN')
+            if (cleanup.ok) {
+              send('部署引导已完成，临时 DEPLOY_BOOTSTRAP_TOKEN 已从 Worker Secret 删除。')
+            } else {
+              send(`临时 DEPLOY_BOOTSTRAP_TOKEN 清理警告：${cleanup.reason || 'unknown'}`)
+            }
           }
         }
       }

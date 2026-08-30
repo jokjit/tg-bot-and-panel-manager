@@ -1933,6 +1933,20 @@ async function upsertWorkerSecrets(
   onLog(`Worker Secrets 已更新: ${names.map(([name]) => name).join(', ')}`);
 }
 
+async function deleteWorkerSecret(
+  token: string,
+  accountId: string,
+  workerName: string,
+  name: string,
+): Promise<CfResult<unknown>> {
+  return cfApi(
+    token,
+    accountId,
+    `/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/secrets/${encodeURIComponent(name)}`,
+    { method: 'DELETE' },
+  );
+}
+
 async function waitForWorkerHealth(workerUrl: string, onLog: (text: string) => void): Promise<void> {
   const origin = getUrlOrigin(workerUrl);
   if (!origin) return;
@@ -2583,6 +2597,14 @@ export async function runDeploy(
           onLog(`Webhook 已设置: ${bootstrap.webhookUrl || `${getUrlOrigin(results.endpoint.workerUrl)}/webhook`}`);
         } else {
           onLog(`部署引导警告: ${bootstrap.reason}`);
+        }
+        if (bootstrap.ok) {
+          const cleanup = await deleteWorkerSecret(token, accountId, workerName, 'DEPLOY_BOOTSTRAP_TOKEN');
+          if (cleanup.ok) {
+            onLog('部署引导已完成，临时 DEPLOY_BOOTSTRAP_TOKEN 已从 Worker Secret 删除。');
+          } else {
+            onLog(`临时 DEPLOY_BOOTSTRAP_TOKEN 清理警告：${cleanup.reason || 'unknown'}`);
+          }
         }
         return { bootstrap };
       },
