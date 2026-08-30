@@ -51,12 +51,14 @@ function normalizeDeployBootstrapResponse(status, data, options = {}) {
   const reason = reasonFields
     .map((field) => String(payload[field] || '').trim())
     .find(Boolean);
+  const healthReason = String(payload.deploymentHealth?.lastError || '').trim();
+  const readinessReason = payload.passwordReady === false ? 'password_not_ready' : '';
   const httpReasonPrefix = String(options.httpReasonPrefix || 'http_');
   return {
     ok: false,
     consumed: false,
     webhookUrl,
-    reason: reason || `${httpReasonPrefix}${httpStatus}`,
+    reason: reason || healthReason || readinessReason || `${httpReasonPrefix}${httpStatus}`,
     data: payload,
   };
 }

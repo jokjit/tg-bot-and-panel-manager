@@ -138,6 +138,19 @@ test('shared deployment core normalizes deployment bootstrap responses', () => {
   assert.equal(partial.ok, false);
   assert.equal(partial.reason, 'commands_failed');
   assert.equal(
+    normalizeDeployBootstrapResponse(200, {
+      ok: false,
+      deploymentHealth: { status: 'degraded', lastError: 'bootstrap_incomplete' },
+    }, {
+      successReasonFields: ['webhookError', 'commandsError', 'bootstrapNotifyError'],
+    }).reason,
+    'bootstrap_incomplete',
+  );
+  assert.equal(
+    normalizeDeployBootstrapResponse(200, { ok: false, passwordReady: false }).reason,
+    'password_not_ready',
+  );
+  assert.equal(
     normalizeDeployBootstrapResponse(503, null, { httpReasonPrefix: 'bootstrap_http_' }).reason,
     'bootstrap_http_503',
   );

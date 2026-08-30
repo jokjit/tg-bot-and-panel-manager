@@ -1956,6 +1956,7 @@ async function upsertWorkerSecrets(
     accountId,
     workerName,
     secrets,
+    verifyAfterWrite: true,
     onProgress: onLog,
     apiRequest: (resource, options) => cfApi<any>(token, accountId, resource, {
       method: options.method,
@@ -1964,6 +1965,8 @@ async function upsertWorkerSecrets(
     messages: {
       updateFailed: ({ secretName, failureReason }) => `Secret 写入失败 (${secretName}): ${failureReason}`,
       updated: ({ secretNames }) => `Worker Secrets 已更新: ${secretNames.join(', ')}`,
+      verifyFailed: ({ missingNames }) => `Worker Secrets 写入验证失败: ${missingNames.join(', ')}`,
+      listWarning: ({ reason }) => `Worker Secrets 列表校验警告: ${reason}`,
     },
   });
 }
@@ -2005,13 +2008,19 @@ async function waitForWorkerHealth(workerUrl: string, onLog: (text: string) => v
         method: 'GET',
         timeoutMs: 15000,
       });
-      const ok = response.status >= 200 && response.status < 300;
+      if (isCloudflareAccessResponse(response.text)) {
+        throw new Error('cloudflare_access_protected');
+      }
+      const ok = response.status >= 200 && response.status < 300 && response.json?.ok === true;
       if (ok) {
         onLog('Worker 健康检查通过。');
         return;
       }
-    } catch {
-      // ignore and retry
+    } catch (error) {
+      if ((error instanceof Error ? error.message : String(error)) === 'cloudflare_access_protected') {
+        throw error;
+      }
+      // ignore transient transport failures and retry
     }
 
     if (attempt < 12) {
@@ -2021,6 +2030,57 @@ async function waitForWorkerHealth(workerUrl: string, onLog: (text: string) => v
   }
 
   throw new Error('Worker 健康检查超时，请稍后重试。');
+}
+
+function isCloudflareAccessResponse(text: string): boolean {
+  return /cloudflare access|<title>\s*sign in\b/i.test(String(text || ''));
+}
+
+async function waitForWorkerRuntimeReady(workerUrl: string, onLog: (text: string) => void): Promise<boolean> {
+  const origin = getUrlOrigin(workerUrl);
+  if (!origin) return false;
+
+  const url = `${origin}/ready`;
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
+    try {
+      const response = await request(url, { method: 'GET', timeoutMs: 15000 });
+      if (isCloudflareAccessResponse(response.text)) {
+        throw new Error('cloudflare_access_protected');
+      }
+      // Older Worker versions do not expose /ready; /health is the best check available there.
+      if (response.status === 404) return true;
+      if (response.status >= 200 && response.status < 300 && response.json?.ok) {
+        onLog('Worker 运行配置已就绪。');
+        return true;
+      }
+      const checks = response.json?.checks;
+      const missing = checks && typeof checks === 'object'
+        ? Object.entries(checks)
+          .filter(([, value]) => !value)
+          .map(([name]) => name)
+          .join(',')
+        : '';
+      if (attempt < 12) {
+        onLog(`等待 Worker 运行配置生效${missing ? `（${missing}）` : ''} (${attempt}/12)...`);
+        await sleep(3000);
+        continue;
+      }
+    } catch (error) {
+      if ((error instanceof Error ? error.message : String(error)) === 'cloudflare_access_protected') {
+        throw error;
+      }
+      if (attempt < 12) {
+        onLog(`等待 Worker 运行配置生效 (${attempt}/12)...`);
+        await sleep(3000);
+        continue;
+      }
+    }
+  }
+
+  // Secret propagation can lag behind the API write. Let bootstrap's own retry
+  // loop continue so a transient 503 does not discard the deployment checkpoint.
+  onLog('Worker 运行配置暂未就绪，将继续尝试部署引导。');
+  return false;
 }
 
 async function triggerDeployBootstrap(
@@ -2040,10 +2100,12 @@ async function triggerDeployBootstrap(
       const response = await request(`${origin}/deploy/bootstrap`, {
         method: 'POST',
         headers: {
+          Accept: 'application/json',
           'Content-Type': 'application/json',
           'x-deploy-bootstrap-token': bootstrapToken,
         },
-        jsonBody: {},
+        // Keep the body fallback for Android WebView/native stacks that drop custom headers.
+        jsonBody: { token: bootstrapToken },
         timeoutMs: 30000,
       });
 
@@ -2063,7 +2125,21 @@ async function triggerDeployBootstrap(
           reason: '',
         };
       }
-      lastReason = normalized.reason;
+      if (response.json === null) {
+        if (isCloudflareAccessResponse(response.text)) {
+          lastReason = 'cloudflare_access_protected';
+        } else {
+          const bodyHint = response.text.trim().replace(/\s+/g, ' ').slice(0, 120);
+          lastReason = bodyHint
+            ? `bootstrap_invalid_json_http_${response.status}: ${bodyHint}`
+            : `bootstrap_empty_http_${response.status}`;
+        }
+      } else {
+        lastReason = normalized.reason;
+      }
+      if (lastReason === 'cloudflare_access_protected') {
+        return { ok: false, webhookUrl: '', reason: lastReason };
+      }
     } catch (error) {
       lastReason = error instanceof Error ? error.message : String(error);
     }
@@ -2076,6 +2152,461 @@ async function triggerDeployBootstrap(
   }
 
   return { ok: false, webhookUrl: '', reason: lastReason };
+}
+
+async function telegramApiRequestDirect(botToken: string, method: string, payload: Record<string, unknown> = {}): Promise<any> {
+  const token = String(botToken || '').trim();
+  const apiMethod = String(method || '').trim();
+  if (!token) throw new Error('missing_bot_token');
+  if (!apiMethod) throw new Error('missing_telegram_method');
+
+  const response = await request(`https://api.telegram.org/bot${token}/${apiMethod}`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json; charset=UTF-8',
+    },
+    jsonBody: payload,
+    timeoutMs: 30000,
+  });
+  if (response.status >= 200 && response.status < 300 && response.json?.ok) {
+    return response.json.result;
+  }
+  throw new Error(String(response.json?.description || `telegram_http_${response.status}`));
+}
+
+function buildDirectTelegramCommands(): { userCommands: Array<Record<string, string>>; adminCommands: Array<Record<string, string>> } {
+  const userCommands = [
+    { command: 'start', description: '开始使用机器人 / 查看欢迎说明' },
+  ];
+  const adminCommands = [
+    ...userCommands,
+    { command: 'help', description: '查看管理员帮助' },
+    { command: 'panel', description: '打开管理面板入口' },
+    { command: 'reply', description: '回复用户：/reply 用户ID 内容' },
+    { command: 'ban', description: '拉黑用户：/ban 用户ID 原因' },
+    { command: 'unban', description: '解除拉黑：/unban 用户ID' },
+    { command: 'trust', description: '设为信任用户：/trust 用户ID 备注' },
+    { command: 'untrust', description: '取消信任用户：/untrust 用户ID' },
+    { command: 'restart', description: '要求用户重新验证：/restart 用户ID' },
+    { command: 'user', description: '查看用户详情：/user 用户ID' },
+    { command: 'users', description: '查看最近用户：/users 20' },
+    { command: 'blacklist', description: '查看黑名单列表' },
+    { command: 'admins', description: '查看管理员列表' },
+    { command: 'adminadd', description: '授权管理员：/adminadd 用户ID 备注' },
+    { command: 'admindel', description: '移除管理员：/admindel 用户ID' },
+    { command: 'panelpass', description: '重发当前面板临时密码' },
+    { command: 'panelreset', description: '生成新的面板临时密码' },
+  ];
+  return { userCommands, adminCommands };
+}
+
+async function syncTelegramBotSetupDirect(
+  botToken: string,
+  adminChatId: string,
+  workerUrl: string,
+  webhookPath: string,
+  webhookSecret: string,
+  runtimeVars: Record<string, string>,
+  onLog: (text: string) => void,
+): Promise<{
+  ok: boolean;
+  webhookUrl: string;
+  webhookError: string;
+  commandsError: string;
+  failedScopes: Array<{ userId: number; error: string }>;
+}> {
+  const webhookUrl = `${getUrlOrigin(workerUrl)}${normalizeWebhookPath(webhookPath || '/webhook')}`;
+  let webhookError = '';
+  let commandsError = '';
+  const failedScopes: Array<{ userId: number; error: string }> = [];
+  const { userCommands, adminCommands } = buildDirectTelegramCommands();
+
+  try {
+    const payload: Record<string, unknown> = { url: webhookUrl };
+    if (webhookSecret) payload.secret_token = webhookSecret;
+    await telegramApiRequestDirect(botToken, 'setWebhook', payload);
+    onLog(`直连 Telegram API：Webhook 已设置为 ${webhookUrl}`);
+  } catch (error) {
+    webhookError = error instanceof Error ? error.message : String(error);
+  }
+
+  try {
+    await telegramApiRequestDirect(botToken, 'setMyCommands', { scope: { type: 'default' }, commands: userCommands });
+    await telegramApiRequestDirect(botToken, 'setChatMenuButton', { menu_button: { type: 'commands' } });
+    const numericAdminChatId = Number(adminChatId);
+    const configuredAdminIds = String(runtimeVars.ADMIN_IDS || runtimeVars.ADMIN_ID || '')
+      .split(/[\s,;]+/)
+      .map((value) => Number(value))
+      .filter((value) => Number.isSafeInteger(value) && value > 0);
+    if (configuredAdminIds.length === 0 && Number.isSafeInteger(numericAdminChatId) && numericAdminChatId > 0) {
+      configuredAdminIds.push(numericAdminChatId);
+    }
+    if (Number.isSafeInteger(numericAdminChatId) && numericAdminChatId < 0) {
+      try {
+        const members = await telegramApiRequestDirect(botToken, 'getChatAdministrators', { chat_id: numericAdminChatId });
+        configuredAdminIds.push(
+          ...(Array.isArray(members) ? members : [])
+            .map((item: any) => Number(item?.user?.id))
+            .filter((value: number) => Number.isSafeInteger(value) && value > 0),
+        );
+      } catch {
+        // Configured private admin IDs are still usable when group discovery fails.
+      }
+    }
+    const targets = [...new Set(configuredAdminIds)];
+    for (const userId of targets) {
+      try {
+        await telegramApiRequestDirect(botToken, 'setMyCommands', {
+          scope: { type: 'chat', chat_id: userId },
+          commands: adminCommands,
+        });
+      } catch (error) {
+        failedScopes.push({
+          userId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    onLog(
+      targets.length
+        ? `直连 Telegram API：默认命令已同步，管理员命令目标 ${targets.length} 个`
+        : '直连 Telegram API：默认命令已同步，未找到可下发管理员命令的私聊用户 ID',
+    );
+    if (failedScopes.length > 0) {
+      onLog(`直连 Telegram API：管理员命令有 ${failedScopes.length} 个目标下发失败。`);
+    }
+  } catch (error) {
+    commandsError = error instanceof Error ? error.message : String(error);
+  }
+
+  return { ok: !webhookError && !commandsError, webhookUrl, webhookError, commandsError, failedScopes };
+}
+
+async function cloudflareTextApi(
+  token: string,
+  accountId: string,
+  path: string,
+  options: RequestOptions = {},
+): Promise<{ ok: boolean; status: number; text: string; reason: string }> {
+  const response = await request(`${CF_API_BASE}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(options.headers || {}),
+    },
+  });
+  if (response.status >= 200 && response.status < 300) {
+    return { ok: true, status: response.status, text: response.text, reason: '' };
+  }
+  return {
+    ok: false,
+    status: response.status,
+    text: response.text,
+    reason: buildCfErrorReason(response.json, response.status, response.text),
+  };
+}
+
+async function readKvText(token: string, accountId: string, namespaceId: string, key: string): Promise<{ ok: boolean; value: string; missing?: boolean; reason?: string }> {
+  const response = await cloudflareTextApi(
+    token,
+    accountId,
+    `/accounts/${accountId}/storage/kv/namespaces/${encodeURIComponent(namespaceId)}/values/${encodeURIComponent(key)}`,
+  );
+  if (response.ok) return { ok: true, value: response.text || '' };
+  if (response.status === 404) return { ok: true, value: '', missing: true };
+  return { ok: false, value: '', reason: response.reason || 'kv_read_failed' };
+}
+
+async function writeKvText(token: string, accountId: string, namespaceId: string, key: string, value: string): Promise<{ ok: boolean; reason?: string }> {
+  const response = await cloudflareTextApi(
+    token,
+    accountId,
+    `/accounts/${accountId}/storage/kv/namespaces/${encodeURIComponent(namespaceId)}/values/${encodeURIComponent(key)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/plain; charset=UTF-8' },
+      textBody: value,
+      timeoutMs: 30000,
+    },
+  );
+  return response.ok ? { ok: true } : { ok: false, reason: response.reason || 'kv_write_failed' };
+}
+
+function createDirectBootstrapPassword(length = 12): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (value) => alphabet[value % alphabet.length]).join('');
+}
+
+function hexFromBytes(bytes: Uint8Array): string {
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+async function hashDirectAdminPassword(password: string): Promise<string> {
+  const salt = new Uint8Array(16);
+  crypto.getRandomValues(salt);
+  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 },
+    material,
+    256,
+  );
+  return `pbkdf2-sha256$100000$${hexFromBytes(salt)}$${hexFromBytes(new Uint8Array(bits))}`;
+}
+
+function getDirectAdminSessionVersion(config: Record<string, any>): number {
+  const value = Number(config.ADMIN_SESSION_VERSION || 1);
+  return Number.isInteger(value) && value > 0 ? value : 1;
+}
+
+function getDirectAdminPasswordHashIterations(value: unknown): number | null {
+  const match = /^pbkdf2-sha256\$(\d+)\$[0-9a-f]{32}\$[0-9a-f]{64}$/i.exec(String(value || '').trim());
+  if (!match) return null;
+  const iterations = Number(match[1]);
+  return Number.isInteger(iterations) && iterations >= 100000 ? iterations : null;
+}
+
+function isSupportedDirectAdminPasswordHash(value: unknown): boolean {
+  return getDirectAdminPasswordHashIterations(value) === 100000;
+}
+
+async function ensureDirectAdminPassword(
+  token: string,
+  accountId: string,
+  namespaceId: string,
+  botToken: string,
+  adminChatId: string,
+  username: string,
+  panelUrl: string,
+  onLog: (text: string) => void,
+): Promise<{
+  ok: boolean;
+  passwordReady: boolean;
+  passwordMode: 'none' | 'permanent' | 'bootstrap';
+  bootstrapNotifyError: string;
+  reason: string;
+}> {
+  const current = await readKvText(token, accountId, namespaceId, 'sys:config');
+  if (!current.ok) {
+    return {
+      ok: false,
+      passwordReady: false,
+      passwordMode: 'none',
+      bootstrapNotifyError: '',
+      reason: current.reason || 'system_config_read_failed',
+    };
+  }
+  let config: Record<string, any> = {};
+  try {
+    const parsed = current.value ? JSON.parse(current.value) : {};
+    config = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    config = {};
+  }
+
+  const permanentHash = String(config.ADMIN_PANEL_PASSWORD_HASH || '').trim();
+  if (isSupportedDirectAdminPasswordHash(permanentHash)) {
+    onLog('直连 Cloudflare KV：检测到已存在永久面板密码，跳过临时密码重建。');
+    return {
+      ok: true,
+      passwordReady: true,
+      passwordMode: 'permanent',
+      bootstrapNotifyError: '',
+      reason: '',
+    };
+  }
+
+  const permanentPassword = String(config.ADMIN_PANEL_PASSWORD || '').trim();
+  if (permanentPassword) {
+    const next: Record<string, any> = {
+      ...config,
+      ADMIN_PANEL_PASSWORD_HASH: await hashDirectAdminPassword(permanentPassword),
+      ADMIN_SESSION_VERSION: String(getDirectAdminSessionVersion(config)),
+      updatedAt: new Date().toISOString(),
+    };
+    delete next.ADMIN_PANEL_PASSWORD;
+    delete next.ADMIN_BOOTSTRAP_PASSWORD;
+    delete next.ADMIN_BOOTSTRAP_PASSWORD_HASH;
+    delete next.ADMIN_BOOTSTRAP_EXPIRES_AT;
+    delete next.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
+    const saved = await writeKvText(token, accountId, namespaceId, 'sys:config', JSON.stringify(next));
+    if (!saved.ok) {
+      return {
+        ok: false,
+        passwordReady: false,
+        passwordMode: 'none',
+        bootstrapNotifyError: '',
+        reason: saved.reason || 'system_config_write_failed',
+      };
+    }
+    onLog('直连 Cloudflare KV：已迁移现有永久面板密码。');
+    return {
+      ok: true,
+      passwordReady: true,
+      passwordMode: 'permanent',
+      bootstrapNotifyError: '',
+      reason: '',
+    };
+  }
+
+  if (!botToken || !adminChatId) {
+    return {
+      ok: false,
+      passwordReady: false,
+      passwordMode: 'none',
+      bootstrapNotifyError: '',
+      reason: 'missing_bot_token_or_admin_chat_id',
+    };
+  }
+
+  const bootstrapHash = String(config.ADMIN_BOOTSTRAP_PASSWORD_HASH || '').trim();
+  const bootstrapPassword = String(config.ADMIN_BOOTSTRAP_PASSWORD || '').trim();
+  const bootstrapExpiresAt = String(config.ADMIN_BOOTSTRAP_EXPIRES_AT || '').trim();
+  const bootstrapExpireMs = bootstrapExpiresAt ? new Date(bootstrapExpiresAt).getTime() : 0;
+  const previousNotifyError = String(config.ADMIN_BOOTSTRAP_NOTIFY_ERROR || '').trim();
+  if (
+    isSupportedDirectAdminPasswordHash(bootstrapHash)
+    && bootstrapExpireMs > Date.now()
+    && !previousNotifyError
+  ) {
+    onLog('直连 Cloudflare KV：检测到仍有效的临时密码，跳过重复生成和发送。');
+    return {
+      ok: true,
+      passwordReady: true,
+      passwordMode: 'bootstrap',
+      bootstrapNotifyError: '',
+      reason: '',
+    };
+  }
+
+  let password = bootstrapPassword;
+  let expiresAt = bootstrapExpiresAt;
+  let notifyMode: 'created' | 'migrated' = 'migrated';
+  let next: Record<string, any>;
+  if (!(bootstrapPassword && bootstrapExpireMs > Date.now())) {
+    password = createDirectBootstrapPassword();
+    expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    next = {
+      ...config,
+      ADMIN_BOOTSTRAP_PASSWORD_HASH: await hashDirectAdminPassword(password),
+      ADMIN_BOOTSTRAP_EXPIRES_AT: expiresAt,
+      ADMIN_FORCE_PASSWORD_CHANGE: 'true',
+      ADMIN_SESSION_VERSION: String(getDirectAdminSessionVersion(config) + 1),
+      updatedAt: new Date().toISOString(),
+    };
+    notifyMode = 'created';
+  } else {
+    next = {
+      ...config,
+      ADMIN_BOOTSTRAP_PASSWORD_HASH: await hashDirectAdminPassword(password),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  delete next.ADMIN_PANEL_PASSWORD;
+  delete next.ADMIN_PANEL_PASSWORD_HASH;
+  delete next.ADMIN_BOOTSTRAP_PASSWORD;
+  delete next.ADMIN_BOOTSTRAP_NOTIFY_ERROR;
+
+  const saved = await writeKvText(token, accountId, namespaceId, 'sys:config', JSON.stringify(next));
+  if (!saved.ok) {
+    return {
+      ok: false,
+      passwordReady: false,
+      passwordMode: 'none',
+      bootstrapNotifyError: '',
+      reason: saved.reason || 'system_config_write_failed',
+    };
+  }
+
+  try {
+    const numericAdminChatId = Number(adminChatId);
+    if (!Number.isFinite(numericAdminChatId)) throw new Error('invalid_admin_chat_id');
+    await telegramApiRequestDirect(botToken, 'sendMessage', {
+      chat_id: Number(adminChatId),
+      text: [
+        '你的管理面板首次临时密码已生成。',
+        panelUrl ? `面板入口：${panelUrl}` : '',
+        `账号：${username || 'admin'}`,
+        `临时密码：${password}`,
+        `有效期至：${expiresAt}`,
+        '请尽快登录并修改为永久密码。',
+      ].filter(Boolean).join('\n'),
+    });
+    onLog(
+      notifyMode === 'created'
+        ? '直连 Cloudflare KV + Telegram API：面板临时密码已生成并发送。'
+        : '直连 Cloudflare KV + Telegram API：旧临时密码已安全迁移并发送。',
+    );
+    return {
+      ok: true,
+      passwordReady: true,
+      passwordMode: 'bootstrap',
+      bootstrapNotifyError: '',
+      reason: '',
+    };
+  } catch (error) {
+    const notifyError = error instanceof Error ? error.message : String(error);
+    next.ADMIN_BOOTSTRAP_NOTIFY_ERROR = notifyError;
+    next.updatedAt = new Date().toISOString();
+    const errorSaved = await writeKvText(token, accountId, namespaceId, 'sys:config', JSON.stringify(next));
+    return {
+      ok: false,
+      passwordReady: true,
+      passwordMode: 'bootstrap',
+      bootstrapNotifyError: notifyError,
+      reason: errorSaved.ok ? notifyError : `${notifyError}; ${errorSaved.reason || 'system_config_write_failed'}`,
+    };
+  }
+}
+
+async function triggerDeployBootstrapFallbackDirect(options: {
+  token: string;
+  accountId: string;
+  namespaceId: string;
+  botToken: string;
+  adminChatId: string;
+  workerUrl: string;
+  webhookPath: string;
+  webhookSecret: string;
+  panelUrl: string;
+  adminPanelUser: string;
+  runtimeVars: Record<string, string>;
+  onLog: (text: string) => void;
+}): Promise<{ ok: boolean; webhookUrl: string; reason: string }> {
+  const telegramSetup = await syncTelegramBotSetupDirect(
+    options.botToken,
+    options.adminChatId,
+    options.workerUrl,
+    options.webhookPath,
+    options.webhookSecret,
+    options.runtimeVars,
+    options.onLog,
+  );
+  const passwordState = await ensureDirectAdminPassword(
+    options.token,
+    options.accountId,
+    options.namespaceId,
+    options.botToken,
+    options.adminChatId,
+    options.adminPanelUser,
+    options.panelUrl,
+    options.onLog,
+  );
+  const reason = [
+    telegramSetup.webhookError,
+    telegramSetup.commandsError,
+    passwordState.bootstrapNotifyError,
+    passwordState.ok ? '' : passwordState.reason,
+  ].map((value) => String(value || '').trim()).filter(Boolean).join('; ');
+  const ok = Boolean(
+    telegramSetup.ok
+    && passwordState.passwordReady
+    && !passwordState.bootstrapNotifyError,
+  );
+  if (ok) options.onLog(`Cloudflare API + Telegram API 兜底初始化已完成：${telegramSetup.webhookUrl}`);
+  return { ok, webhookUrl: telegramSetup.webhookUrl, reason };
 }
 
 async function getPagesProject(token: string, accountId: string, projectName: string): Promise<PageProjectResult> {
@@ -2644,18 +3175,92 @@ export async function runDeploy(
           }),
           onLog,
         );
-        const bootstrapWorkerUrl = results.endpoint.workersDevUrl || results.endpoint.workerUrl;
-        if (bootstrapWorkerUrl !== results.endpoint.workerUrl) {
-          onLog('部署引导将通过 workers.dev 入口执行，避免自定义域名尚未生效导致超时。');
+        if (!results.endpoint.workersDevUrl) {
+          // Resume data from older mobile builds may not contain the public workers.dev endpoint.
+          try {
+            results.endpoint.workersDevUrl = await ensureWorkersDevEndpoint(
+              token,
+              accountId,
+              workerName,
+              onLog,
+            );
+          } catch (error) {
+            onLog(`workers.dev 备用入口补取失败，将继续使用现有 Worker 地址：${error instanceof Error ? error.message : String(error)}`);
+          }
         }
-        await waitForWorkerHealth(bootstrapWorkerUrl, onLog);
-        const bootstrap = await triggerDeployBootstrap(bootstrapWorkerUrl, bootstrapToken, onLog);
+        const bootstrapCandidates = [...new Set([
+          results.endpoint.workersDevUrl,
+          results.endpoint.workerUrl,
+        ].map((value) => normalizeHttpUrl(String(value || ''))).filter(Boolean))];
+        if (bootstrapCandidates.length === 0) {
+          throw new Error('Worker 部署入口为空，请先确认 Worker 域名配置。');
+        }
+
+        let bootstrapWorkerUrl = bootstrapCandidates[0];
+        let bootstrap = { ok: false, webhookUrl: '', reason: 'unknown' };
+        for (const candidate of bootstrapCandidates) {
+          bootstrapWorkerUrl = candidate;
+          if (candidate !== results.endpoint.workerUrl) {
+            onLog('部署引导优先通过 workers.dev 入口执行，避免自定义域名被 Access 或尚未生效。');
+          }
+          try {
+            await waitForWorkerHealth(candidate, onLog);
+            await waitForWorkerRuntimeReady(candidate, onLog);
+            bootstrap = await triggerDeployBootstrap(candidate, bootstrapToken, onLog);
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            bootstrap = { ok: false, webhookUrl: '', reason };
+            if (candidate !== bootstrapCandidates.at(-1)) {
+              onLog(
+                reason === 'cloudflare_access_protected'
+                  ? '当前 Worker 入口被 Cloudflare Access 拦截，切换备用入口重试。'
+                  : `当前 Worker 入口不可用（${reason}），切换备用入口重试。`,
+              );
+              continue;
+            }
+            break;
+          }
+          if (bootstrap.ok || bootstrap.reason !== 'cloudflare_access_protected') break;
+          if (candidate !== bootstrapCandidates.at(-1)) {
+            onLog('当前 Worker 入口被 Cloudflare Access 拦截，切换备用入口重试。');
+          }
+        }
+        if (!bootstrap.ok) {
+          const primaryReason = bootstrap.reason || 'unknown';
+          onLog(`Worker 部署引导主链路失败：${primaryReason}`);
+          onLog('正在切换到 Cloudflare API + Telegram API 兜底初始化...');
+          const runtimeVars: Record<string, string> = results.final_worker?.finalVars
+            || results.initial_worker?.firstVars
+            || {};
+          const publicWorkerUrl = normalizeHttpUrl(String(results.endpoint.workerUrl || bootstrapWorkerUrl || ''));
+          const fallback = await triggerDeployBootstrapFallbackDirect({
+            token,
+            accountId,
+            namespaceId: String(results.resources.kv.namespaceId || ''),
+            botToken: form.botToken,
+            adminChatId: form.adminChatId,
+            workerUrl: publicWorkerUrl,
+            webhookPath: runtimeVars.WEBHOOK_PATH || '/webhook',
+            webhookSecret,
+            panelUrl: buildAdminPanelEntryUrl(publicWorkerUrl)
+              || String(results.final_worker?.effectivePanelTargetUrl || results.final_worker?.effectivePanelUrl || ''),
+            adminPanelUser: String(runtimeVars.ADMIN_PANEL_USER || 'admin').trim() || 'admin',
+            runtimeVars,
+            onLog,
+          });
+          if (fallback.ok) {
+            bootstrap = { ok: true, webhookUrl: fallback.webhookUrl, reason: '' };
+          } else {
+            const combinedReason = [primaryReason, fallback.reason]
+              .map((value) => String(value || '').trim())
+              .filter(Boolean)
+              .filter((value, index, values) => values.indexOf(value) === index)
+              .join('; ');
+            bootstrap = { ok: false, webhookUrl: fallback.webhookUrl, reason: combinedReason || 'unknown' };
+          }
+        }
         if (bootstrap.ok) {
           onLog(`Webhook 已设置: ${bootstrap.webhookUrl || `${getUrlOrigin(results.endpoint.workerUrl)}/webhook`}`);
-        } else {
-          onLog(`部署引导警告: ${bootstrap.reason}`);
-        }
-        if (bootstrap.ok) {
           const cleanup = await deleteWorkerSecret(token, accountId, workerName, 'DEPLOY_BOOTSTRAP_TOKEN');
           if (cleanup.ok) {
             onLog('部署引导已完成，临时 DEPLOY_BOOTSTRAP_TOKEN 已从 Worker Secret 删除。');
