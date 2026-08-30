@@ -24,7 +24,10 @@
       </div>
 
       <n-alert v-if="!adminStore.passwordReady" type="warning" :show-icon="false" class="auth-alert">
-        {{ t('auth.passwordNotReady') }}
+        <div>{{ t('auth.passwordNotReady') }}</div>
+        <n-button class="auth-alert-action" size="small" secondary :loading="checking" @click="recheckPasswordState">
+          {{ t('auth.recheckPassword') }}
+        </n-button>
       </n-alert>
       <n-alert v-else-if="adminStore.bootstrapNotifyError" type="error" :show-icon="false" class="auth-alert">
         {{ t('auth.bootstrapNotifyError', { error: adminStore.bootstrapNotifyError }) }}
@@ -53,6 +56,12 @@
           {{ t('auth.login') }}
         </n-button>
       </n-form>
+
+      <div class="recovery-help">
+        <strong>{{ t('auth.forgotPasswordTitle') }}</strong>
+        <p>{{ t('auth.forgotPasswordDesc') }}</p>
+        <p>{{ t('auth.deploymentRecoveryHint') }}</p>
+      </div>
     </n-card>
   </div>
 </template>
@@ -63,19 +72,33 @@ import { useRouter } from 'vue-router';
 import { NAlert, NButton, NCard, NForm, NFormItem, NInput, useMessage } from 'naive-ui';
 import { Icon } from '@iconify/vue';
 import { useI18n } from 'vue-i18n';
-import { loginWithPassword } from '../services/api';
+import { fetchAuthState, loginWithPassword } from '../services/api';
 import { adminStore, setAuthState } from '../stores/admin';
 
 const router = useRouter();
 const message = useMessage();
 const { t } = useI18n();
 const loading = ref(false);
+const checking = ref(false);
 const password = ref('');
 
 function formatTime(value) {
   if (!value) return '-';
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+async function recheckPasswordState() {
+  checking.value = true;
+  try {
+    const data = await fetchAuthState({ force: true });
+    setAuthState(data);
+    message.success(data.passwordReady ? t('auth.passwordReadyNow') : t('auth.passwordStillNotReady'));
+  } catch (error) {
+    message.error(error.message || t('auth.recheckFailed'));
+  } finally {
+    checking.value = false;
+  }
 }
 
 async function handleLogin() {
@@ -95,3 +118,26 @@ async function handleLogin() {
   }
 }
 </script>
+
+<style scoped>
+.auth-alert-action {
+  margin-top: 12px;
+}
+
+.recovery-help {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--panel-border);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.recovery-help strong {
+  color: var(--text-primary);
+}
+
+.recovery-help p {
+  margin: 6px 0 0;
+}
+</style>

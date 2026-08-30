@@ -8,8 +8,8 @@
           <p>{{ t('messages.desc') }}</p>
         </div>
         <div class="panel-toolbar">
-          <n-button type="primary" :loading="saving" @click="save">{{ t('messages.save') }}</n-button>
-          <n-button secondary :loading="loading" @click="load(true)">{{ t('messages.reload') }}</n-button>
+          <n-button type="primary" :loading="saving" :disabled="!isDirty" @click="save">{{ t('messages.save') }}</n-button>
+          <n-button secondary :loading="loading" @click="reload">{{ t('messages.reload') }}</n-button>
         </div>
       </div>
     </n-card>
@@ -128,7 +128,8 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { onBeforeRouteLeave } from 'vue-router';
 import { NButton, NCard, NForm, NFormItem, NGi, NGrid, NInput, NSelect, NSpace, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchSystemConfig, saveSystemConfig, uploadWelcomeMedia } from '../services/api';
@@ -140,6 +141,7 @@ const saving = ref(false);
 const uploadingMedia = ref(false);
 const selectedWelcomeMediaFile = ref(null);
 const welcomeMediaInputRef = ref(null);
+const savedSnapshot = ref('');
 
 const form = reactive({
   WELCOME_TYPE: 'text',
@@ -149,6 +151,9 @@ const form = reactive({
   BOT_SHORT_DESCRIPTION: '',
   BLOCKED_TEXT: '',
 });
+
+const formSnapshot = computed(() => JSON.stringify(form));
+const isDirty = computed(() => Boolean(savedSnapshot.value) && formSnapshot.value !== savedSnapshot.value);
 
 const welcomeTypeOptions = computed(() => [
   { label: t('messages.welcomeTypeText'), value: 'text' },
@@ -168,6 +173,12 @@ function assignConfig(cfg = {}) {
   form.BOT_DESCRIPTION = cfg.BOT_DESCRIPTION || cfg.BOT_DESCRIPTION_DEFAULT || '';
   form.BOT_SHORT_DESCRIPTION = cfg.BOT_SHORT_DESCRIPTION || cfg.BOT_SHORT_DESCRIPTION_DEFAULT || '';
   form.BLOCKED_TEXT = cfg.BLOCKED_TEXT || '';
+  savedSnapshot.value = formSnapshot.value;
+}
+
+function reload() {
+  if (isDirty.value && !window.confirm(t('app.unsavedConfirm'))) return;
+  load(true);
 }
 
 async function load(force = false) {
@@ -243,7 +254,18 @@ async function uploadSelectedWelcomeMedia() {
   }
 }
 
-onMounted(() => load(false));
+function handleBeforeUnload(event) {
+  if (!isDirty.value) return;
+  event.preventDefault();
+  event.returnValue = '';
+}
+
+onBeforeRouteLeave(() => !isDirty.value || window.confirm(t('app.unsavedConfirm')));
+onMounted(() => {
+  window.addEventListener('beforeunload', handleBeforeUnload);
+  load(false);
+});
+onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnload));
 </script>
 
 <style scoped>

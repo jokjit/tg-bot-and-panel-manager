@@ -94,9 +94,11 @@ function getPrivateWranglerPath(env = {}) {
 // accounts
 const accountsFile = () => path.join(app.getPath('userData'), 'accounts.json')
 const activeFile = () => path.join(app.getPath('userData'), 'active-account.txt')
+const deploymentResumeFile = () => path.join(app.getPath('userData'), 'deployment-resume.json')
 let activeAccountId = null
 let volatileAccounts = null
 const deploymentResumeByAccountId = new Map()
+let deploymentResumesLoaded = false
 
 function buildDeploymentFingerprint(params = {}) {
   const source = params && typeof params === 'object' ? params : {}
@@ -107,7 +109,42 @@ function buildDeploymentFingerprint(params = {}) {
     if (typeof value === 'function' || value === undefined) continue
     filtered[key] = value
   }
-  return JSON.stringify(filtered)
+  return crypto.createHash('sha256').update(JSON.stringify(filtered)).digest('hex')
+}
+
+function loadDeploymentResumes() {
+  if (deploymentResumesLoaded) return
+  deploymentResumesLoaded = true
+  try {
+    const parsed = JSON.parse(fs.readFileSync(deploymentResumeFile(), 'utf8'))
+    for (const [accountId, resume] of Object.entries(parsed || {})) {
+      const fingerprint = String(resume?.fingerprint || '').trim()
+      const state = sanitizeDeploymentResumeState(resume?.state || {})
+      if (accountId && /^[a-f0-9]{64}$/.test(fingerprint) && state.completedSteps.length > 0) {
+        deploymentResumeByAccountId.set(accountId, { fingerprint, state })
+      }
+    }
+  } catch {}
+}
+
+function saveDeploymentResumes() {
+  const payload = {}
+  for (const [accountId, resume] of deploymentResumeByAccountId.entries()) {
+    if (!accountId || !resume?.fingerprint) continue
+    payload[accountId] = {
+      fingerprint: resume.fingerprint,
+      state: sanitizeDeploymentResumeState(resume.state),
+    }
+  }
+  const target = deploymentResumeFile()
+  const temp = `${target}.tmp`
+  try {
+    fs.writeFileSync(temp, JSON.stringify(payload), 'utf8')
+    fs.renameSync(temp, target)
+  } catch (error) {
+    try { fs.rmSync(temp, { force: true }) } catch {}
+    console.error('Unable to persist deployment resume state', error)
+  }
 }
 
 function redactAccountSecrets(account) {
@@ -3813,10 +3850,12 @@ handleTrustedIpc('run-action', async (_, action, params) => {
   const account = getActiveAccount()
   const env = buildEnv(account)
   const accountKey = String(account?.id || account?.accountId || 'default')
+  loadDeploymentResumes()
   const fingerprint = buildDeploymentFingerprint(params)
   const pending = action === 'first-deploy' ? deploymentResumeByAccountId.get(accountKey) : null
   if (action !== 'first-deploy' || (pending && pending.fingerprint !== fingerprint)) {
     deploymentResumeByAccountId.delete(accountKey)
+    saveDeploymentResumes()
   }
   const effectiveParams = pending?.fingerprint === fingerprint && !params?.deploymentState
     ? { ...(params || {}), deploymentState: pending.state }
@@ -3829,14 +3868,18 @@ handleTrustedIpc('run-action', async (_, action, params) => {
   }
   try {
     const result = await runAction(action, effectiveParams, env)
-    if (action === 'first-deploy') deploymentResumeByAccountId.delete(accountKey)
+    if (action === 'first-deploy') {
+      deploymentResumeByAccountId.delete(accountKey)
+      saveDeploymentResumes()
+    }
     return result
   } catch (error) {
     if (action === 'first-deploy' && error?.deploymentState?.completedSteps?.length) {
       deploymentResumeByAccountId.set(accountKey, {
         fingerprint,
-        state: normalizeDeploymentResumeState(error.deploymentState),
+        state: sanitizeDeploymentResumeState(normalizeDeploymentResumeState(error.deploymentState)),
       })
+      saveDeploymentResumes()
     }
     if (error?.deploymentStep) {
       const completed = Array.isArray(error.completedSteps) && error.completedSteps.length > 0
@@ -3849,6 +3892,26 @@ handleTrustedIpc('run-action', async (_, action, params) => {
     }
     throw error
   }
+})
+
+handleTrustedIpc('deployment-resume:get', (_, params) => {
+  loadDeploymentResumes()
+  const account = getActiveAccount()
+  const accountKey = String(account?.id || account?.accountId || 'default')
+  const pending = deploymentResumeByAccountId.get(accountKey)
+  if (!pending || pending.fingerprint !== buildDeploymentFingerprint(params || {})) {
+    return { available: false, completedSteps: [] }
+  }
+  return { available: true, completedSteps: [...pending.state.completedSteps] }
+})
+
+handleTrustedIpc('deployment-resume:discard', () => {
+  loadDeploymentResumes()
+  const account = getActiveAccount()
+  const accountKey = String(account?.id || account?.accountId || 'default')
+  deploymentResumeByAccountId.delete(accountKey)
+  saveDeploymentResumes()
+  return true
 })
 
 handleTrustedIpc('dashboard:snapshot', async () => {
@@ -3886,7 +3949,9 @@ handleTrustedIpc('accounts:add', (_, account) => {
   return publicAccounts(accounts)
 })
 handleTrustedIpc('accounts:delete', (_, id) => {
+  loadDeploymentResumes()
   deploymentResumeByAccountId.delete(String(id || ''))
+  saveDeploymentResumes()
   const before = loadAccounts()
   const removed = before.find(a => a.id === id)
   const accounts = before.filter(a => a.id !== id)
@@ -3918,7 +3983,9 @@ handleTrustedIpc('accounts:saveDeployPrefs', (_, prefs, accountId) => {
   return saveActiveDeployPrefsPatch(prefs, accountId)
 })
 handleTrustedIpc('accounts:clearCredentials', (_, id) => {
+  loadDeploymentResumes()
   deploymentResumeByAccountId.delete(String(id || ''))
+  saveDeploymentResumes()
   const accounts = loadAccounts()
   const index = accounts.findIndex((item) => item.id === id)
   if (index < 0) return publicAccounts(accounts)
@@ -3936,6 +4003,9 @@ handleTrustedIpc('data:clear', () => {
   try { fs.rmSync(path.join(dir, 'accounts.json'), { force: true }) } catch {}
   try { fs.rmSync(path.join(dir, 'active-account.txt'), { force: true }) } catch {}
   try { fs.rmSync(path.join(dir, 'cf-accounts'), { recursive: true, force: true }) } catch {}
+  try { fs.rmSync(path.join(dir, 'deployment-resume.json'), { force: true }) } catch {}
+  deploymentResumeByAccountId.clear()
+  deploymentResumesLoaded = true
   activeAccountId = null
   volatileAccounts = null
 })
@@ -3944,6 +4014,7 @@ handleTrustedIpc('open-external', (_, url) => openExternalHttpUrl(url))
 
 app.whenReady().then(() => {
   try { activeAccountId = fs.readFileSync(activeFile(), 'utf8').trim() } catch {}
+  loadDeploymentResumes()
   createWindow()
 })
 app.on('window-all-closed', () => app.quit())

@@ -119,13 +119,23 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (resp) => resp,
   (error) => {
-    if (error?.response?.status === 401) {
+    const status = Number(error?.response?.status || 0);
+    if (status === 401 || status === 403) {
       setCsrfToken('');
     }
     const message = error?.response?.data?.error || error?.message || '请求失败';
-    return Promise.reject(new Error(message));
+    const requestError = new Error(message, { cause: error });
+    requestError.name = 'ApiError';
+    requestError.status = status;
+    requestError.code = error?.code || '';
+    requestError.isNetworkError = !error?.response;
+    return Promise.reject(requestError);
   },
 );
+
+export function isAuthenticationError(error) {
+  return error?.status === 401 || error?.status === 403;
+}
 
 function normalizeRequestParams(params = {}) {
   const entries = Object.entries(params || {})
@@ -201,8 +211,11 @@ function cachedGet(path, options = {}) {
   return request;
 }
 
-export function fetchAuthState() {
-  return cachedGet('/admin/api/auth/me', { ttlMs: READ_CACHE_TTL.auth }).then((data) => {
+export function fetchAuthState(options = {}) {
+  return cachedGet('/admin/api/auth/me', {
+    ttlMs: READ_CACHE_TTL.auth,
+    force: Boolean(options.force),
+  }).then((data) => {
     setCsrfToken(data?.authenticated ? data?.csrfToken : '');
     return data;
   });

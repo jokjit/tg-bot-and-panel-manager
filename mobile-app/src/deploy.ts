@@ -1968,6 +1968,15 @@ async function upsertWorkerSecrets(
   });
 }
 
+export async function verifyCloudflareCredentials(tokenInput: string, accountIdInput: string): Promise<void> {
+  const token = String(tokenInput || '').trim();
+  const accountId = String(accountIdInput || '').trim();
+  if (!token) throw new Error('missing Cloudflare API Token');
+  if (!accountId) throw new Error('missing Cloudflare Account ID');
+  const response = await cfApi(token, accountId, `/accounts/${accountId}`);
+  if (!response.ok) throw new Error(response.reason || `http_${response.status}`);
+}
+
 async function deleteWorkerSecret(
   token: string,
   accountId: string,

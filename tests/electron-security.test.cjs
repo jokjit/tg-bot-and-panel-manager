@@ -39,13 +39,22 @@ test('Electron deployment resume state never retains bootstrap credentials', () 
   const state = sanitizeDeploymentResumeState({
     results: {
       prepare: { deployBootstrapToken: 'old-token' },
-      worker: { workerUrl: 'https://worker.example.com', deployBootstrapToken: 'leaked-token' },
+      worker: {
+        workerUrl: 'https://worker.example.com',
+        deployBootstrapToken: 'leaked-token',
+        nested: { authorization: 'Bearer secret', resourceId: 'safe-id' },
+      },
     },
     completedSteps: ['prepare', 'worker'],
   })
 
   assert.deepEqual(state, {
-    results: { worker: { workerUrl: 'https://worker.example.com' } },
+    results: {
+      worker: {
+        workerUrl: 'https://worker.example.com',
+        nested: { resourceId: 'safe-id' },
+      },
+    },
     completedSteps: ['worker'],
   })
 })

@@ -25,6 +25,16 @@
       </div>
     </n-card>
 
+    <n-alert v-if="statusUnavailable" type="warning" class="status-alert" closable @close="statusUnavailable = ''">
+      <template #header>{{ t('dashboard.statusUnavailableTitle') }}</template>
+      {{ t('dashboard.statusUnavailableDesc') }}
+      <template #action>
+        <n-button text type="warning" :loading="refreshing" @click="refresh(true)">
+          {{ t('dashboard.retryStatus') }}
+        </n-button>
+      </template>
+    </n-alert>
+
     <div class="summary-metric-grid dashboard-metrics">
       <n-card
         v-for="card in statusCards"
@@ -84,13 +94,17 @@
 
       <n-gi span="24 m:14">
         <n-card class="glass-card" :bordered="false">
-          <div class="panel-heading compact">
-            <div>
-              <h3>{{ t('dashboard.statusJson') }}</h3>
-              <p>{{ t('dashboard.rawData') }}</p>
-            </div>
-          </div>
-          <pre class="mono-box">{{ prettyStatus }}</pre>
+          <n-collapse arrow-placement="right">
+            <n-collapse-item name="diagnostics">
+              <template #header>
+                <div class="diagnostics-heading">
+                  <h3>{{ t('dashboard.advancedDiagnostics') }}</h3>
+                  <p>{{ t('dashboard.rawData') }}</p>
+                </div>
+              </template>
+              <pre class="mono-box">{{ prettyStatus }}</pre>
+            </n-collapse-item>
+          </n-collapse>
         </n-card>
       </n-gi>
     </n-grid>
@@ -101,16 +115,26 @@
 import { computed, onMounted, ref } from 'vue';
 import { Icon } from '@iconify/vue';
 import { useRouter } from 'vue-router';
-import { NButton, NCard, NGi, NGrid, NTag, useMessage } from 'naive-ui';
+import { NAlert, NButton, NCard, NCollapse, NCollapseItem, NGi, NGrid, NTag, useDialog, useMessage } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { adminStore, clearAuthState, setLoginState, setStatusData } from '../stores/admin';
-import { deleteWebhook, fetchStatus, getWebhookInfo, setWebhook, syncBotCommands } from '../services/api';
+import {
+  deleteWebhook,
+  fetchStatus,
+  getWebhookInfo,
+  isAuthenticationError,
+  setWebhook,
+  syncBotCommands,
+} from '../services/api';
 
 const router = useRouter();
 const message = useMessage();
+const dialog = useDialog();
 const { t } = useI18n();
 const loadingWebhook = ref(false);
 const webhookResult = ref('');
+const refreshing = ref(false);
+const statusUnavailable = ref('');
 
 const statusData = computed(() => adminStore.statusData || null);
 const prettyStatus = computed(() => JSON.stringify(statusData.value || {}, null, 2));
@@ -203,14 +227,23 @@ const statusCards = computed(() => [
 ]);
 
 async function refresh(force = false) {
+  refreshing.value = true;
   try {
     const data = await fetchStatus({ force });
     setStatusData(data);
     setLoginState(true, adminStore.username || t('auth.defaultAdmin'));
+    statusUnavailable.value = '';
   } catch (error) {
-    clearAuthState();
-    message.error(error.message || t('dashboard.statusFailed'));
-    router.replace('/login');
+    if (isAuthenticationError(error)) {
+      clearAuthState();
+      message.error(t('app.sessionExpired'));
+      router.replace('/login');
+      return;
+    }
+    statusUnavailable.value = error.message || t('dashboard.statusFailed');
+    message.warning(t('dashboard.statusUnavailableTitle'));
+  } finally {
+    refreshing.value = false;
   }
 }
 
@@ -240,7 +273,7 @@ async function handleGetWebhook() {
   }
 }
 
-async function handleDeleteWebhook() {
+async function deleteWebhookNow() {
   loadingWebhook.value = true;
   try {
     const data = await deleteWebhook();
@@ -252,6 +285,16 @@ async function handleDeleteWebhook() {
   } finally {
     loadingWebhook.value = false;
   }
+}
+
+function handleDeleteWebhook() {
+  dialog.warning({
+    title: t('dashboard.deleteWebhookConfirmTitle'),
+    content: t('dashboard.deleteWebhookConfirmDesc'),
+    positiveText: t('dashboard.confirmDeleteWebhook'),
+    negativeText: t('app.cancel'),
+    onPositiveClick: deleteWebhookNow,
+  });
 }
 
 async function handleSyncCommands() {
@@ -277,6 +320,21 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.status-alert {
+  border-radius: 8px;
+}
+
+.diagnostics-heading h3,
+.diagnostics-heading p {
+  margin: 0;
+}
+
+.diagnostics-heading p {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
 .dashboard-hero__meta {

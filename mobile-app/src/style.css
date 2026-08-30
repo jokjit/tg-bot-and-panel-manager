@@ -714,6 +714,38 @@ input::placeholder {
   transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
 
+.mi-dashboard-grid[hidden],
+.mi-dashboard-head-card[hidden] {
+  display: none !important;
+}
+
+.mi-validation {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  color: var(--mi-error);
+  background: var(--mi-status-error-bg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mi-onboarding-card {
+  padding: 18px;
+}
+
+.mi-onboarding-steps {
+  margin: 16px 0;
+  padding-left: 22px;
+  display: grid;
+  gap: 10px;
+  color: var(--mi-text);
+  font-size: 14px;
+}
+
+.mi-onboarding-card button {
+  width: 100%;
+}
+
 .mi-dashboard-quota[hidden] {
   display: none !important;
 }
@@ -1568,11 +1600,53 @@ button.ghost:hover:not(:disabled) {
   padding: 14px 16px;
   border-bottom: 1px solid var(--mi-line);
   background: linear-gradient(180deg, var(--mi-log-head-bg-top), var(--mi-log-head-bg-bottom));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .mi-log-head h2 {
   margin: 0;
   font-size: 18px;
+}
+
+.mi-log-head button {
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.mi-logs-empty {
+  margin: 0;
+  min-height: 220px;
+  padding: 32px 20px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--mi-sub);
+  background: var(--mi-log-bg);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.mi-field-hint,
+.mi-field-error {
+  display: block;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.mi-field-hint {
+  color: var(--mi-sub);
+}
+
+.mi-field-error {
+  color: var(--mi-error);
+}
+
+input[aria-invalid="true"] {
+  border-color: var(--mi-error);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mi-error) 16%, transparent);
 }
 
 .logs {

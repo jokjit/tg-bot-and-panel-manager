@@ -42,15 +42,19 @@ function sanitizeDeploymentResumeState(value = {}) {
     ? source.results
     : {}
   const results = {}
+  const sanitizeValue = (input) => {
+    if (Array.isArray(input)) return input.map(sanitizeValue)
+    if (!input || typeof input !== 'object') return input
+    const output = {}
+    for (const [key, nested] of Object.entries(input)) {
+      if (/(token|secret|password|authorization|admin.?chat)/i.test(key)) continue
+      output[key] = sanitizeValue(nested)
+    }
+    return output
+  }
   for (const [id, result] of Object.entries(sourceResults)) {
     if (id === 'prepare') continue
-    if (result && typeof result === 'object' && !Array.isArray(result)) {
-      const sanitizedResult = { ...result }
-      delete sanitizedResult.deployBootstrapToken
-      results[id] = sanitizedResult
-    } else {
-      results[id] = result
-    }
+    results[id] = sanitizeValue(result)
   }
   const completedSteps = Array.isArray(source.completedSteps)
     ? source.completedSteps.filter((step) => String(step || '').trim() !== 'prepare')

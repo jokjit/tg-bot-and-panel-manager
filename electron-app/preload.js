@@ -4,6 +4,10 @@ if (process.isMainFrame) {
   const api = Object.freeze({
   runAction: (action, params) => ipcRenderer.invoke('run-action', action, params),
   dashboardSnapshot: () => ipcRenderer.invoke('dashboard:snapshot'),
+  deploymentResume: Object.freeze({
+    get: (params) => ipcRenderer.invoke('deployment-resume:get', params),
+    discard: () => ipcRenderer.invoke('deployment-resume:discard'),
+  }),
   onOutput: (cb) => {
     if (typeof cb !== 'function') return () => {}
     const listener = (_, data) => cb(data)

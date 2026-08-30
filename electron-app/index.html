@@ -1401,6 +1401,7 @@ const i18n = {
     error_prefix: "错误",
     no_panel_url_alert: "当前账号没有面板地址",
     missing_required_alert: "请填写 BOT_TOKEN 和 ADMIN_CHAT_ID",
+    resume_prompt: "发现未完成的部署。\n\n选择“确定”将从已完成步骤继续；选择“取消”将放弃断点并重新开始。",
     add_required_alert: "账号名称、API Token、Account ID 为必填项",
     delete_account_confirm: "确认删除这个账号？",
     clear_data_confirm: "确认清除所有本地账号数据？该操作不可恢复。",
@@ -1556,6 +1557,7 @@ const i18n = {
     error_prefix: "Error",
     no_panel_url_alert: "No panel URL configured for this account",
     missing_required_alert: "Please fill BOT_TOKEN and ADMIN_CHAT_ID",
+    resume_prompt: "An unfinished deployment was found.\n\nChoose OK to continue after completed steps, or Cancel to discard the checkpoint and start over.",
     add_required_alert: "Account Name, API Token, and Account ID are required",
     delete_account_confirm: "Delete this account?",
     clear_data_confirm: "Clear all local account data? This cannot be undone.",
@@ -2518,6 +2520,13 @@ async function onDeployStart() {
   try {
     await saveDeployForm(false)
   } catch {}
+
+  if (params.deployPanel) {
+    const resume = await window.api.deploymentResume.get(params)
+    if (resume?.available && !confirm(t("resume_prompt"))) {
+      await window.api.deploymentResume.discard()
+    }
+  }
 
   output.textContent = ""
   const action = params.deployPanel ? "first-deploy" : "deploy-worker"

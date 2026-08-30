@@ -7,24 +7,34 @@ import { Miniflare } from 'miniflare';
 const root = resolve(import.meta.dirname, '..');
 const port = Number(process.env.TG_BOT_LOCAL_WORKER_PORT || 8787);
 const previewPassword = String(process.env.TG_BOT_LOCAL_ADMIN_PASSWORD || 'local-preview-password');
+const panelOrigin = String(process.env.TG_BOT_LOCAL_PANEL_ORIGIN || 'http://127.0.0.1:5173').replace(/\/$/, '');
+const workerScript = await readFile(resolve(root, 'worker.bundle.js'), 'utf8');
 
 const mf = new Miniflare({
-  modules: true,
-  scriptPath: resolve(root, 'worker.bundle.js'),
-  compatibilityDate: '2026-04-16',
-  kvNamespaces: ['BOT_KV'],
-  d1Databases: ['DB'],
-  r2Buckets: ['IMAGE_BUCKET'],
-  bindings: {
-    ADMIN_CHAT_ID: '-100000000001',
-    PUBLIC_BASE_URL: `http://127.0.0.1:${port}`,
-    TOPIC_MODE: 'false',
-    USER_VERIFICATION: 'false',
-  },
-  outboundService: () => new Response(JSON.stringify({ ok: false, description: 'local preview blocks outbound requests' }), {
-    status: 502,
-    headers: { 'content-type': 'application/json' },
-  }),
+  workers: [{
+    config: {
+      name: 'tg-bot-local-preview',
+      type: 'worker',
+      compatibilityDate: '2026-04-16',
+      manifest: {
+        mainModule: 'worker.bundle.js',
+        modulesRoot: root,
+        modules: {
+          'worker.bundle.js': { type: 'esm', contents: workerScript },
+        },
+      },
+      env: {
+        BOT_KV: { type: 'kv' },
+        DB: { type: 'd1' },
+        IMAGE_BUCKET: { type: 'r2' },
+        ADMIN_CHAT_ID: { type: 'text', value: '-100000000001' },
+        ADMIN_PANEL_URL: { type: 'text', value: panelOrigin },
+        PUBLIC_BASE_URL: { type: 'text', value: `http://127.0.0.1:${port}` },
+        TOPIC_MODE: { type: 'text', value: 'false' },
+        USER_VERIFICATION: { type: 'text', value: 'false' },
+      },
+    },
+  }],
 });
 
 await mf.ready;

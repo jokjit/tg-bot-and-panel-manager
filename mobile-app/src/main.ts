@@ -6,6 +6,7 @@ import {
   fetchDashboardSnapshot,
   loadSavedFormState,
   runDeploy,
+  verifyCloudflareCredentials,
   type DashboardSnapshot,
   type DeployFormState,
   type DeploymentResumeState,
@@ -36,6 +37,7 @@ interface UiCache {
   theme: Theme;
   activeAccountId: string;
   accounts: AccountState[];
+  deploymentResumes?: Record<string, { fingerprint: string; state: DeploymentResumeState }>;
 }
 
 interface LocaleDict {
@@ -270,7 +272,7 @@ const i18n: Record<Locale, LocaleDict> = {
     add_account: '添加账号',
     delete_account: '删除账号',
     manage_accounts: '管理账号',
-    manage_accounts_desc: '切换账号、登录、登出、开始狂欢。',
+    manage_accounts_desc: '切换账号、更新凭据并管理独立部署配置。',
     account_manager_add: '添加一个账号',
     account_manager_close: '关闭',
     account_manager_active: '激活账号',
@@ -299,11 +301,29 @@ const i18n: Record<Locale, LocaleDict> = {
     modal_email_label: '邮箱（可选）',
     modal_email_ph: '仅用于账号展示',
     modal_clone: '复制当前账号配置',
+    modal_token_hint: 'Token 需要 Account Settings: Read、Workers Scripts: Edit、KV/D1/R2/Pages: Edit 权限。凭据仅保存在系统安全存储。',
+    modal_required: '此项为必填项',
+    modal_test_connection: '测试连接',
+    modal_testing_connection: '正在测试...',
+    modal_test_success: '连接成功，凭据可用',
+    modal_test_failed: '连接失败：{message}',
     cancel: '取消',
     confirm: '确认',
 
     deploy_title: '部署配置',
     deploy_desc: '先保存配置，再执行部署。',
+    deploy_validation_title: '请先补齐：{fields}',
+    deploy_missing_credentials: 'Cloudflare Token 与 Account ID（请到“账号”中配置）',
+    deploy_field_bot_token: 'BOT_TOKEN',
+    deploy_field_admin_chat: 'ADMIN_CHAT_ID',
+    deploy_field_worker_name: 'Worker 名称',
+    deploy_required: '必填',
+    onboarding_title: '完成首次部署',
+    onboarding_desc: '按顺序完成账号凭据、机器人参数和部署。',
+    onboarding_step_account: '添加 Cloudflare 账号',
+    onboarding_step_check: '测试 Token 与 Account ID',
+    onboarding_step_deploy: '填写机器人参数并部署',
+    onboarding_action: '配置账号',
     group_cf: 'Cloudflare 参数',
     group_bot: '机器人参数',
 
@@ -356,6 +376,14 @@ const i18n: Record<Locale, LocaleDict> = {
     status_deploy_fail: '部署失败',
 
     logs_title: '执行日志',
+    logs_empty: '还没有执行日志。开始部署后，步骤和错误会显示在这里。',
+    logs_copy: '复制日志',
+    logs_copied: '日志已复制',
+    logs_copy_failed: '复制失败',
+    resume_title: '发现未完成的部署',
+    resume_desc: '可从已完成步骤继续，或放弃断点重新开始。',
+    resume_continue: '继续部署',
+    resume_restart: '重新开始',
     log_saved: '配置已保存到本地。',
     log_account_created: '已创建新账号：{name}',
     log_account_updated: '已更新账号：{name}',
@@ -479,7 +507,7 @@ const i18n: Record<Locale, LocaleDict> = {
     add_account: 'Add Account',
     delete_account: 'Delete',
     manage_accounts: 'Manage Accounts',
-    manage_accounts_desc: 'Switch accounts, sign in, sign out.',
+    manage_accounts_desc: 'Switch accounts, update credentials, and manage isolated deploy profiles.',
     account_manager_add: 'Add an account',
     account_manager_close: 'Close',
     account_manager_active: 'Active',
@@ -508,11 +536,29 @@ const i18n: Record<Locale, LocaleDict> = {
     modal_email_label: 'Email (Optional)',
     modal_email_ph: 'Display only',
     modal_clone: 'Clone current account config',
+    modal_token_hint: 'The token needs Account Settings: Read plus Workers Scripts, KV, D1, R2, and Pages edit permissions. Credentials stay in secure system storage.',
+    modal_required: 'Required field',
+    modal_test_connection: 'Test Connection',
+    modal_testing_connection: 'Testing...',
+    modal_test_success: 'Connection succeeded. The credentials are valid.',
+    modal_test_failed: 'Connection failed: {message}',
     cancel: 'Cancel',
     confirm: 'Confirm',
 
     deploy_title: 'Deploy Config',
     deploy_desc: 'Save your config first, then run deploy.',
+    deploy_validation_title: 'Complete these fields first: {fields}',
+    deploy_missing_credentials: 'Cloudflare Token and Account ID (configure them under Accounts)',
+    deploy_field_bot_token: 'BOT_TOKEN',
+    deploy_field_admin_chat: 'ADMIN_CHAT_ID',
+    deploy_field_worker_name: 'Worker name',
+    deploy_required: 'Required',
+    onboarding_title: 'Complete Your First Deployment',
+    onboarding_desc: 'Set up credentials, bot parameters, and deployment in order.',
+    onboarding_step_account: 'Add a Cloudflare account',
+    onboarding_step_check: 'Test the Token and Account ID',
+    onboarding_step_deploy: 'Fill in bot parameters and deploy',
+    onboarding_action: 'Configure Account',
     group_cf: 'Cloudflare Settings',
     group_bot: 'Bot Settings',
 
@@ -565,6 +611,14 @@ const i18n: Record<Locale, LocaleDict> = {
     status_deploy_fail: 'Deploy failed',
 
     logs_title: 'Execution Logs',
+    logs_empty: 'No logs yet. Deployment steps and errors will appear here after you start.',
+    logs_copy: 'Copy Logs',
+    logs_copied: 'Logs copied',
+    logs_copy_failed: 'Copy failed',
+    resume_title: 'Unfinished Deployment Found',
+    resume_desc: 'Continue after completed steps or discard the checkpoint and start over.',
+    resume_continue: 'Continue Deploy',
+    resume_restart: 'Start Over',
     log_saved: 'Config has been saved locally.',
     log_account_created: 'Account created: {name}',
     log_account_updated: 'Account updated: {name}',
@@ -656,6 +710,18 @@ app.innerHTML = `
     </header>
 
     <section id="homeDashboardSection" class="mi-dashboard-view mi-view-pane" data-view="home">
+      <section id="onboardingCard" class="mi-card mi-onboarding-card" hidden>
+        <div class="mi-card__head">
+          <h2 id="onboardingTitle"></h2>
+          <p id="onboardingDesc"></p>
+        </div>
+        <ol class="mi-onboarding-steps">
+          <li id="onboardingStepAccount"></li>
+          <li id="onboardingStepCheck"></li>
+          <li id="onboardingStepDeploy"></li>
+        </ol>
+        <button id="onboardingAction" type="button" class="primary"></button>
+      </section>
       <section class="mi-card mi-dashboard-head-card">
         <div class="mi-dashboard-head">
           <div class="mi-dashboard-head__title">
@@ -876,13 +942,16 @@ app.innerHTML = `
       </div>
 
       <p id="status" class="status idle"></p>
+      <p id="deployValidation" class="mi-validation" hidden></p>
     </section>
 
     <section id="logsSection" class="mi-card mi-log-card mi-view-pane" data-view="logs">
       <div class="mi-log-head">
         <h2 id="logsTitle"></h2>
+        <button id="copyLogsBtn" type="button" class="secondary"></button>
       </div>
-      <pre id="logs" class="logs"></pre>
+      <p id="logsEmpty" class="mi-logs-empty"></p>
+      <pre id="logs" class="logs" hidden></pre>
     </section>
   </main>
 
@@ -927,14 +996,18 @@ app.innerHTML = `
       <label class="mi-modal__field">
         <span id="modalNameLabel"></span>
         <input id="newAccountNameInput" autocomplete="off" />
+        <small id="modalNameError" class="mi-field-error" hidden></small>
       </label>
       <label class="mi-modal__field">
         <span id="modalTokenLabel"></span>
         <input id="newAccountTokenInput" type="password" autocomplete="off" />
+        <small id="modalTokenHint" class="mi-field-hint"></small>
+        <small id="modalTokenError" class="mi-field-error" hidden></small>
       </label>
       <label class="mi-modal__field">
         <span id="modalAccountIdLabel"></span>
         <input id="newAccountIdInput" autocomplete="off" />
+        <small id="modalAccountIdError" class="mi-field-error" hidden></small>
       </label>
       <label class="mi-modal__field">
         <span id="modalEmailLabel"></span>
@@ -946,6 +1019,7 @@ app.innerHTML = `
       </label>
       <div class="mi-modal__actions">
         <button id="cancelAddAccountBtn" type="button" class="secondary"></button>
+        <button id="testAccountBtn" type="button" class="secondary"></button>
         <button id="confirmAddAccountBtn" type="button" class="primary"></button>
       </div>
     </div>
@@ -954,9 +1028,14 @@ app.innerHTML = `
 
 const statusNode = mustQuery<HTMLElement>('#status');
 const logsNode = mustQuery<HTMLElement>('#logs');
+const logsEmptyNode = mustQuery<HTMLElement>('#logsEmpty');
+const copyLogsBtn = mustQuery<HTMLButtonElement>('#copyLogsBtn');
 const saveBtn = mustQuery<HTMLButtonElement>('#saveBtn');
 const clearLogBtn = mustQuery<HTMLButtonElement>('#clearLogBtn');
 const deployBtn = mustQuery<HTMLButtonElement>('#deployBtn');
+const deployValidationNode = mustQuery<HTMLElement>('#deployValidation');
+const onboardingCard = mustQuery<HTMLElement>('#onboardingCard');
+const onboardingAction = mustQuery<HTMLButtonElement>('#onboardingAction');
 const deployPanelSelect = mustQuery<HTMLSelectElement>('#deployPanelSelect');
 const deployImageHostingSelect = mustQuery<HTMLSelectElement>('#deployImageHostingSelect');
 const autoImageDomainSelect = mustQuery<HTMLSelectElement>('#autoImageDomainSelect');
@@ -995,8 +1074,12 @@ const newAccountIdInput = mustQuery<HTMLInputElement>('#newAccountIdInput');
 const newAccountEmailInput = mustQuery<HTMLInputElement>('#newAccountEmailInput');
 const cloneCurrentInput = mustQuery<HTMLInputElement>('#cloneCurrentInput');
 const modalCloneField = mustQuery<HTMLLabelElement>('#modalCloneField');
+const testAccountBtn = mustQuery<HTMLButtonElement>('#testAccountBtn');
 const cancelAddAccountBtn = mustQuery<HTMLButtonElement>('#cancelAddAccountBtn');
 const confirmAddAccountBtn = mustQuery<HTMLButtonElement>('#confirmAddAccountBtn');
+const modalNameError = mustQuery<HTMLElement>('#modalNameError');
+const modalTokenError = mustQuery<HTMLElement>('#modalTokenError');
+const modalAccountIdError = mustQuery<HTMLElement>('#modalAccountIdError');
 const floatingNav = mustQuery<HTMLElement>('#floatingNav');
 const floatingNavIndicator = mustQuery<HTMLElement>('#floatingNavIndicator');
 const navButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.mi-float-nav__btn'));
@@ -1015,8 +1098,10 @@ let scrollFxRaf = 0;
 let accountSwitchQueue: Promise<void> = Promise.resolve();
 let dashboardRequestSeq = 0;
 let dashboardLoading = false;
+let accountValidationShown = false;
 const dashboardCacheByAccountId = new Map<string, DashboardSnapshot>();
 const deploymentResumeByAccountId = new Map<string, { fingerprint: string; state: DeploymentResumeState }>();
+let persistedDeploymentResumes: Record<string, { fingerprint: string; state: DeploymentResumeState }> = {};
 const secureCredentialWritableAccountIds = new Set<string>();
 
 function mustQuery<T extends Element>(selector: string): T {
@@ -1167,8 +1252,40 @@ function cloneFormState(state: DeployFormState): DeployFormState {
   };
 }
 
-function buildDeploymentFingerprint(state: DeployFormState): string {
-  return JSON.stringify(state);
+async function buildDeploymentFingerprint(state: DeployFormState): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify(state));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function sanitizeResumeState(state: DeploymentResumeState): DeploymentResumeState {
+  const clean = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(clean);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !/(token|secret|password|authorization|admin.?chat)/i.test(key))
+      .map(([key, nested]) => [key, clean(nested)]));
+  };
+  return {
+    completedSteps: Array.isArray(state?.completedSteps) ? state.completedSteps.map(String) : [],
+    results: (clean(state?.results || {}) || {}) as Record<string, any>,
+  };
+}
+
+function normalizeStoredDeploymentResumes(
+  input: UiCache['deploymentResumes'] | unknown,
+): Record<string, { fingerprint: string; state: DeploymentResumeState }> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const normalized: Record<string, { fingerprint: string; state: DeploymentResumeState }> = {};
+  for (const [accountId, rawResume] of Object.entries(input)) {
+    const resume = rawResume as Partial<{ fingerprint: string; state: DeploymentResumeState }>;
+    const fingerprint = String(resume?.fingerprint || '').trim();
+    const state = sanitizeResumeState(resume?.state || { results: {}, completedSteps: [] });
+    if (accountId && /^sha256:[a-f0-9]{64}$/.test(fingerprint) && state.completedSteps.length > 0) {
+      normalized[accountId] = { fingerprint, state };
+    }
+  }
+  return normalized;
 }
 
 function stripPersistedCredentials(state: DeployFormState): DeployFormState {
@@ -1204,6 +1321,7 @@ async function loadUiState(defaults: DeployFormState): Promise<UiCache> {
       theme: currentTheme,
       activeAccountId: initialAccount.id,
       accounts: [initialAccount],
+      deploymentResumes: {},
     };
   }
 
@@ -1243,6 +1361,7 @@ async function loadUiState(defaults: DeployFormState): Promise<UiCache> {
       theme,
       activeAccountId: active.id,
       accounts: normalizedAccounts,
+      deploymentResumes: normalizeStoredDeploymentResumes(parsed.deploymentResumes),
     };
   } catch {
     const legacy = await loadSavedFormState();
@@ -1254,6 +1373,7 @@ async function loadUiState(defaults: DeployFormState): Promise<UiCache> {
       theme: currentTheme,
       activeAccountId: initialAccount.id,
       accounts: [initialAccount],
+      deploymentResumes: {},
     };
   }
 }
@@ -1268,6 +1388,7 @@ async function persistUiState(secureAccountIds: ReadonlySet<string> = new Set())
       ...account,
       form: stripPersistedCredentials(account.form),
     })),
+    deploymentResumes: persistedDeploymentResumes,
   };
   await writeStorage(APP_STATE_KEY, JSON.stringify(payload));
 
@@ -1334,11 +1455,63 @@ function appendLog(text: string): void {
   const stampLocale = currentLocale === 'en' ? 'en-US' : 'zh-CN';
   const stamp = new Date().toLocaleTimeString(stampLocale, { hour12: false });
   logsNode.textContent += `[${stamp}] ${text}\n`;
+  logsNode.hidden = false;
+  logsEmptyNode.hidden = true;
+  copyLogsBtn.disabled = false;
   logsNode.scrollTop = logsNode.scrollHeight;
 }
 
 function clearLogs(): void {
   logsNode.textContent = '';
+  logsNode.hidden = true;
+  logsEmptyNode.hidden = false;
+  copyLogsBtn.disabled = true;
+}
+
+function renderOnboarding(): void {
+  const active = getActiveAccount();
+  const form = active?.form;
+  const ready = Boolean(form?.cfApiToken && form?.cfAccountId);
+  onboardingCard.hidden = ready;
+  const dashboardHead = document.querySelector<HTMLElement>('.mi-dashboard-head-card');
+  const dashboardGrid = document.querySelector<HTMLElement>('.mi-dashboard-grid');
+  if (dashboardHead) dashboardHead.hidden = !ready;
+  if (dashboardGrid) dashboardGrid.hidden = !ready;
+  if (!ready) onboardingAction.textContent = t('onboarding_action');
+}
+
+function validateDeployForm(): string[] {
+  const form = getFormState();
+  const missing: string[] = [];
+  if (!form.cfApiToken || !form.cfAccountId) missing.push(t('deploy_missing_credentials'));
+  if (!form.botToken) missing.push(t('deploy_field_bot_token'));
+  if (!form.adminChatId) missing.push(t('deploy_field_admin_chat'));
+  if (!form.workerName) missing.push(t('deploy_field_worker_name'));
+  return missing;
+}
+
+async function testAccountConnection(): Promise<void> {
+  const editing = editingAccountId
+    ? accounts.find((account) => account.id === editingAccountId) || null
+    : null;
+  const token = newAccountTokenInput.value.trim() || editing?.form.cfApiToken || '';
+  const accountId = newAccountIdInput.value.trim();
+  if (!token || !accountId) {
+    accountValidationShown = true;
+    validateAccountModal();
+    return;
+  }
+  testAccountBtn.disabled = true;
+  testAccountBtn.textContent = t('modal_testing_connection');
+  try {
+    await verifyCloudflareCredentials(token, accountId);
+    alert(t('modal_test_success'));
+  } catch (error) {
+    alert(tf('modal_test_failed', { message: error instanceof Error ? error.message : String(error) }));
+  } finally {
+    testAccountBtn.disabled = false;
+    testAccountBtn.textContent = t('modal_test_connection');
+  }
 }
 
 function getFallbackFormState(): DeployFormState {
@@ -2254,6 +2427,13 @@ function setDashboardLoadingState(isLoading: boolean): void {
 }
 
 function renderDashboard(snapshot: DashboardSnapshot | null, externalWarning = '', missingConfig = false): void {
+  const dashboardHead = document.querySelector<HTMLElement>('.mi-dashboard-head-card');
+  const dashboardGrid = document.querySelector<HTMLElement>('.mi-dashboard-grid');
+  onboardingCard.hidden = !missingConfig;
+  if (dashboardHead) dashboardHead.hidden = missingConfig;
+  if (dashboardGrid) dashboardGrid.hidden = missingConfig;
+  if (missingConfig) return;
+
   const active = getActiveAccount();
   const configuredR2Enabled = active?.form.deployImageHosting !== false;
   const r2Visible = snapshot ? snapshot.r2Enabled !== false : configuredR2Enabled;
@@ -2488,6 +2668,8 @@ function applyLocale(): void {
   setText('modalAccountIdLabel', 'modal_account_label');
   setText('modalEmailLabel', 'modal_email_label');
   setText('modalCloneLabel', 'modal_clone');
+  setText('modalTokenHint', 'modal_token_hint');
+  setText('testAccountBtn', 'modal_test_connection');
   setText('cancelAddAccountBtn', 'cancel');
   setText('confirmAddAccountBtn', 'confirm');
 
@@ -2523,6 +2705,13 @@ function applyLocale(): void {
   setText('clearLogBtn', 'btn_clear_logs');
   setText('deployBtn', 'btn_deploy');
   setText('logsTitle', 'logs_title');
+  setText('logsEmpty', 'logs_empty');
+  setText('copyLogsBtn', 'logs_copy');
+  setText('onboardingTitle', 'onboarding_title');
+  setText('onboardingDesc', 'onboarding_desc');
+  setText('onboardingStepAccount', 'onboarding_step_account');
+  setText('onboardingStepCheck', 'onboarding_step_check');
+  setText('onboardingStepDeploy', 'onboarding_step_deploy');
   setText('dashboardTitle', 'dash_title');
   setText('dashboardDesc', 'dash_desc');
   setText('dashLabelWorker', 'dash_worker_resources');
@@ -2568,6 +2757,7 @@ function applyLocale(): void {
   const active = getActiveAccount();
   const cached = active ? dashboardCacheByAccountId.get(active.id) || null : null;
   renderDashboard(cached);
+  renderOnboarding();
 }
 
 function refreshPagesFieldsState(): void {
@@ -2637,6 +2827,7 @@ async function switchAccount(nextId: string): Promise<void> {
   setFormState(active.form);
   renderAccountOptions();
   refreshPagesFieldsState();
+  renderOnboarding();
 
   await persistUiState();
   appendLog(tf('log_account_switched', { name: active.name }));
@@ -2679,6 +2870,29 @@ function clearAccountModalInputs(): void {
   newAccountTokenInput.value = '';
   newAccountIdInput.value = '';
   newAccountEmailInput.value = '';
+  accountValidationShown = false;
+  for (const node of [modalNameError, modalTokenError, modalAccountIdError]) node.hidden = true;
+  for (const input of [newAccountNameInput, newAccountTokenInput, newAccountIdInput]) {
+    input.removeAttribute('aria-invalid');
+  }
+}
+
+function validateAccountModal(): boolean {
+  const editing = editingAccountId
+    ? accounts.find((account) => account.id === editingAccountId) || null
+    : null;
+  const checks = [
+    [newAccountNameInput, modalNameError, Boolean(newAccountNameInput.value.trim())],
+    [newAccountTokenInput, modalTokenError, Boolean(newAccountTokenInput.value.trim() || editing?.form.cfApiToken)],
+    [newAccountIdInput, modalAccountIdError, Boolean(newAccountIdInput.value.trim())],
+  ] as const;
+  for (const [input, errorNode, valid] of checks) {
+    errorNode.hidden = valid;
+    errorNode.textContent = valid ? '' : t('modal_required');
+    if (valid) input.removeAttribute('aria-invalid');
+    else input.setAttribute('aria-invalid', 'true');
+  }
+  return checks.every(([, , valid]) => valid);
 }
 
 function syncAccountModalFromActive(force = false): void {
@@ -2712,6 +2926,7 @@ function openAccountModal(accountId = ''): void {
   }
 
   setText('modalTitle', target ? 'modal_edit_title' : 'modal_title');
+  testAccountBtn.textContent = t('modal_test_connection');
   setPlaceholder('newAccountTokenInput', target ? 'modal_token_edit_ph' : 'modal_token_ph');
   closeAccountManagerModal();
   accountModal.classList.remove('hidden');
@@ -2739,14 +2954,8 @@ async function submitAccountModal(): Promise<void> {
     : null;
   const effectiveToken = rawToken || editing?.form.cfApiToken || '';
 
-  if (!rawName) {
-    alert(t('alert_add_name'));
-    return;
-  }
-  if (!effectiveToken || !rawAccountId) {
-    alert(t('alert_add_required'));
-    return;
-  }
+  accountValidationShown = true;
+  if (!validateAccountModal()) return;
 
   const baseDefaults = defaultFormState || getFallbackFormState();
   if (editing) {
@@ -2811,6 +3020,7 @@ async function deleteAccountById(accountId: string): Promise<void> {
   const wasActive = target.id === activeAccountId;
 
   deploymentResumeByAccountId.delete(target.id);
+  delete persistedDeploymentResumes[target.id];
   secureCredentialWritableAccountIds.delete(target.id);
   accounts = accounts.filter((item) => item.id !== target.id);
   if (accounts.length === 0) return;
@@ -2866,6 +3076,7 @@ async function clearCredentialsById(accountId: string): Promise<void> {
   await persistUiState();
   renderAccountOptions();
   appendLog(tf('log_credentials_cleared', { name: target.name }));
+  renderOnboarding();
 }
 
 function bindAutoProjectName(): void {
@@ -2900,6 +3111,15 @@ function bindAutoProjectName(): void {
 async function onDeploy(): Promise<void> {
   if (busy) return;
 
+  const missing = validateDeployForm();
+  if (missing.length) {
+    deployValidationNode.hidden = false;
+    deployValidationNode.textContent = tf('deploy_validation_title', { fields: missing.join('、') });
+    setActiveView('deploy');
+    return;
+  }
+  deployValidationNode.hidden = true;
+
   try {
     cancelAutoSave();
     clearLogs();
@@ -2912,16 +3132,30 @@ async function onDeploy(): Promise<void> {
     appendLog(t('log_cors_tip'));
 
     const form = getFormState();
-    const fingerprint = buildDeploymentFingerprint(form);
+    const fingerprint = await buildDeploymentFingerprint(form);
     const activeBeforeDeploy = getActiveAccount();
     const pending = activeBeforeDeploy ? deploymentResumeByAccountId.get(activeBeforeDeploy.id) : null;
-    const resumeState = pending?.fingerprint === fingerprint ? pending.state : null;
+    const matchingPending = pending?.fingerprint === fingerprint ? pending : null;
+    if (matchingPending && !confirm(`${t('resume_title')}\n${t('resume_desc')}\n\n${t('resume_continue')} = OK\n${t('resume_restart')} = Cancel`)) {
+      deploymentResumeByAccountId.delete(activeBeforeDeploy!.id);
+      delete persistedDeploymentResumes[activeBeforeDeploy!.id];
+      await persistUiState();
+    }
+    const resumeState = matchingPending && activeBeforeDeploy && deploymentResumeByAccountId.has(activeBeforeDeploy.id)
+      ? matchingPending.state
+      : null;
     if (activeBeforeDeploy && pending && !resumeState) {
       deploymentResumeByAccountId.delete(activeBeforeDeploy.id);
+      delete persistedDeploymentResumes[activeBeforeDeploy.id];
+      await persistUiState();
     }
     if (resumeState) appendLog(t('log_deploy_resume'));
     const result = await runDeploy(form, appendLog, { resumeState });
-    if (activeBeforeDeploy) deploymentResumeByAccountId.delete(activeBeforeDeploy.id);
+    if (activeBeforeDeploy) {
+      deploymentResumeByAccountId.delete(activeBeforeDeploy.id);
+      delete persistedDeploymentResumes[activeBeforeDeploy.id];
+      await persistUiState();
+    }
 
     if (result.bootstrapOk) {
       setStatus(t('status_done'), 'ok');
@@ -2969,10 +3203,13 @@ async function onDeploy(): Promise<void> {
     const active = getActiveAccount();
     const deploymentState = (error as { deploymentState?: DeploymentResumeState })?.deploymentState;
     if (active && deploymentState?.completedSteps?.length) {
-      deploymentResumeByAccountId.set(active.id, {
-        fingerprint: buildDeploymentFingerprint(getFormState()),
-        state: deploymentState,
-      });
+      const resume = {
+        fingerprint: await buildDeploymentFingerprint(getFormState()),
+        state: sanitizeResumeState(deploymentState),
+      };
+      deploymentResumeByAccountId.set(active.id, resume);
+      persistedDeploymentResumes[active.id] = resume;
+      await persistUiState();
     }
     const message = error instanceof Error ? error.message : String(error);
     setStatus(`${t('status_deploy_fail')}: ${message}`, 'error');
@@ -2993,6 +3230,10 @@ async function bootstrap(): Promise<void> {
   currentTheme = sanitizeTheme(loaded.theme);
   accounts = loaded.accounts;
   activeAccountId = loaded.activeAccountId;
+  persistedDeploymentResumes = loaded.deploymentResumes || {};
+  for (const [accountId, resume] of Object.entries(persistedDeploymentResumes)) {
+    if (resume?.fingerprint && resume?.state) deploymentResumeByAccountId.set(accountId, resume);
+  }
 
   const active = getActiveAccount();
   if (!active) {
@@ -3008,6 +3249,8 @@ async function bootstrap(): Promise<void> {
 
   await persistUiState();
   setStatus(t('status_idle'), 'idle');
+  renderOnboarding();
+  clearLogs();
   if (activeViewId === 'home') {
     void refreshDashboard(false);
   }
@@ -3017,6 +3260,7 @@ for (const key of formTextFields) {
   const input = getInput(key);
   if (key === 'workerName' || key === 'pagesProjectName') continue;
   input.addEventListener('input', () => {
+    deployValidationNode.hidden = true;
     queueAutoSave();
   });
   if (key === 'workerUrl' || key === 'verifyPublicBaseUrl' || key === 'imagePublicBaseUrl') {
@@ -3054,6 +3298,24 @@ dashboardRefreshBtn.addEventListener('click', () => {
 
 deployBtn.addEventListener('click', () => {
   void onDeploy();
+});
+
+testAccountBtn.addEventListener('click', () => {
+  void testAccountConnection();
+});
+
+onboardingAction.addEventListener('click', () => {
+  setActiveView('account');
+  openAccountManagerModal();
+});
+
+copyLogsBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(logsNode.textContent || '');
+    alert(t('logs_copied'));
+  } catch {
+    alert(t('logs_copy_failed'));
+  }
 });
 
 deployPanelSelect.addEventListener('change', () => {
@@ -3106,6 +3368,12 @@ confirmAddAccountBtn.addEventListener('click', () => {
   if (busy) return;
   void submitAccountModal();
 });
+
+for (const input of [newAccountNameInput, newAccountTokenInput, newAccountIdInput]) {
+  input.addEventListener('input', () => {
+    if (accountValidationShown) validateAccountModal();
+  });
+}
 
 cloneCurrentInput.addEventListener('change', () => {
   syncAccountModalFromActive(true);

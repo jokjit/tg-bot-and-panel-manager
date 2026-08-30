@@ -159,7 +159,7 @@ import {
   ImagesOutline,
 } from '@vicons/ionicons5';
 import { adminStore, clearAuthState, setLoginState, setStatusData } from '../stores/admin';
-import { fetchStatus, logout } from '../services/api';
+import { fetchStatus, isAuthenticationError, logout } from '../services/api';
 import { setLocale, setTheme, uiStore } from '../stores/ui';
 
 const route = useRoute();
@@ -228,9 +228,13 @@ async function onRefreshStatus(force = true) {
     setLoginState(true, adminStore.username || t('auth.defaultAdmin'));
     message.success(t('app.refreshDone'));
   } catch (error) {
-    clearAuthState();
-    message.error(error.message || t('app.refreshFailed'));
-    router.replace('/login');
+    if (isAuthenticationError(error)) {
+      clearAuthState();
+      message.error(t('app.sessionExpired'));
+      router.replace('/login');
+      return;
+    }
+    message.warning(t('app.statusUnavailable'));
   }
 }
 

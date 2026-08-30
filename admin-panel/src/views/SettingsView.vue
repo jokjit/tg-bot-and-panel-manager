@@ -8,8 +8,8 @@
           <p>{{ t('settings.sectionGeneralDesc') }}</p>
         </div>
         <div class="panel-toolbar">
-          <n-button type="primary" :loading="saving" @click="save">{{ t('settings.save') }}</n-button>
-          <n-button secondary :loading="loading" @click="load(true)">{{ t('settings.reload') }}</n-button>
+          <n-button type="primary" :loading="saving" :disabled="!isDirty" @click="save">{{ t('settings.save') }}</n-button>
+          <n-button secondary :loading="loading" @click="reload">{{ t('settings.reload') }}</n-button>
         </div>
       </div>
     </n-card>
@@ -260,7 +260,8 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { onBeforeRouteLeave } from 'vue-router';
 import {
   NButton,
   NCard,
@@ -274,6 +275,7 @@ import {
   NRadioGroup,
   NSelect,
   NSwitch,
+  useDialog,
   useMessage,
 } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
@@ -295,6 +297,7 @@ const DEFAULT_DATA_CLEANUP_BATCH_SIZE = 200;
 const DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE = 120;
 
 const message = useMessage();
+const dialog = useDialog();
 const { t } = useI18n();
 const loading = ref(false);
 const saving = ref(false);
@@ -302,6 +305,7 @@ const cleanupRunning = ref(false);
 const deletedSweepRunning = ref(false);
 const directoryBackfillRunning = ref(false);
 const motionLevel = ref(uiStore.motion);
+const savedSnapshot = ref('');
 
 const motionOptions = computed(() => [
   { label: t('settings.motionStandard'), value: 'standard' },
@@ -335,6 +339,13 @@ const form = reactive({
   DELETED_ACCOUNT_SWEEP_BATCH_SIZE: DEFAULT_DELETED_ACCOUNT_SWEEP_BATCH_SIZE,
   DELETED_ACCOUNT_SWEEP_AUTO_BOOL: true,
 });
+
+const formSnapshot = computed(() => JSON.stringify(form));
+const isDirty = computed(() => Boolean(savedSnapshot.value) && formSnapshot.value !== savedSnapshot.value);
+
+function markSaved() {
+  savedSnapshot.value = formSnapshot.value;
+}
 
 function toPositiveNumber(value, fallback) {
   const parsed = Number(value);
@@ -393,6 +404,12 @@ function assignConfig(cfg = {}) {
   );
   form.DELETED_ACCOUNT_SWEEP_AUTO_BOOL = String(cfg.DELETED_ACCOUNT_SWEEP_AUTO ?? 'true') !== 'false';
   form.BOT_TOKEN = '';
+  markSaved();
+}
+
+function reload() {
+  if (isDirty.value && !window.confirm(t('app.unsavedConfirm'))) return;
+  load(true);
 }
 
 async function load(force = false) {
@@ -471,7 +488,7 @@ async function save() {
   }
 }
 
-async function runCleanupNow() {
+async function executeCleanup() {
   cleanupRunning.value = true;
   try {
     const response = await runMaintenanceCleanup({
@@ -489,7 +506,19 @@ async function runCleanupNow() {
   }
 }
 
-async function runDeletedSweepNow() {
+function runCleanupNow() {
+  dialog.warning({
+    title: t('settings.cleanupConfirmTitle'),
+    content: t('settings.cleanupConfirmDesc', {
+      days: Math.max(7, Number(form.DATA_RETENTION_DAYS) || DEFAULT_DATA_RETENTION_DAYS),
+    }),
+    positiveText: t('settings.runCleanupNow'),
+    negativeText: t('app.cancel'),
+    onPositiveClick: executeCleanup,
+  });
+}
+
+async function executeDeletedSweep() {
   deletedSweepRunning.value = true;
   try {
     const response = await runDeletedAccountSweep({
@@ -507,6 +536,16 @@ async function runDeletedSweepNow() {
   } finally {
     deletedSweepRunning.value = false;
   }
+}
+
+function runDeletedSweepNow() {
+  dialog.warning({
+    title: t('settings.deletedSweepConfirmTitle'),
+    content: t('settings.deletedSweepConfirmDesc'),
+    positiveText: t('settings.runDeletedSweepNow'),
+    negativeText: t('app.cancel'),
+    onPositiveClick: executeDeletedSweep,
+  });
 }
 
 async function runDirectoryBackfillNow() {
@@ -529,8 +568,18 @@ async function runDirectoryBackfillNow() {
 
 onMounted(() => {
   motionLevel.value = uiStore.motion;
+  window.addEventListener('beforeunload', handleBeforeUnload);
   load(false);
 });
+
+function handleBeforeUnload(event) {
+  if (!isDirty.value) return;
+  event.preventDefault();
+  event.returnValue = '';
+}
+
+onBeforeRouteLeave(() => !isDirty.value || window.confirm(t('app.unsavedConfirm')));
+onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnload));
 </script>
 
 <style scoped>

@@ -105,7 +105,7 @@
                   size="small"
                   :type="user.blacklisted ? 'default' : 'error'"
                   :loading="actionLoading[user.userId] === (user.blacklisted ? 'unban' : 'ban')"
-                  @click="handleUserAction(user, user.blacklisted ? 'unban' : 'ban')"
+                  @click="confirmUserAction(user, user.blacklisted ? 'unban' : 'ban')"
                 >
                   {{ user.blacklisted ? t('users.unban') : t('users.ban') }}
                 </n-button>
@@ -114,7 +114,7 @@
                   size="small"
                   :type="user.trusted ? 'default' : 'success'"
                   :loading="actionLoading[user.userId] === (user.trusted ? 'untrust' : 'trust')"
-                  @click="handleUserAction(user, user.trusted ? 'untrust' : 'trust')"
+                  @click="confirmUserAction(user, user.trusted ? 'untrust' : 'trust')"
                 >
                   {{ user.trusted ? t('users.untrust') : t('users.trust') }}
                 </n-button>
@@ -123,7 +123,7 @@
                   round
                   size="small"
                   :loading="actionLoading[user.userId] === 'restart'"
-                  @click="handleUserAction(user, 'restart')"
+                  @click="confirmUserAction(user, 'restart')"
                 >
                   {{ t('users.restart') }}
                 </n-button>
@@ -290,7 +290,7 @@
               size="small"
               :type="workspaceUser.blacklisted ? 'default' : 'error'"
               :loading="actionLoading[workspaceUser.userId] === (workspaceUser.blacklisted ? 'unban' : 'ban')"
-              @click="handleUserAction(workspaceUser, workspaceUser.blacklisted ? 'unban' : 'ban')"
+              @click="confirmUserAction(workspaceUser, workspaceUser.blacklisted ? 'unban' : 'ban')"
             >
               {{ workspaceUser.blacklisted ? t('users.unban') : t('users.ban') }}
             </n-button>
@@ -298,7 +298,7 @@
               size="small"
               :type="workspaceUser.trusted ? 'default' : 'success'"
               :loading="actionLoading[workspaceUser.userId] === (workspaceUser.trusted ? 'untrust' : 'trust')"
-              @click="handleUserAction(workspaceUser, workspaceUser.trusted ? 'untrust' : 'trust')"
+              @click="confirmUserAction(workspaceUser, workspaceUser.trusted ? 'untrust' : 'trust')"
             >
               {{ workspaceUser.trusted ? t('users.untrust') : t('users.trust') }}
             </n-button>
@@ -306,7 +306,7 @@
               size="small"
               secondary
               :loading="actionLoading[workspaceUser.userId] === 'restart'"
-              @click="handleUserAction(workspaceUser, 'restart')"
+              @click="confirmUserAction(workspaceUser, 'restart')"
             >
               {{ t('users.restart') }}
             </n-button>
@@ -373,12 +373,14 @@ import {
   NInputNumber,
   NModal,
   NTag,
+  useDialog,
   useMessage,
 } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import { fetchHistory, fetchUsers, resolveProtectedMediaUrl, sendReply, updateUserAction } from '../services/api';
 
 const message = useMessage();
+const dialog = useDialog();
 const { t } = useI18n();
 const loading = ref(false);
 const sending = ref(false);
@@ -612,12 +614,29 @@ async function handleUserAction(user, action) {
   }
 }
 
-async function confirmDeleteUser(user) {
+function confirmUserAction(user, action) {
   const userId = String(user?.userId || '').trim();
   if (!userId) return;
-  const ok = window.confirm(t('users.deleteConfirm', { userId }));
-  if (!ok) return;
-  await handleUserAction(user, 'delete');
+  const destructive = ['ban', 'restart'].includes(action);
+  dialog[destructive ? 'warning' : 'info']({
+    title: t(`users.${action}ConfirmTitle`),
+    content: t(`users.${action}Confirm`, { userId }),
+    positiveText: t(`users.${action}`),
+    negativeText: t('app.cancel'),
+    onPositiveClick: () => handleUserAction(user, action),
+  });
+}
+
+function confirmDeleteUser(user) {
+  const userId = String(user?.userId || '').trim();
+  if (!userId) return;
+  dialog.error({
+    title: t('users.deleteConfirmTitle'),
+    content: t('users.deleteConfirm', { userId }),
+    positiveText: t('users.deleteUser'),
+    negativeText: t('app.cancel'),
+    onPositiveClick: () => handleUserAction(user, 'delete'),
+  });
 }
 
 async function sendToUser() {
