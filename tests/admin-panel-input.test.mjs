@@ -77,6 +77,54 @@ test('delete input requires a short-lived confirmation and supports cancellation
   assert.equal(sessions.get(key).stage, 'confirm');
   await tryHandleAdminPanelInputMessage(message('77'), handlers);
   assert.equal(calls.filter((call) => call[0] === 'command').length, 0);
+  assert.deepEqual(calls.filter((call) => call[0] === 'confirm'), [['confirm', 66]]);
   await tryHandleAdminPanelInputMessage(message('/cancel'), handlers);
   assert.equal(sessions.has(key), false);
+});
+
+test('moderation input collects optional content after the user ID', async () => {
+  const { calls, handlers, sessions } = createHandlers();
+  const key = getAdminPanelInputScopeKey(message());
+  await beginAdminPanelInput(message(), 'ban', handlers);
+  await tryHandleAdminPanelInputMessage(message('88'), handlers);
+  assert.equal(sessions.get(key).stage, 'content');
+  await tryHandleAdminPanelInputMessage(message('spam links'), handlers);
+  assert.deepEqual(calls.filter((call) => call[0] === 'command'), [['command', '/ban 88 spam links']]);
+  assert.equal(sessions.has(key), false);
+
+  await beginAdminPanelInput(message(), 'trust', handlers);
+  await tryHandleAdminPanelInputMessage(message('99'), handlers);
+  await tryHandleAdminPanelInputMessage(message('/skip'), handlers);
+  assert.deepEqual(calls.filter((call) => call[0] === 'command').at(-1), ['command', '/trust 99']);
+});
+
+test('numeric input validates and runs list and maintenance parameters', async () => {
+  const { calls, handlers, sessions } = createHandlers();
+  const key = getAdminPanelInputScopeKey(message());
+  await beginAdminPanelInput(message(), 'users', handlers);
+  assert.equal(sessions.get(key).stage, 'value');
+  await tryHandleAdminPanelInputMessage(message('0'), handlers);
+  assert.equal(sessions.has(key), true);
+  await tryHandleAdminPanelInputMessage(message('50'), handlers);
+  assert.deepEqual(calls.filter((call) => call[0] === 'command'), [['command', '/users 50']]);
+
+  await beginAdminPanelInput(message(), 'cleanup', handlers);
+  await tryHandleAdminPanelInputMessage(message('30'), handlers);
+  assert.deepEqual(calls.filter((call) => call[0] === 'command').at(-1), ['command', '/cleanup 30']);
+});
+
+test('config input accepts multiline rules and verification numeric values', async () => {
+  const { calls, handlers, sessions } = createHandlers();
+  const key = getAdminPanelInputScopeKey(message());
+  await beginAdminPanelInput(message(), 'keywords', handlers);
+  assert.equal(sessions.get(key).stage, 'text');
+  await tryHandleAdminPanelInputMessage(message('spam\n广告'), handlers);
+  assert.deepEqual(calls.filter((call) => call[0] === 'command').at(-1), ['command', '/setkeywords spam\n广告']);
+
+  await beginAdminPanelInput(message(), 'verifyobserve', handlers);
+  assert.equal(sessions.get(key).stage, 'value');
+  await tryHandleAdminPanelInputMessage(message('invalid'), handlers);
+  assert.equal(sessions.has(key), true);
+  await tryHandleAdminPanelInputMessage(message('0'), handlers);
+  assert.deepEqual(calls.filter((call) => call[0] === 'command').at(-1), ['command', '/verifyobserve 0']);
 });

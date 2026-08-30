@@ -15,6 +15,7 @@ function createHandlers(overrides = {}) {
       deleteBlacklist: async (userId) => { calls.push(['deleteBlacklist', userId]); },
       sendBlockedMessage: async (userId, text) => { calls.push(['blocked', userId, text]); },
       listBlacklist: async () => [],
+      listTrust: async () => [],
       parseLimit: (value, fallback) => Number(value) || fallback,
       ...overrides,
     },
@@ -57,4 +58,12 @@ test('blacklist command renders entries and unrelated commands fall through', as
   assert.equal(await handleAdminModerationCommand({ trimmed: '/blacklist 5' }, handlers), true);
   assert.match(calls[0][1], /2 \| limit:5/);
   assert.equal(await handleAdminModerationCommand({ trimmed: '/users 5' }, handlers), false);
+});
+
+test('trust list command renders trusted users', async () => {
+  const { calls, handlers } = createHandlers({
+    listTrust: async (limit) => [{ userId: 3, note: `limit:${limit}` }],
+  });
+  assert.equal(await handleAdminModerationCommand({ trimmed: '/trustlist 8' }, handlers), true);
+  assert.match(calls[0][1], /3 \| limit:8/);
 });

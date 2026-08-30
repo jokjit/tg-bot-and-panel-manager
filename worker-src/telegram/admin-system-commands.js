@@ -10,7 +10,7 @@ export async function handleAdminSystemCommand(context = {}, handlers = {}) {
       '2. 也可以使用命令：/reply 用户ID 内容；在话题内可用 /r 内容 快速回复。',
       '3. 若群里“直接发消息回复”无效，请在 @BotFather 里关闭该机器人隐私模式（/setprivacy -> Disable）。',
       '4. 黑名单：/ban 用户ID 原因、/unban 用户ID、/blacklist',
-      '5. 白名单：/trust 用户ID 备注、/untrust 用户ID',
+      '5. 信任用户：/trust 用户ID 备注、/untrust 用户ID、/trustlist',
       '6. 重置验证：/restart 用户ID（或在话题 / 回复上下文中直接发送 /restart）',
       '7. 查询用户：/user 用户ID、/users 20',
       '8. 管理员授权：/adminadd 用户ID、/admindel 用户ID、/admins',
@@ -22,7 +22,7 @@ export async function handleAdminSystemCommand(context = {}, handlers = {}) {
       '14. 清理历史数据：/cleanup （按保留期）或 /cleanup 天数',
       '15. 检测已注销账户并清理：/sweepdeleted',
       '16. 彻底删除用户（含历史消息）：/deleteuser 用户ID',
-      '17. 设置欢迎内容：/setwelcome（下一条消息自动识别并回填）',
+      '17. 设置欢迎内容：/setwelcome [auto/text/photo/video/animation/audio/voice/sticker/document]',
       '18. 取消欢迎设置：/cancelwelcome',
       '19. 召回用户快捷操作按钮：/actions 用户ID（话题内可直接 /actions）',
       '20. 同步 Telegram 斜杠菜单：/setcommands',
@@ -52,6 +52,22 @@ export async function handleAdminSystemCommand(context = {}, handlers = {}) {
     return true;
   }
 
+  if (/^\/(?:setwelcometext|welcometext|welcomecopy)\s*$/i.test(trimmed)) {
+    await handlers.setWelcomeSetup(context.pendingScope, {
+      requestedType: 'text-only',
+      createdBy: context.operator,
+      chatId: Number(context.chatId || 0) || null,
+      threadId: Number(context.threadId || 0) || null,
+    });
+    await handlers.sendNotice([
+      '已开启“仅修改欢迎文案”模式。',
+      '请发送下一条纯文本；当前贴纸或其他媒体类型不会被改变。',
+      '贴纸不支持 caption，实际欢迎时会先发贴纸，再单独发送这段文案。',
+      '可用 /cancelwelcome 取消本次设置。',
+    ].join('\n'));
+    return true;
+  }
+
   const welcomeMatch = trimmed.match(/^\/(?:setwelcome|welcome|setupwelcome)(?:\s+(text|photo|video|animation|audio|voice|sticker|document|auto))?\s*$/i);
   if (welcomeMatch) {
     const requestedType = String(welcomeMatch[1] || 'auto').trim().toLowerCase();
@@ -67,7 +83,8 @@ export async function handleAdminSystemCommand(context = {}, handlers = {}) {
       '请发送下一条消息作为欢迎内容：',
       '1) 纯文本：自动更新 WELCOME_TEXT，并将类型设为 text',
       '2) 图片/视频/动图/音频/语音/贴纸/文件：自动提取 file_id 并更新 WELCOME_MEDIA 与类型',
-      '3) 若媒体带 caption，会同时写入 WELCOME_TEXT',
+      '3) 媒体附带的说明文字会更新欢迎文案；未附带时保留原文案',
+      '4) 贴纸无法附带文字；可设置贴纸后使用 /setwelcometext 单独修改文案',
       '可用 /cancelwelcome 取消本次设置。',
     ];
     await handlers.sendNotice(lines.join('\n'));

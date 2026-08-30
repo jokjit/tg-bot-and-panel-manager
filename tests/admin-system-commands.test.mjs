@@ -40,6 +40,16 @@ test('welcome setup commands persist scope, media type, and operator metadata', 
   assert.deepEqual(calls[0], ['setWelcome', 'chat:1', {
     requestedType: 'photo', createdBy: 'admin:7', chatId: 1, threadId: 2,
   }]);
+  assert.match(calls[1][1], /未附带时保留原文案/);
+  await handleAdminSystemCommand({
+    trimmed: '/setwelcometext', pendingScope: 'chat:1', operator: 'admin:7', chatId: 1, threadId: 2,
+  }, handlers);
+  assert.deepEqual(calls.find((call) => call[0] === 'setWelcome' && call[2].requestedType === 'text-only'), [
+    'setWelcome', 'chat:1', {
+      requestedType: 'text-only', createdBy: 'admin:7', chatId: 1, threadId: 2,
+    },
+  ]);
+  assert.equal(calls.some((call) => call[0] === 'notice' && /贴纸不支持 caption/.test(call[1])), true);
   await handleAdminSystemCommand({ trimmed: '/cancelwelcome', pendingScope: 'chat:1' }, handlers);
   assert.equal(calls.some((call) => call[0] === 'clearWelcome' && call[1] === 'chat:1'), true);
 });

@@ -80,6 +80,9 @@ test('keeps admin and runtime feature decisions deterministic', async () => {
     assert.equal(module.isDeletedAccountSweepAutoEnabled({ DELETED_ACCOUNT_SWEEP_AUTO: 'false' }), false);
     assert.equal(module.isUserPrivateCommand({ text: '/start' }), true);
     assert.equal(module.isUserPrivateCommand({ text: 'hello' }), false);
+    assert.equal(module.resolveWelcomeTextForSetup('保留的欢迎语', '', 'sticker'), '保留的欢迎语');
+    assert.equal(module.resolveWelcomeTextForSetup('旧欢迎语', '新的图片说明', 'photo'), '新的图片说明');
+    assert.equal(module.resolveWelcomeTextForSetup('旧欢迎语', '新纯文本', 'text'), '新纯文本');
   } finally {
     await cleanup();
   }
@@ -136,6 +139,42 @@ test('normalizes message types and storage keys consistently', async () => {
     assert.equal(module.buildGroupAdminMemberCacheKey(-100, 42), '-100:42');
     assert.equal(module.buildMessageHistoryDedupeKey({ telegramMessageId: 9, direction: 'user_to_admin' }, 42), '42:user_to_admin:9');
     assert.equal(module.buildMessageHistoryDedupeKey({ telegramMessageId: 0, direction: 'user_to_admin' }, 42), '');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('does not record message activity before verification passes', async () => {
+  const { module, cleanup } = await loadWorkerModule();
+  try {
+    const existing = {
+      userId: 42,
+      username: 'old_name',
+      firstSeenAt: '2026-01-01T00:00:00.000Z',
+      lastSeenAt: '2026-01-02T00:00:00.000Z',
+      lastMessageType: 'text',
+      lastMessagePreview: 'previous verified message',
+    };
+    const message = {
+      chat: { id: 42, type: 'private' },
+      from: { id: 42, username: 'new_name', first_name: 'Alice' },
+      text: 'message sent while verification is pending',
+    };
+    const now = '2026-01-03T00:00:00.000Z';
+
+    const pending = module.buildIncomingUserProfileBaseRecord(existing, message, now, {
+      recordMessageActivity: false,
+    });
+    assert.equal(pending.username, 'new_name');
+    assert.equal(pending.displayName, 'Alice');
+    assert.equal(pending.lastSeenAt, existing.lastSeenAt);
+    assert.equal(pending.lastMessageType, existing.lastMessageType);
+    assert.equal(pending.lastMessagePreview, existing.lastMessagePreview);
+
+    const verified = module.buildIncomingUserProfileBaseRecord(existing, message, now);
+    assert.equal(verified.lastSeenAt, now);
+    assert.equal(verified.lastMessageType, 'text');
+    assert.equal(verified.lastMessagePreview, message.text);
   } finally {
     await cleanup();
   }

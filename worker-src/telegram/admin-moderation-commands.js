@@ -78,5 +78,20 @@ export async function handleAdminModerationCommand(context = {}, handlers = {}) 
     return true;
   }
 
+  const trustListMatch = trimmed.match(/^\/(?:trustlist|trustedusers)(?:\s+(\d+))?\s*$/i);
+  if (trustListMatch) {
+    const entries = await handlers.listTrust(handlers.parseLimit(trustListMatch[1], 20));
+    if (entries.length === 0) {
+      await handlers.sendNotice('信任用户列表为空。');
+      return true;
+    }
+    const text = [
+      `信任用户列表（最多 ${entries.length} 条）：`,
+      ...entries.map((item) => `- ${item.userId}${item.note ? ` | ${item.note}` : ''}`),
+    ].join('\n');
+    await handlers.sendNotice(text);
+    return true;
+  }
+
   return false;
 }

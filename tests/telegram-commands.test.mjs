@@ -9,6 +9,11 @@ test('Telegram command catalog exposes a minimal user menu and unique admin comm
   assert.equal(catalog.admin.some((item) => item.command === 'reply'), true);
   assert.equal(catalog.admin.some((item) => item.command === 'upload'), true);
   assert.equal(catalog.admin.some((item) => item.command === 'setcommands'), true);
+  assert.equal(catalog.admin.some((item) => item.command === 'trustlist'), true);
+  assert.equal(catalog.admin.some((item) => item.command === 'cleanup'), true);
+  assert.equal(catalog.admin.some((item) => item.command === 'config'), true);
+  assert.equal(catalog.admin.some((item) => item.command === 'keywords'), true);
+  assert.equal(catalog.admin.some((item) => item.command === 'setwelcometext'), true);
   assert.equal(new Set(catalog.admin.map((item) => item.command)).size, catalog.admin.length);
 });
 

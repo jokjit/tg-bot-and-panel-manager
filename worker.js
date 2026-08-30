@@ -144,6 +144,7 @@ import { handleAdminMaintenanceCommand } from './worker-src/telegram/admin-maint
 import { handleAdminAccessCommand } from './worker-src/telegram/admin-access-commands.js';
 import { handleAdminUserCommand } from './worker-src/telegram/admin-user-commands.js';
 import { handleAdminSystemCommand } from './worker-src/telegram/admin-system-commands.js';
+import { handleAdminConfigCommand } from './worker-src/telegram/admin-config-commands.js';
 import { handleAdminActionCallbackCommand } from './worker-src/telegram/admin-action-callback.js';
 import {
   buildHierarchicalAdminCommandPanelKeyboard,
@@ -1027,7 +1028,10 @@ async function handleUpdate(update, env, publicBaseUrl = '', ctx = null) {
     ensureKv(env);
   }
 
-  await upsertUserProfile(env, message);
+  const verificationEnabled = isUserVerificationEnabled(env);
+  await upsertUserProfile(env, message, {
+    recordMessageActivity: !verificationEnabled,
+  });
 
   const blacklistEntry = await getBlacklistEntry(env, message.chat.id);
   if (blacklistEntry) {
@@ -1049,6 +1053,10 @@ async function handleUpdate(update, env, publicBaseUrl = '', ctx = null) {
   });
   if (!verified) {
     return;
+  }
+
+  if (verificationEnabled) {
+    await upsertUserProfile(env, message);
   }
 
   const observationAllowed = await applyPostVerifyObservationLayer(
@@ -1274,6 +1282,17 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
   );
   if (systemHandled) return true;
 
+  const configHandled = await handleAdminConfigCommand(
+    { trimmed },
+    {
+      getConfig: () => getEffectiveSystemConfig(env),
+      updateConfig: (payload) => updateSystemConfig(env, payload),
+      defaultBlockedText: env.BLOCKED_TEXT || DEFAULT_BLOCKED_TEXT,
+      sendNotice: (text) => sendAdminNotice(env, message, text),
+    },
+  );
+  if (configHandled) return true;
+
   const accessHandled = await handleAdminAccessCommand(
     { trimmed, rootAdmin, operator: formatAdminOperator(message.from) },
     {
@@ -1296,6 +1315,7 @@ async function handleAdminCommand(message, env, defaultTargetUserId, publicBaseU
       deleteBlacklist: (userId) => deleteBlacklistEntry(env, userId),
       sendBlockedMessage: (userId, text) => telegram(env, 'sendMessage', { chat_id: userId, text }),
       listBlacklist: (limit) => listBlacklist(env, limit),
+      listTrust: (limit) => listTrust(env, limit),
       parseLimit,
     },
   );
@@ -2016,15 +2036,11 @@ async function notifyWebhookError(env, error, update) {
   }
 }
 
-async function upsertUserProfile(env, message) {
-  if (!env.BOT_KV) return null;
-
-  const userId = Number(message.chat.id);
-  const existing = await getUserProfile(env, userId);
+function buildIncomingUserProfileBaseRecord(existing, message, now, options = {}) {
+  const recordMessageActivity = options.recordMessageActivity !== false;
   const sender = message.from || {};
-  const now = new Date().toISOString();
-  const baseRecord = {
-    userId,
+  return {
+    userId: Number(message.chat.id),
     username: sender.username || existing?.username || null,
     firstName: sender.first_name || existing?.firstName || null,
     lastName: sender.last_name || existing?.lastName || null,
@@ -2032,9 +2048,9 @@ async function upsertUserProfile(env, message) {
       [sender.first_name, sender.last_name].filter(Boolean).join(' ').trim() || existing?.displayName || null,
     chatType: message.chat.type || existing?.chatType || null,
     firstSeenAt: existing?.firstSeenAt || now,
-    lastSeenAt: now,
-    lastMessageType: detectMessageType(message),
-    lastMessagePreview: formatMessagePreview(message),
+    lastSeenAt: recordMessageActivity ? now : existing?.lastSeenAt || null,
+    lastMessageType: recordMessageActivity ? detectMessageType(message) : existing?.lastMessageType || null,
+    lastMessagePreview: recordMessageActivity ? formatMessagePreview(message) : existing?.lastMessagePreview || null,
     hasAvatar: existing?.hasAvatar || false,
     avatarFileId: existing?.avatarFileId || null,
     avatarFileUniqueId: existing?.avatarFileUniqueId || null,
@@ -2050,10 +2066,19 @@ async function upsertUserProfile(env, message) {
     verificationClearedAt: existing?.verificationClearedAt || null,
     verificationUpdatedAt: existing?.verificationUpdatedAt || null,
   };
+}
+
+async function upsertUserProfile(env, message, options = {}) {
+  if (!env.BOT_KV) return null;
+
+  const userId = Number(message.chat.id);
+  const existing = await getUserProfile(env, userId);
+  const now = new Date().toISOString();
+  const baseRecord = buildIncomingUserProfileBaseRecord(existing, message, now, options);
 
   const record = await syncTelegramProfile(env, userId, {
     existing: baseRecord,
-    user: sender,
+    user: message.from || {},
     chat: message.chat,
     persist: false,
   });
@@ -3969,6 +3994,12 @@ function extractWelcomeMediaFileIdFromMessageByType(message, type) {
   return '';
 }
 
+function resolveWelcomeTextForSetup(currentText, incomingText, resolvedType) {
+  const incoming = String(incomingText || '').trim();
+  if (resolvedType === WELCOME_TYPE_TEXT || incoming) return incoming;
+  return String(currentText || '').trim();
+}
+
 async function getPendingWelcomeSetup(env, scopeKey) {
   if (!env?.BOT_KV || !scopeKey) return null;
   return getJson(env.BOT_KV, `${WELCOME_SETUP_PENDING_PREFIX}${scopeKey}`);
@@ -3998,21 +4029,43 @@ async function clearPendingWelcomeSetup(env, scopeKey) {
 }
 
 async function applyWelcomeSetupFromAdminMessage(env, message, pending) {
+  const requestedType = String(pending?.requestedType || 'auto').trim().toLowerCase();
+  const config = await getSystemConfig(env);
+  if (requestedType === 'text-only') {
+    const text = typeof message?.text === 'string' ? message.text.trim() : '';
+    if (!text) {
+      throw new AppError(400, '请发送纯文本欢迎文案，媒体和空文本不会被保存。');
+    }
+    const next = {
+      ...config,
+      WELCOME_TEXT: text,
+      updatedAt: new Date().toISOString(),
+    };
+    await setSystemConfig(env, next);
+    return {
+      welcomeType: getWelcomeType(next),
+      welcomeMedia: String(next.WELCOME_MEDIA || '').trim(),
+      welcomeText: text,
+      welcomeTextPreserved: false,
+      runtimeEnv: await getRuntimeEnv(env),
+    };
+  }
+
   const resolvedType =
-    pending?.requestedType && pending.requestedType !== 'auto'
-      ? normalizeWelcomeTypeForSetup(pending.requestedType)
+    requestedType !== 'auto'
+      ? normalizeWelcomeTypeForSetup(requestedType)
       : detectWelcomeTypeFromMessage(message);
   if (!resolvedType) {
     throw new AppError(400, '未识别到可设置内容，请发送文本或支持的媒体消息。');
   }
 
-  const text = extractMessageText(message).trim();
+  const incomingText = extractMessageText(message).trim();
   const mediaFileId = extractWelcomeMediaFileIdFromMessageByType(message, resolvedType);
   if (resolvedType !== WELCOME_TYPE_TEXT && !mediaFileId) {
     throw new AppError(400, '未能提取媒体 file_id，请改用原生媒体消息发送（不要仅发送链接）。');
   }
 
-  const config = await getSystemConfig(env);
+  const text = resolveWelcomeTextForSetup(config.WELCOME_TEXT, incomingText, resolvedType);
   const next = {
     ...config,
     WELCOME_TYPE: resolvedType,
@@ -4027,6 +4080,7 @@ async function applyWelcomeSetupFromAdminMessage(env, message, pending) {
     welcomeType: resolvedType,
     welcomeMedia: resolvedType === WELCOME_TYPE_TEXT ? '' : mediaFileId,
     welcomeText: text,
+    welcomeTextPreserved: resolvedType !== WELCOME_TYPE_TEXT && !incomingText,
     runtimeEnv,
   };
 }
@@ -4034,7 +4088,7 @@ async function applyWelcomeSetupFromAdminMessage(env, message, pending) {
 async function tryConsumePendingWelcomeSetup(message, env) {
   if (!env?.BOT_KV) return false;
   const text = typeof message?.text === 'string' ? message.text.trim() : '';
-  if (/^\/(?:setwelcome|welcome|setupwelcome|cancelwelcome|cancelsetwelcome|welcomecancel)\b/i.test(text)) {
+  if (/^\/(?:setwelcome|welcome|setupwelcome|setwelcometext|welcometext|welcomecopy|cancelwelcome|cancelsetwelcome|welcomecancel)\b/i.test(text)) {
     return false;
   }
 
@@ -4052,7 +4106,9 @@ async function tryConsumePendingWelcomeSetup(message, env) {
         '欢迎内容设置成功：',
         `类型：${result.welcomeType}`,
         result.welcomeMedia ? `媒体 file_id：${result.welcomeMedia}` : '媒体：已清空',
-        `文案：${result.welcomeText || '（空）'}`,
+        result.welcomeTextPreserved
+          ? `文案：已保留原文案（${result.welcomeText || '空'}）`
+          : `文案：${result.welcomeText || '（空）'}`,
       ].join('\n'),
     );
     return true;
@@ -6844,10 +6900,12 @@ export {
   buildStructuredLogRecord,
   buildWebhookErrorStats,
   buildDeploymentHealthRecord,
+  buildIncomingUserProfileBaseRecord,
   buildD1UserDirectoryRecord,
   buildD1ModerationIndexRecord,
   classifyTopLevelRoute,
   dispatchAdminRoutes,
   classifyVerificationApiRoute,
   dispatchVerificationApiRoute,
+  resolveWelcomeTextForSetup,
 };

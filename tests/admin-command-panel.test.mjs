@@ -26,11 +26,11 @@ function createHandlers() {
 
 test('admin command panel exposes the expected action buttons', () => {
   const buttons = buildAdminCommandPanelKeyboard().inline_keyboard.flat();
-  assert.match(buildAdminCommandPanelText(), /图床上传/);
+  assert.match(buildAdminCommandPanelText(), /逐步引导输入/);
   assert.deepEqual(buttons.map((button) => button.callback_data), [
-    'panel:menu:media', 'panel:menu:messaging',
-    'panel:menu:users', 'panel:menu:moderation',
-    'panel:menu:admin-system', 'panel:help', 'panel:close',
+    'panel:menu:messaging', 'panel:menu:risk',
+    'panel:menu:media', 'panel:menu:admin-system',
+    'panel:menu:maintenance', 'panel:help', 'panel:close',
   ]);
   assert.equal(isAdminCommandPanelCallback('panel:upload'), true);
   assert.equal(isAdminCommandPanelCallback('adm:user:7'), false);
@@ -45,7 +45,7 @@ test('admin command panel routes upload and command actions', async () => {
   await handleAdminCommandPanelCallback({ data: 'panel:commands' }, handlers);
   assert.deepEqual(calls.filter((call) => call[0] === 'upload'), [['upload']]);
   assert.deepEqual(calls.filter((call) => call[0] === 'command'), [
-    ['command', '/panel'], ['command', '/users 10'], ['command', '/setcommands'],
+    ['command', '/panel'], ['command', '/users 20'], ['command', '/setcommands'],
   ]);
 });
 
@@ -70,9 +70,9 @@ test('admin command panel rejects unknown actions', async () => {
 test('hierarchical panel exposes the six top-level categories and accepts nested callbacks', () => {
   const callbacks = buildHierarchicalAdminCommandPanelKeyboard().inline_keyboard.flat().map((button) => button.callback_data);
   assert.deepEqual(callbacks, [
-    'panel:menu:media', 'panel:menu:messaging',
-    'panel:menu:users', 'panel:menu:moderation',
-    'panel:menu:admin-system', 'panel:help', 'panel:close',
+    'panel:menu:messaging', 'panel:menu:risk',
+    'panel:menu:media', 'panel:menu:admin-system',
+    'panel:menu:maintenance', 'panel:help', 'panel:close',
   ]);
   for (const callback of [
     'panel:menu:maintenance', 'panel:guide:deleteuser', 'panel:command:admins',
@@ -104,8 +104,41 @@ test('hierarchical panel routes direct commands and preserves navigation', async
   await handleAdminCommandPanelCallback({ data: 'panel:home' }, handlers);
   assert.deepEqual(calls.filter((call) => call[0] === 'command'), [['command', '/admins']]);
   const edits = calls.filter((call) => call[0] === 'edit').map((call) => call[1]);
-  assert.equal(edits[0].reply_markup.inline_keyboard[0][0].callback_data, 'panel:guide:restart');
-  assert.equal(edits[1].reply_markup.inline_keyboard[0][0].callback_data, 'panel:menu:media');
+  assert.equal(edits[0].reply_markup.inline_keyboard[0][0].callback_data, 'panel:input:restart');
+  assert.equal(edits[1].reply_markup.inline_keyboard[0][0].callback_data, 'panel:menu:messaging');
+});
+
+test('optimized menus expose direct workflows and typed welcome setup', async () => {
+  const { calls, handlers } = createHandlers();
+  await handleAdminCommandPanelCallback({ data: 'panel:menu:risk' }, handlers);
+  await handleAdminCommandPanelCallback({ data: 'panel:input:ban' }, handlers);
+  await handleAdminCommandPanelCallback({ data: 'panel:command:trustlist' }, handlers);
+  await handleAdminCommandPanelCallback({ data: 'panel:command:welcomephoto' }, handlers);
+  await handleAdminCommandPanelCallback({ data: 'panel:command:welcomecopy' }, handlers);
+
+  const risk = calls.find((call) => call[0] === 'edit')[1];
+  const callbacks = risk.reply_markup.inline_keyboard.flat().map((item) => item.callback_data);
+  assert.equal(callbacks.includes('panel:input:restart'), true);
+  assert.equal(callbacks.includes('panel:command:trustlist'), true);
+  assert.deepEqual(calls.filter((call) => call[0] === 'input'), [['input', 'ban']]);
+  assert.deepEqual(calls.filter((call) => call[0] === 'command'), [
+    ['command', '/trustlist'],
+    ['command', '/setwelcome photo'],
+    ['command', '/setwelcometext'],
+  ]);
+});
+
+test('risk panel exposes verification settings and blocking rules', async () => {
+  const { calls, handlers } = createHandlers();
+  await handleAdminCommandPanelCallback({ data: 'panel:menu:risk' }, handlers);
+  await handleAdminCommandPanelCallback({ data: 'panel:menu:verify-config' }, handlers);
+  await handleAdminCommandPanelCallback({ data: 'panel:menu:block-rules' }, handlers);
+  const edits = calls.filter((call) => call[0] === 'edit').map((call) => call[1]);
+  assert.equal(edits[0].reply_markup.inline_keyboard[0][0].callback_data, 'panel:menu:verify-config');
+  assert.equal(edits[1].reply_markup.inline_keyboard[2][0].callback_data, 'panel:command:verifycaptcha');
+  assert.equal(edits[2].reply_markup.inline_keyboard[0][1].callback_data, 'panel:input:keywords');
+  assert.equal(isAdminCommandPanelCallback('panel:confirm:keywords-clear'), true);
+  assert.equal(isAdminCommandPanelCallback('panel:input:blockedtext'), true);
 });
 
 test('panel exposes a plain-ID input action for parameterized commands', async () => {
